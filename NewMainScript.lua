@@ -14,7 +14,7 @@ end
 local function downloadFile(path, func)
 	if not isfile(path) then
 		local suc, res = pcall(function()
-			return game:HttpGet('https://raw.githubusercontent.com/pistonware/pistonware/main/'..select(1, path:gsub('pistonware/', '')), true)
+			return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..select(1, path:gsub('pistonware/', '')), true)
 		end)
 		if not suc or res == '404: Not Found' then
 			error(res)
@@ -46,7 +46,7 @@ end
 if not shared.PistonwareDeveloper then
 	-- version-based autoupdate: compare remote version.txt to the cached one
 	local suc, remoteVersion = pcall(function()
-		return game:HttpGet('https://raw.githubusercontent.com/pistonware/pistonware/main/version.txt', true)
+		return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/version.txt', true)
 	end)
 	remoteVersion = (suc and remoteVersion and remoteVersion ~= '404: Not Found') and remoteVersion:gsub('%s', '') or '0'
 	local cachedVersion = (isfile('pistonware/profiles/version.txt') and readfile('pistonware/profiles/version.txt') or ''):gsub('%s', '')
@@ -61,14 +61,14 @@ end
 
 if shared.SyncConfig then
 	local suc, remoteProfileVersion = pcall(function()
-		return game:HttpGet('https://raw.githubusercontent.com/pistonware/pistonware/main/profiles/profileversion.txt?cb='..tostring(tick()), true)
+		return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/profiles/profileversion.txt?cb='..tostring(tick()), true)
 	end)
 	remoteProfileVersion = (suc and remoteProfileVersion and remoteProfileVersion ~= '404: Not Found') and remoteProfileVersion:gsub('%s', '') or nil
 	local cachedProfileVersion = isfile('pistonware/profiles/profileversion.txt') and readfile('pistonware/profiles/profileversion.txt'):gsub('%s', '') or nil
 
 	if remoteProfileVersion and remoteProfileVersion ~= cachedProfileVersion then
 		local reqSuc, req = pcall(request, {
-			Url = 'https://api.github.com/repos/pistonware/pistonware/contents/profiles',
+			Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles',
 			Method = 'GET'
 		})
 		if reqSuc and req.StatusCode == 200 then
@@ -81,7 +81,7 @@ if shared.SyncConfig then
 					if v.type == 'file' and v.name ~= 'profileversion.txt' and not v.name:find('%.gui%.txt$') then
 						local encodedPath = ({v.path:gsub(' ', '%%20')})[1]
 						local suc2, res2 = pcall(function()
-							return game:HttpGet('https://raw.githubusercontent.com/pistonware/pistonware/main/'..encodedPath..'?cb='..tostring(tick()), true)
+							return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..encodedPath..'?cb='..tostring(tick()), true)
 						end)
 						if suc2 and res2 and res2 ~= '404: Not Found' then
 							writefile('pistonware/'..encodedPath, res2)
@@ -98,10 +98,10 @@ if shared.SyncConfig then
 					shared.PistonwareSyncResult = 'Profile sync failed: all '..failed..' file download(s) failed.'
 				end
 			else
-				shared.PistonwareSyncResult = 'Profile sync failed: could not parse the GitHub file listing.'
+				shared.PistonwareSyncResult = 'Profile sync failed: could not parse the Codeberg file listing.'
 			end
 		else
-			shared.PistonwareSyncResult = 'Profile sync failed: GitHub API request did not return 200 (got '..tostring(reqSuc and req.StatusCode or 'a request error')..'). This is commonly GitHub API rate-limiting on unauthenticated requests.'
+			shared.PistonwareSyncResult = 'Profile sync failed: Codeberg API request did not return 200 (got '..tostring(reqSuc and req.StatusCode or 'a request error')..'). This is commonly Codeberg API rate-limiting on unauthenticated requests.'
 		end
 	end
 end
@@ -109,7 +109,7 @@ end
 -- catvape profile system credit to maxlasertech
 if #listfiles('pistonware/profiles') < 3 then
 	local req = request({
-		Url = 'https://api.github.com/repos/pistonware/pistonware/contents/profiles',
+		Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles',
 		Method = 'GET'
 	})
 	if req.StatusCode == 200 then
