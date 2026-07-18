@@ -1,4 +1,5 @@
 --This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
+--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
 local Loaded = game:IsLoaded()
 if not Loaded then
 	repeat task.wait() until game:IsLoaded()
@@ -43,6 +44,39 @@ local function downloadFile(path, func)
 		writefile(path, res)
 	end
 	return (func or readfile)(path)
+end
+
+-- Downloads every file in a Codeberg folder concurrently instead of one HttpGet per getcustomasset call,
+-- so GUI construction reads already-cached files instead of blocking on ~190 sequential round trips.
+local function prefetchFolder(folder)
+	local reqSuc, req = pcall(request, {
+		Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/'..folder,
+		Method = 'GET'
+	})
+	if not (reqSuc and req.StatusCode == 200) then return end
+	local bodySuc, body = pcall(function()
+		return cloneref(game:GetService('HttpService')):JSONDecode(req.Body)
+	end)
+	if not (bodySuc and body and typeof(body) == 'table') then return end
+
+	local pending = 0
+	local done = Instance.new('BindableEvent')
+	for _, v in body do
+		if v.type == 'file' and not isfile('pistonware/'..folder..'/'..v.name) then
+			pending += 1
+			task.spawn(function()
+				pcall(downloadFile, 'pistonware/'..folder..'/'..v.name)
+				pending -= 1
+				if pending <= 0 then
+					done:Fire()
+				end
+			end)
+		end
+	end
+	if pending > 0 then
+		done.Event:Wait()
+	end
+	done:Destroy()
 end
 
 local function finishLoading()
@@ -105,6 +139,10 @@ end
 
 	if not isfolder('pistonware/assets/'..gui) then
 		makefolder('pistonware/assets/'..gui)
+	end
+	pcall(prefetchFolder, 'assets/'..gui)
+	if gui ~= 'new' then
+		pcall(prefetchFolder, 'assets/new')
 	end
 	vape = loadstring(downloadFile('pistonware/guis/'..gui..'.lua'), 'gui')()
 	shared.vape = vape
