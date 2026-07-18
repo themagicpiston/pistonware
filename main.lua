@@ -1,11 +1,4 @@
 --This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
---This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
-local Loaded = game:IsLoaded()
-if not Loaded then
-	repeat task.wait() until game:IsLoaded()
-	task.wait(identifyexecutor() == 'Opiumware' and 30 or 5)
-end
-repeat task.wait() until game:IsLoaded()
 if shared.vape then shared.vape:Uninject() end
 
 local vape
@@ -148,6 +141,11 @@ end
 	shared.vape = vape
 
 if not shared.VapeIndependent then
+	-- downloading doesn't need the game loaded; only wait here, right before touching game/character state
+	if not game:IsLoaded() then
+		repeat task.wait() until game:IsLoaded()
+		task.wait(identifyexecutor() == 'Opiumware' and 30 or 5)
+	end
 	loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
 	if isfile('pistonware/games/'..game.PlaceId..'.lua') then
 		loadstring(readfile('pistonware/games/'..game.PlaceId..'.lua'), tostring(game.PlaceId))(...)
