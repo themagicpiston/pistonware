@@ -39,6 +39,32 @@ local function downloadFile(path, func)
 	return (func or readfile)(path)
 end
 
+-- Standalone progress label for the prefetch phase, since it runs before the GUI framework
+-- (and its own downloader label) exists yet.
+local downloaderGui, downloaderLabel
+local function updateDownloader(text)
+	if not downloaderGui then
+		downloaderGui = Instance.new('ScreenGui')
+		downloaderGui.Name = 'PistonwareDownloader'
+		downloaderGui.ResetOnSpawn = false
+		downloaderGui.Parent = cloneref(game:GetService('CoreGui'))
+		downloaderLabel = Instance.new('TextLabel')
+		downloaderLabel.Size = UDim2.new(1, 0, 0, 40)
+		downloaderLabel.BackgroundTransparency = 1
+		downloaderLabel.TextStrokeTransparency = 0
+		downloaderLabel.TextSize = 20
+		downloaderLabel.TextColor3 = Color3.new(1, 1, 1)
+		downloaderLabel.Parent = downloaderGui
+	end
+	downloaderLabel.Text = text
+end
+local function destroyDownloader()
+	if downloaderGui then
+		downloaderGui:Destroy()
+		downloaderGui, downloaderLabel = nil, nil
+	end
+end
+
 -- Downloads every file in a Codeberg folder concurrently instead of one HttpGet per getcustomasset call,
 -- so GUI construction reads already-cached files instead of blocking on ~190 sequential round trips.
 local function prefetchFolder(folder)
@@ -51,23 +77,28 @@ local function prefetchFolder(folder)
 	end)
 	if not (bodySuc and body and typeof(body) == 'table') then return end
 
-	local pending = 0
-	local done = Instance.new('BindableEvent')
+	local toFetch = {}
 	for _, v in body do
 		if v.type == 'file' and not isfile('pistonware/'..folder..'/'..v.name) then
-			pending += 1
-			task.spawn(function()
-				pcall(downloadFile, 'pistonware/'..folder..'/'..v.name)
-				pending -= 1
-				if pending <= 0 then
-					done:Fire()
-				end
-			end)
+			table.insert(toFetch, v.name)
 		end
 	end
-	if pending > 0 then
-		done.Event:Wait()
+	if #toFetch <= 0 then return end
+
+	local completed, total = 0, #toFetch
+	local done = Instance.new('BindableEvent')
+	updateDownloader('Downloading '..folder..' ('..completed..'/'..total..')')
+	for _, name in toFetch do
+		task.spawn(function()
+			pcall(downloadFile, 'pistonware/'..folder..'/'..name)
+			completed += 1
+			updateDownloader('Downloading '..folder..' ('..completed..'/'..total..')')
+			if completed >= total then
+				done:Fire()
+			end
+		end)
 	end
+	done.Event:Wait()
 	done:Destroy()
 end
 
@@ -136,6 +167,7 @@ end
 	if gui ~= 'new' then
 		pcall(prefetchFolder, 'assets/new')
 	end
+	destroyDownloader()
 	vape = loadstring(downloadFile('pistonware/guis/'..gui..'.lua'), 'gui')()
 	shared.vape = vape
 
