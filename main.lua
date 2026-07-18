@@ -1,4 +1,9 @@
 --This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
+local Loaded = game:IsLoaded()
+if not Loaded then
+	repeat task.wait() until game:IsLoaded()
+	task.wait(identifyexecutor() == 'Opiumware' and 30 or 5)
+end
 repeat task.wait() until game:IsLoaded()
 if shared.vape then shared.vape:Uninject() end
 
