@@ -1,4 +1,5 @@
 --This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
+--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
 if shared.vape then shared.vape:Uninject() end
 
 local vape
@@ -42,13 +43,12 @@ end
 -- Downloads every file in a Codeberg folder concurrently instead of one HttpGet per getcustomasset call,
 -- so GUI construction reads already-cached files instead of blocking on ~190 sequential round trips.
 local function prefetchFolder(folder)
-	local reqSuc, req = pcall(request, {
-		Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/'..folder,
-		Method = 'GET'
-	})
-	if not (reqSuc and req.StatusCode == 200) then return end
+	local reqSuc, res = pcall(function()
+		return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/'..folder, true)
+	end)
+	if not (reqSuc and res and res ~= '404: Not Found') then return end
 	local bodySuc, body = pcall(function()
-		return cloneref(game:GetService('HttpService')):JSONDecode(req.Body)
+		return cloneref(game:GetService('HttpService')):JSONDecode(res)
 	end)
 	if not (bodySuc and body and typeof(body) == 'table') then return end
 
