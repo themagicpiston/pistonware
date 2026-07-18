@@ -46,7 +46,7 @@ end
 if not shared.PistonwareDeveloper then
 	-- version-based autoupdate: compare remote version.txt to the cached one
 	local suc, remoteVersion = pcall(function()
-		return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/profiles/version.txt', true)
+		return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/version.txt', true)
 	end)
 	remoteVersion = (suc and remoteVersion and remoteVersion ~= '404: Not Found') and remoteVersion:gsub('%s', '') or '0'
 	local cachedVersion = (isfile('pistonware/profiles/version.txt') and readfile('pistonware/profiles/version.txt') or ''):gsub('%s', '')
@@ -106,21 +106,23 @@ if shared.SyncConfig then
 	end
 end
 
-if #listfiles('pistonware/profiles') < 3 then
-	local req = request({
-		Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles',
-		Method = 'GET'
-	})
-	if req.StatusCode == 200 then
-		local body = cloneref(game:GetService('HttpService')):JSONDecode(req.Body)
-		if body and typeof(body) == 'table' then
-			for _, v in body do
-				if v.type == 'file' then
-					pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
+pcall(function()
+	if #listfiles('pistonware/profiles') < 3 then
+		local req = request({
+			Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles',
+			Method = 'GET'
+		})
+		if req.StatusCode == 200 then
+			local body = cloneref(game:GetService('HttpService')):JSONDecode(req.Body)
+			if body and typeof(body) == 'table' then
+				for _, v in body do
+					if v.type == 'file' then
+						pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
+					end
 				end
 			end
 		end
 	end
-end
+end)
 
 return loadstring(downloadFile('pistonware/main.lua'), 'main')()
