@@ -1,3 +1,10 @@
+pcall(function()
+	game:GetService('StarterGui'):SetCore('SendNotification', {
+		Title = 'Pistonware',
+		Text = 'Script is loading please be patient',
+		Duration = 5
+	})
+end)
 local isfile = isfile or function(file)
 	local suc, res = pcall(function()
 		return readfile(file)
