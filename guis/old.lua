@@ -221,7 +221,7 @@ local function downloadFile(path, func)
 	if not isfile(path) then
 		createDownloader(path)
 		local suc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..select(1, path:gsub('pistonware/', '')), true)
+			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..select(1, path:gsub('pistonware/', '')), true)
 		end)
 		if not suc or res == '404: Not Found' then
 			error(res)
@@ -3731,7 +3731,7 @@ topbar:CreateDropdown({
 			if shared.PistonwareDeveloper then
 				loadstring(readfile('pistonware/loader.lua'), 'loader')()
 			else
-				loadstring(game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/loader.lua', true))()
+				loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
 			end
 		end
 	end,
@@ -3769,7 +3769,7 @@ topbar:CreateButton({
 		if shared.PistonwareDeveloper then
 			loadstring(readfile('pistonware/loader.lua'), 'loader')()
 		else
-			loadstring(game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/loader.lua', true))()
+			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
 		end
 	end,
 	Tooltip = 'This will set your profile to the default settings of Vape'
@@ -3833,7 +3833,7 @@ topbar:CreateButton({
 		if shared.PistonwareDeveloper then
 			loadstring(readfile('pistonware/loader.lua'), 'loader')()
 		else
-			loadstring(game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/loader.lua', true))()
+			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
 		end
 	end,
 	Tooltip = 'Reloads vape for debugging purposes'
