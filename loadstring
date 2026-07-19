@@ -1,1 +1,1 @@
-loadstring(game:HttpGet("https://codeberg.org/pistonware/pistonware/raw/branch/main/loader.lua", true))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/main/loader.lua", true))()
