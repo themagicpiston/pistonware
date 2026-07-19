@@ -46,7 +46,7 @@ end
 if not shared.PistonwareDeveloper then
 	-- version-based autoupdate: compare remote version.txt to the cached one
 	local suc, remoteVersion = pcall(function()
-		return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/profiles/version.txt', true)
+		return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/version.txt', true)
 	end)
 	remoteVersion = (suc and remoteVersion and remoteVersion ~= '404: Not Found') and remoteVersion:gsub('%s', '') or '0'
 	local cachedVersion = (isfile('pistonware/profiles/version.txt') and readfile('pistonware/profiles/version.txt') or ''):gsub('%s', '')
@@ -67,42 +67,30 @@ if shared.SyncConfig then
 	local cachedProfileVersion = isfile('pistonware/profiles/profileversion.txt') and readfile('pistonware/profiles/profileversion.txt'):gsub('%s', '') or nil
 
 	if remoteProfileVersion and remoteProfileVersion ~= cachedProfileVersion then
-		local reqSuc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles', true)
-		end)
-		if reqSuc and res and res ~= '404: Not Found' then
+		local reqSuc, req = pcall(request, {
+			Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles',
+			Method = 'GET'
+		})
+		if reqSuc and req.StatusCode == 200 then
 			local bodySuc, body = pcall(function()
-				return cloneref(game:GetService('HttpService')):JSONDecode(res)
+				return cloneref(game:GetService('HttpService')):JSONDecode(req.Body)
 			end)
 			if bodySuc and body and typeof(body) == 'table' then
 				local synced, failed = 0, 0
-				local pending = 0
-				local done = Instance.new('BindableEvent')
 				for _, v in body do
 					if v.type == 'file' and v.name ~= 'profileversion.txt' and not v.name:find('%.gui%.txt$') then
-						pending += 1
 						local encodedPath = ({v.path:gsub(' ', '%%20')})[1]
-						task.spawn(function()
-							local suc2, res2 = pcall(function()
-								return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..encodedPath..'?cb='..tostring(tick()), true)
-							end)
-							if suc2 and res2 and res2 ~= '404: Not Found' then
-								writefile('pistonware/'..encodedPath, res2)
-								synced += 1
-							else
-								failed += 1
-							end
-							pending -= 1
-							if pending <= 0 then
-								done:Fire()
-							end
+						local suc2, res2 = pcall(function()
+							return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..encodedPath..'?cb='..tostring(tick()), true)
 						end)
+						if suc2 and res2 and res2 ~= '404: Not Found' then
+							writefile('pistonware/'..encodedPath, res2)
+							synced += 1
+						else
+							failed += 1
+						end
 					end
 				end
-				if pending > 0 then
-					done.Event:Wait()
-				end
-				done:Destroy()
 				if synced > 0 or failed == 0 then
 					writefile('pistonware/profiles/profileversion.txt', remoteProfileVersion)
 					shared.PistonwareSyncResult = ('Synced %d profile file(s)%s.'):format(synced, failed > 0 and (', '..failed..' failed') or '')
@@ -113,7 +101,7 @@ if shared.SyncConfig then
 				shared.PistonwareSyncResult = 'Profile sync failed: could not parse the Codeberg file listing.'
 			end
 		else
-			shared.PistonwareSyncResult = 'Profile sync failed: could not reach the Codeberg API (this is commonly rate-limiting on unauthenticated requests).'
+			shared.PistonwareSyncResult = 'Profile sync failed: Codeberg API request did not return 200 (got '..tostring(reqSuc and req.StatusCode or 'a request error')..'). This is commonly Codeberg API rate-limiting on unauthenticated requests.'
 		end
 	end
 end
@@ -121,32 +109,18 @@ end
 -- catvape profile system credit to maxlasertech
 pcall(function()
 	if #listfiles('pistonware/profiles') < 3 then
-		local reqSuc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles', true)
-		end)
-		if reqSuc and res and res ~= '404: Not Found' then
-			local bodySuc, body = pcall(function()
-				return cloneref(game:GetService('HttpService')):JSONDecode(res)
-			end)
-			if bodySuc and body and typeof(body) == 'table' then
-				local pending = 0
-				local done = Instance.new('BindableEvent')
+		local req = request({
+			Url = 'https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles',
+			Method = 'GET'
+		})
+		if req.StatusCode == 200 then
+			local body = cloneref(game:GetService('HttpService')):JSONDecode(req.Body)
+			if body and typeof(body) == 'table' then
 				for _, v in body do
 					if v.type == 'file' then
-						pending += 1
-						task.spawn(function()
-							pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
-							pending -= 1
-							if pending <= 0 then
-								done:Fire()
-							end
-						end)
+						pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
 					end
 				end
-				if pending > 0 then
-					done.Event:Wait()
-				end
-				done:Destroy()
 			end
 		end
 	end
