@@ -17,24 +17,23 @@ end
 
 local function downloadFile(path, func)
 	if not isfile(path) then
-		-- Fetched via the contents API (base64 JSON) instead of the raw URL: Codeberg rate-limits
-		-- raw file fetches under a much stricter "git_op" bucket (250 req/10min) than the API's
-		-- "baseline" bucket (2000 req/10min), and a cold install downloads dozens of files.
-		-- Retried a few times: Codeberg's backend intermittently 504s (~5% of raw requests observed),
+		-- games/bedwars.lua only exists in the Codeberg repo (kept private/obfuscated there);
+		-- everything else now lives in the GitHub repo.
+		local relPath = select(1, path:gsub('pistonware/', ''))
+		local isBedwars = relPath == 'games/bedwars.lua'
+		-- Retried a few times: raw file hosts intermittently 504 (~5% observed on Codeberg's),
 		-- returning an empty body that would otherwise get cached as a corrupt/empty file.
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
-				return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/'..select(1, path:gsub('pistonware/', '')), true)
+				if isBedwars then
+					return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua', true)
+				end
+				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
 			end)
 			if suc and res and res ~= '' and res ~= '404: Not Found' then
-				local decodeSuc, body = pcall(function()
-					return cloneref(game:GetService('HttpService')):JSONDecode(res)
-				end)
-				if decodeSuc and body and body.content then
-					content = cloneref(game:GetService('HttpService')):Base64Decode(body.content)
-					break
-				end
+				content = res
+				break
 			end
 			if attempt < 4 then
 				task.wait(attempt)
@@ -60,7 +59,7 @@ end
 pcall(function()
 	if #listfiles('pistonware/profiles') < 3 then
 		local reqSuc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles', true)
+			return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
 		end)
 		if reqSuc and res and res ~= '404: Not Found' then
 			local bodySuc, body = pcall(function()
