@@ -10,16 +10,35 @@ end
 
 local function downloadFile(path, func)
 	if not isfile(path) then
-		local suc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..select(1, path:gsub('pistonware/', '')), true)
-		end)
-		if not suc or res == '404: Not Found' then
-			error(res)
+		-- games/bedwars.lua only exists in the Codeberg repo (kept private/obfuscated there);
+		-- everything else now lives in the GitHub repo.
+		local relPath = select(1, path:gsub('pistonware/', ''))
+		local isBedwars = relPath == 'games/bedwars.lua'
+		-- Retried a few times: raw file hosts intermittently 504 (~5% observed on Codeberg's),
+		-- returning an empty body that would otherwise get cached as a corrupt/empty file.
+		local content
+		for attempt = 1, 4 do
+			local suc, res = pcall(function()
+				if isBedwars then
+					return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua', true)
+				end
+				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
+			end)
+			if suc and res and res ~= '' and res ~= '404: Not Found' then
+				content = res
+				break
+			end
+			if attempt < 4 then
+				task.wait(attempt)
+			end
+		end
+		if not content then
+			error('failed to download '..path..' after 4 attempts')
 		end
 		if path:find('.lua') then
-			res = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res
+			content = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..content
 		end
-		writefile(path, res)
+		writefile(path, content)
 	end
 	return (func or readfile)(path)
 end
@@ -34,7 +53,7 @@ end
 pcall(function()
 	if #listfiles('pistonware/profiles') < 3 then
 		local reqSuc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/profiles', true)
+			return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
 		end)
 		if reqSuc and res and res ~= '404: Not Found' then
 			local bodySuc, body = pcall(function()
