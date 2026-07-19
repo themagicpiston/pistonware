@@ -25,16 +25,35 @@ local playersService = cloneref(game:GetService('Players'))
 
 local function downloadFile(path, func)
 	if not isfile(path) then
-		local suc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..select(1, path:gsub('pistonware/', '')), true)
-		end)
-		if not suc or res == '404: Not Found' then
-			error(res)
+		-- games/bedwars.lua only exists in the Codeberg repo (kept private/obfuscated there);
+		-- everything else now lives in the GitHub repo.
+		local relPath = select(1, path:gsub('pistonware/', ''))
+		local isBedwars = relPath == 'games/bedwars.lua'
+		-- Retried a few times: raw file hosts intermittently 504 (~5% observed on Codeberg's),
+		-- returning an empty body that would otherwise get cached as a corrupt/empty file.
+		local content
+		for attempt = 1, 4 do
+			local suc, res = pcall(function()
+				if isBedwars then
+					return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua', true)
+				end
+				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
+			end)
+			if suc and res and res ~= '' and res ~= '404: Not Found' then
+				content = res
+				break
+			end
+			if attempt < 4 then
+				task.wait(attempt)
+			end
+		end
+		if not content then
+			error('failed to download '..path..' after 4 attempts')
 		end
 		if path:find('.lua') then
-			res = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res
+			content = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..content
 		end
-		writefile(path, res)
+		writefile(path, content)
 	end
 	return (func or readfile)(path)
 end
@@ -65,11 +84,11 @@ local function destroyDownloader()
 	end
 end
 
--- Downloads every file in a Codeberg folder concurrently instead of one HttpGet per getcustomasset call,
+-- Downloads every file in a repo folder concurrently instead of one HttpGet per getcustomasset call,
 -- so GUI construction reads already-cached files instead of blocking on ~190 sequential round trips.
 local function prefetchFolder(folder)
 	local reqSuc, res = pcall(function()
-		return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/contents/'..folder, true)
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/'..folder, true)
 	end)
 	if not (reqSuc and res and res ~= '404: Not Found') then return end
 	local bodySuc, body = pcall(function()
@@ -124,7 +143,7 @@ local function finishLoading()
 				if shared.PistonwareDeveloper then
 					loadstring(readfile('pistonware/loader.lua'), 'loader')()
 				else
-					loadstring(game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/loader.lua', true), 'loader')()
+					loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')()
 				end
 			]]
 			if shared.PistonwareDeveloper then
@@ -183,7 +202,7 @@ if not shared.VapeIndependent then
 	else
 		if not shared.PistonwareDeveloper then
 			local suc, res = pcall(function()
-				return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/'..game.PlaceId..'.lua', true)
+				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/games/'..game.PlaceId..'.lua', true)
 			end)
 			if suc and res ~= '404: Not Found' then
 				loadstring(downloadFile('pistonware/games/'..game.PlaceId..'.lua'), tostring(game.PlaceId))(...)
