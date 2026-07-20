@@ -18,40 +18,103 @@ local cloneref = cloneref or function(ref)
 	return ref
 end
 
--- Shows a Yes/No Roblox notification and blocks until answered or `duration` seconds pass.
+-- Shows a self-built Yes/No prompt and blocks until answered or `duration` seconds pass.
+-- (Not StarterGui:SetCore's Button1/Button2/Callback -- some executors render the buttons
+-- but never actually invoke the Callback, silently hanging until the timeout.)
 -- Returns true (Yes), false (No), or nil (dismissed/timed out with no response).
 local function askYesNo(title, text, duration)
 	local settled, result = false, nil
 	local done = Instance.new('BindableEvent')
+
 	local suc = pcall(function()
-		game:GetService('StarterGui'):SetCore('SendNotification', {
-			Title = title,
-			Text = text,
-			Duration = duration,
-			Button1 = 'Yes',
-			Button2 = 'No',
-			Callback = function(input)
-				if settled then return end
-				settled = true
-				result = input
-				done:Fire()
-			end
-		})
+		local gui = Instance.new('ScreenGui')
+		gui.Name = 'PistonwarePrompt'
+		gui.ResetOnSpawn = false
+		gui.DisplayOrder = 999
+		gui.Parent = cloneref(game:GetService('CoreGui'))
+
+		local frame = Instance.new('Frame')
+		frame.Size = UDim2.new(0, 300, 0, 120)
+		frame.Position = UDim2.new(1, -320, 1, -150)
+		frame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+		frame.BorderSizePixel = 0
+		frame.Parent = gui
+
+		local corner = Instance.new('UICorner')
+		corner.CornerRadius = UDim.new(0, 6)
+		corner.Parent = frame
+
+		local titleLabel = Instance.new('TextLabel')
+		titleLabel.Size = UDim2.new(1, -16, 0, 24)
+		titleLabel.Position = UDim2.new(0, 8, 0, 6)
+		titleLabel.BackgroundTransparency = 1
+		titleLabel.Font = Enum.Font.SourceSansBold
+		titleLabel.TextSize = 18
+		titleLabel.TextColor3 = Color3.new(1, 1, 1)
+		titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+		titleLabel.Text = title
+		titleLabel.Parent = frame
+
+		local textLabel = Instance.new('TextLabel')
+		textLabel.Size = UDim2.new(1, -16, 0, 44)
+		textLabel.Position = UDim2.new(0, 8, 0, 32)
+		textLabel.BackgroundTransparency = 1
+		textLabel.Font = Enum.Font.SourceSans
+		textLabel.TextWrapped = true
+		textLabel.TextSize = 15
+		textLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+		textLabel.TextXAlignment = Enum.TextXAlignment.Left
+		textLabel.TextYAlignment = Enum.TextYAlignment.Top
+		textLabel.Text = text
+		textLabel.Parent = frame
+
+		local function finish(value)
+			if settled then return end
+			settled = true
+			result = value
+			gui:Destroy()
+			done:Fire()
+		end
+
+		local yesButton = Instance.new('TextButton')
+		yesButton.Size = UDim2.new(0, 138, 0, 30)
+		yesButton.Position = UDim2.new(0, 8, 1, -36)
+		yesButton.BackgroundColor3 = Color3.fromRGB(60, 150, 80)
+		yesButton.TextColor3 = Color3.new(1, 1, 1)
+		yesButton.Font = Enum.Font.SourceSansBold
+		yesButton.TextSize = 16
+		yesButton.Text = 'Yes'
+		yesButton.Parent = frame
+		yesButton.MouseButton1Click:Connect(function()
+			finish(true)
+		end)
+
+		local noButton = Instance.new('TextButton')
+		noButton.Size = UDim2.new(0, 138, 0, 30)
+		noButton.Position = UDim2.new(1, -146, 1, -36)
+		noButton.BackgroundColor3 = Color3.fromRGB(150, 60, 60)
+		noButton.TextColor3 = Color3.new(1, 1, 1)
+		noButton.Font = Enum.Font.SourceSansBold
+		noButton.TextSize = 16
+		noButton.Text = 'No'
+		noButton.Parent = frame
+		noButton.MouseButton1Click:Connect(function()
+			finish(false)
+		end)
+
+		task.delay(duration, function()
+			finish(nil)
+		end)
 	end)
+
 	if not suc then
 		done:Destroy()
 		return nil
 	end
-	task.delay(duration, function()
-		if settled then return end
-		settled = true
-		done:Fire()
-	end)
+
 	done.Event:Wait()
 	done:Destroy()
-	if result == 'Button1' then return true end
-	if result == 'Button2' then return false end
-	return nil
+	return result
 end
 
 local function downloadFile(path, func)
