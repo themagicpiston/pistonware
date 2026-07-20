@@ -186,6 +186,19 @@ local function downloadProfilesListing(body)
 	done:Destroy()
 end
 
+-- Returns the sha of the most recent commit that touched the profiles/ path on GitHub, or nil on failure.
+local function fetchProfilesCommit()
+	local reqSuc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1', true)
+	end)
+	if not (reqSuc and res and res ~= '404: Not Found') then return nil end
+	local bodySuc, body = pcall(function()
+		return cloneref(game:GetService('HttpService')):JSONDecode(res)
+	end)
+	if not (bodySuc and body and typeof(body) == 'table' and body[1] and body[1].sha) then return nil end
+	return body[1].sha
+end
+
 -- catvape profile system credit to maxlasertech
 pcall(function()
 	-- Only prompt once per session: shared.vapereload is set by the teleport/reinject
@@ -193,6 +206,7 @@ pcall(function()
 	if shared.vapereload then return end
 
 	local profileCheckPath = 'pistonware/profiles/profilecheck.txt'
+	local profileCommitPath = 'pistonware/profiles/profilecommit.txt'
 	local profileCheck = isfile(profileCheckPath) and readfile(profileCheckPath):gsub('%s', '') or nil
 
 	if not profileCheck then
@@ -204,27 +218,40 @@ pcall(function()
 				if body then
 					downloadProfilesListing(body)
 				end
+				-- record the commit this download reflects, so future sessions can tell if profiles/ has since changed
+				local commit = fetchProfilesCommit()
+				if commit then
+					writefile(profileCommitPath, commit)
+				end
 			elseif wantsDownload == false then
 				writefile(profileCheckPath, 'false')
 			end
 			-- if there was no response (dismissed/timed out), leave profilecheck.txt unwritten so we ask again next session
 		end
 	elseif profileCheck == 'true' then
-		local wantsSync = askYesNo('Pistonware', 'Would you like to sync to the latest config?', 300)
-		if wantsSync == true then
-			local body = fetchProfilesListing()
-			if body then
-				-- only touch files that actually exist in the GitHub profiles folder; anything else local is left alone
-				for _, v in body do
-					if v.type == 'file' then
-						local localPath = 'pistonware/'..({v.path:gsub(' ', '%%20')})[1]
-						if isfile(localPath) then
-							delfile(localPath)
+		-- Only ask if profiles/ has actually changed on GitHub since our last sync, instead of
+		-- asking every single session regardless of whether anything is actually out of date.
+		local latestCommit = fetchProfilesCommit()
+		local cachedCommit = isfile(profileCommitPath) and readfile(profileCommitPath):gsub('%s', '') or nil
+		if latestCommit and latestCommit ~= cachedCommit then
+			local wantsSync = askYesNo('Pistonware', 'Would you like to sync to the latest config?', 300)
+			if wantsSync == true then
+				local body = fetchProfilesListing()
+				if body then
+					-- only touch files that actually exist in the GitHub profiles folder; anything else local is left alone
+					for _, v in body do
+						if v.type == 'file' then
+							local localPath = 'pistonware/'..({v.path:gsub(' ', '%%20')})[1]
+							if isfile(localPath) then
+								delfile(localPath)
+							end
 						end
 					end
+					downloadProfilesListing(body)
 				end
-				downloadProfilesListing(body)
+				writefile(profileCommitPath, latestCommit)
 			end
+			-- if "No" or no response: don't update the stored commit, so we'll ask again next session until they agree to sync
 		end
 	end
 end)
