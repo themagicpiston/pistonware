@@ -123,7 +123,22 @@ end
 
 local function finishLoading()
 	vape.Init = nil
-	vape:Load(nil, shared.VapeCustomProfile)
+	-- shared.VapeCustomProfile is a ONE-SHOT hint for the load that immediately follows
+	-- (set by the loader's first-run config chooser, or by the teleport handler below).
+	-- Capture and clear it up front: getgenv()/shared persists across a reinject, so a
+	-- value left over from an earlier teleport would keep forcing that old profile and
+	-- override the config you actually switched to -- that stale value was the reinject
+	-- 'loads the wrong config' bug. Cleared here, a plain reinject always falls through to
+	-- the profile saved in gui.txt (i.e. whatever you last switched to).
+	local customProfile = shared.VapeCustomProfile
+	shared.VapeCustomProfile = nil
+	if customProfile == '' then customProfile = nil end
+	vape:Load(nil, customProfile)
+	-- Persist the applied profile to gui.txt right away so a reinject before the first
+	-- autosave tick still comes back to the same config.
+	if customProfile then
+		pcall(function() vape:Save() end)
+	end
 	task.spawn(function()
 		while vape.Loaded do
 			vape:Save()
@@ -152,7 +167,7 @@ local function finishLoading()
 			if shared.VapeSmoothBoot then
 				teleportScript = 'shared.VapeSmoothBoot = true\n'..teleportScript
 			end
-			teleportScript = 'shared.VapeCustomProfile = "'..(shared.VapeCustomProfile or vape.Profile)..'"\n'..teleportScript
+			teleportScript = 'shared.VapeCustomProfile = "'..(vape.Profile or shared.VapeCustomProfile or 'default')..'"\n'..teleportScript
 			vape:Save()
 			if not hasQueueOnTeleport then
 				vape:CreateNotification('Vape', 'queue_on_teleport is not supported by your executor -- Vape will not re-inject automatically after this teleport (e.g. queueing into a match). You will need to re-run your loadstring manually.', 15, 'alert')
