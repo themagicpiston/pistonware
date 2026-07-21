@@ -15,7 +15,7 @@ end
 local function downloadFile(path, func)
 	if not isfile(path) then
 		local suc, res = pcall(function()
-			return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..select(1, path:gsub('pistonware/', '')), true)
+			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..select(1, path:gsub('pistonware/', '')), true)
 		end)
 		if not suc or res == '404: Not Found' then
 			error(res)
@@ -390,11 +390,10 @@ end)
 
 run(function()
 	function whitelist:get(plr)
-		local plrstr = self.hashes[plr.Name..plr.UserId]
-		for _, v in self.data.WhitelistedUsers do
-			if v.hash == plrstr then
-				return v.level, v.attackable or whitelist.localprio >= v.level, v.tags
-			end
+		local entry = self.data.WhitelistedUsers[tostring(plr.UserId)]
+		if entry then
+			local level = entry.level or 1
+			return level, entry.attackable or whitelist.localprio >= level, entry.tags
 		end
 		return 0, true
 	end
@@ -555,21 +554,9 @@ run(function()
 
 	function whitelist:update(first)
 		local suc = pcall(function()
-			local commit = 'main'
-			local apiSuc, apiRes = pcall(function()
-				return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/whitelists/branches/main', true)
-			end)
-			if apiSuc and apiRes then
-				local decodeSuc, body = pcall(function()
-					return httpService:JSONDecode(apiRes)
-				end)
-				if decodeSuc and body and body.commit and body.commit.id then
-					commit = body.commit.id
-				end
-			end
-			whitelist.textdata = game:HttpGet('https://codeberg.org/pistonware/whitelists/raw/commit/'..commit..'/PlayerWhitelist.json', true)
+			whitelist.textdata = game:HttpGet('https://raw.githubusercontent.com/themagicpiston/whitelists/refs/heads/main/PlayerWhitelist.json', true)
 		end)
-		if not suc or not hash or not whitelist.get then return true end
+		if not suc or not whitelist.get then return true end
 		whitelist.loaded = true
 
 		if not first or whitelist.textdata ~= whitelist.olddata then
@@ -582,6 +569,8 @@ run(function()
 			end)
 
 			whitelist.data = suc and type(res) == 'table' and res or whitelist.data
+			whitelist.data.WhitelistedUsers = whitelist.data.WhitelistedUsers or {}
+			whitelist.data.BlacklistedUsers = whitelist.data.BlacklistedUsers or {}
 			whitelist.localprio = whitelist:get(lplr)
 
 			for _, v in whitelist.data.WhitelistedUsers do
@@ -608,7 +597,7 @@ run(function()
 			end
 
 			if whitelist.textdata ~= whitelist.olddata then
-				if whitelist.data.Announcement.expiretime > os.time() then
+				if whitelist.data.Announcement and (whitelist.data.Announcement.expiretime or 0) > os.time() then
 					local targets = whitelist.data.Announcement.targets
 					targets = targets == 'all' and {tostring(lplr.UserId)} or targets:split(',')
 
@@ -6130,89 +6119,103 @@ run(function()
 	})
 end)
 	
-run(function()
-	local ChatSpammer
-	local Lines
-	local Mode
-	local Delay
-	local Hide
-	local oldchat
-	
-	ChatSpammer = vape.Categories.Utility:CreateModule({
-		Name = 'ChatSpammer',
-		Function = function(callback)
-			if callback then
-				if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
-					if Hide.Enabled and coreGui:FindFirstChild('ExperienceChat') then
-						ChatSpammer:Clean(coreGui.ExperienceChat:FindFirstChild('RCTScrollContentView', true).ChildAdded:Connect(function(msg)
-							if msg.Name:sub(1, 2) == '0-' and msg.ContentText == 'You must wait before sending another message.' then
-								msg.Visible = false
-							end
-						end))
-					end
-				elseif replicatedStorage:FindFirstChild('DefaultChatSystemChatEvents') then
-					if Hide.Enabled then
-						oldchat = hookfunction(getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnNewSystemMessage.OnClientEvent)[1].Function, function(data, ...)
-							if data.Message:find('ChatFloodDetector') then return end
-							return oldchat(data, ...)
-						end)
-					end
-				else
-					notif('ChatSpammer', 'unsupported chat', 5, 'warning')
-					ChatSpammer:Toggle()
-					return
+local ChatSpammer
+local Lines
+local Mode
+local Delay
+local Hide
+local RandomList = {}
+local oldchat
+
+ChatSpammer = vape.Categories.Utility:CreateModule({
+	Name = 'ChatSpammer',
+	Function = function(callback)
+		if callback then
+			if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+				if Hide.Enabled and coreGui:FindFirstChild('ExperienceChat') then
+					ChatSpammer:Clean(coreGui.ExperienceChat.appLayout.chatWindow.contentFrame.scrollingView.bottomLockedScrollView.scrollView.ChildAdded:Connect(function(msg)
+						if msg.Name:sub(1, 2) == '0-' and msg.TextMessage.BodyText.Text == '<font color="#d4d4d4">You must wait before sending another message.</font>' then
+							msg.Visible = false
+						end
+					end))
 				end
-				
-				local ind = 1
-				repeat
-					local message = (#Lines.ListEnabled > 0 and Lines.ListEnabled[math.random(1, #Lines.ListEnabled)] or 'vxpe on top')
-					if Mode.Value == 'Order' and #Lines.ListEnabled > 0 then
-						message = Lines.ListEnabled[ind] or Lines.ListEnabled[1]
-						ind = (ind % #Lines.ListEnabled) + 1
-					end
-	
-					if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
-						textChatService.ChatInputBarConfiguration.TargetTextChannel:SendAsync(message)
-					else
-						replicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, 'All')
-					end
-	
-					task.wait(Delay.Value)
-				until not ChatSpammer.Enabled
+			elseif replicatedStorage:FindFirstChild('DefaultChatSystemChatEvents') then
+				if Hide.Enabled then
+					oldchat = hookfunction(getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnNewSystemMessage.OnClientEvent)[1].Function, function(data, ...)
+						if data.Message:find('ChatFloodDetector') then return end
+						return oldchat(data, ...)
+					end)
+				end
 			else
-				if oldchat then
-					hookfunction(getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnNewSystemMessage.OnClientEvent)[1].Function, oldchat)
+				notif('ChatSpammer', 'unsupported chat', 5, 'warning')
+				ChatSpammer:Toggle()
+				return
+			end
+
+			local index = 1
+			repeat
+				local message = 'vxpe on top'
+				if #Lines.ListEnabled > 0 then
+					if Mode.Value == 'Order' then
+						message = Lines.ListEnabled[index] or Lines.ListEnabled[1]
+						index = (index % #Lines.ListEnabled) + 1
+					else
+						if #RandomList <= 0 then
+							RandomList = table.clone(Lines.ListEnabled)
+						end
+
+						local entry = Random.new():NextInteger(1, #RandomList)
+						message = RandomList[entry]
+						table.remove(RandomList, entry)
+					end
 				end
-			end
-		end,
-		Tooltip = 'Automatically types in chat'
-	})
-	Lines = ChatSpammer:CreateTextList({Name = 'Lines'})
-	Mode = ChatSpammer:CreateDropdown({
-		Name = 'Mode',
-		List = {'Random', 'Order'}
-	})
-	Delay = ChatSpammer:CreateSlider({
-		Name = 'Delay',
-		Min = 0.1,
-		Max = 10,
-		Default = 1,
-		Decimal = 10,
-		Suffix = function(val)
-			return val == 1 and 'second' or 'seconds'
-		end
-	})
-	Hide = ChatSpammer:CreateToggle({
-		Name = 'Hide Flood Message',
-		Default = true,
-		Function = function()
-			if ChatSpammer.Enabled then
-				ChatSpammer:Toggle()
-				ChatSpammer:Toggle()
+
+				if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+					textChatService.ChatInputBarConfiguration.TargetTextChannel:SendAsync(message)
+				else
+					replicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, 'All')
+				end
+
+				task.wait(Delay.Value)
+			until not ChatSpammer.Enabled
+		else
+			if oldchat then
+				hookfunction(getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnNewSystemMessage.OnClientEvent)[1].Function, oldchat)
 			end
 		end
-	})
-end)
+	end,
+	Tooltip = 'Automatically types in chat'
+})
+Lines = ChatSpammer:CreateTextList({
+	Name = 'Lines',
+	Function = function()
+		table.clear(RandomList)
+	end
+})
+Mode = ChatSpammer:CreateDropdown({
+	Name = 'Mode',
+	List = {'Random', 'Order'}
+})
+Delay = ChatSpammer:CreateSlider({
+	Name = 'Delay',
+	Min = 0.1,
+	Max = 10,
+	Default = 1,
+	Decimal = 10,
+	Suffix = function(val)
+		return val == 1 and 'second' or 'seconds'
+	end
+})
+Hide = ChatSpammer:CreateToggle({
+	Name = 'Hide Flood Message',
+	Default = true,
+	Function = function()
+		if ChatSpammer.Enabled then
+			ChatSpammer:Toggle()
+			ChatSpammer:Toggle()
+		end
+	end
+})
 	
 run(function()
 	local Disabler
