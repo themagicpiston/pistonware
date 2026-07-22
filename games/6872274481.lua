@@ -888,6 +888,7 @@ run(function()
 		StatusEffectUtil = require(replicatedStorage.TS['status-effect']['status-effect-util']).StatusEffectUtil,
 		StatusEffectMeta = require(replicatedStorage.TS['status-effect']['status-effect-type']).StatusEffectType,
 		Store = require(lplr.PlayerScripts.TS.ui.store).ClientStore,
+		SummonerKitBalance = require(replicatedStorage.TS.games.bedwars.kit.kits.summoner['summoner-kit-balance']).SummonerKitBalance,
 		TeamUpgradeMeta = debug.getupvalue(require(replicatedStorage.TS.games.bedwars['team-upgrade']['team-upgrade-meta']).getTeamUpgradeMetaForQueue, 7),
 		UILayers = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).UILayers,
 		VisualizerUtils = require(lplr.PlayerScripts.TS.lib.visualizer['visualizer-utils']).VisualizerUtils,
@@ -2308,6 +2309,7 @@ run(function()
 	rayCheck.FilterType = Enum.RaycastFilterType.Include
 	rayCheck.FilterDescendantsInstances = {workspace:FindFirstChild('Map')}
 	local old
+	local oldBlockKicker
 
 	-- Ignore decoy/NPC models named "Falcon" (e.g. workspace["Falcon-1"]).
 	-- A real player named Falcon still has a backing Player object AND a valid
@@ -2386,8 +2388,37 @@ run(function()
 	
 					return old(...)
 				end
+
+				oldBlockKicker = bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition
+				bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition = function(...)
+					if not OtherProjectiles.Enabled then return oldBlockKicker(...) end
+					local origin, dir = select(2, ...)
+					local plr = entitylib.EntityMouse({
+						Part = 'RootPart',
+						Range = FOV.Value,
+						Origin = origin,
+						Players = Targets.Players.Enabled,
+						NPCs = Targets.NPCs.Enabled,
+						Wallcheck = Targets.Walls.Enabled
+					})
+
+					if plr then
+						local calc = prediction.SolveTrajectory(origin, 100, 20, plr.RootPart.Position, plr.RootPart.Velocity, workspace.Gravity, plr.HipHeight, plr.Jumping and 42.6 or nil, rayCheck)
+
+						if calc then
+							for i, v in debug.getstack(2) do
+								if v == dir then
+									debug.setstack(2, i, CFrame.lookAt(origin, calc).LookVector)
+								end
+							end
+						end
+					end
+
+					return oldBlockKicker(...)
+				end
 			else
 				bedwars.ProjectileController.calculateImportantLaunchValues = old
+				bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition = oldBlockKicker
 			end
 		end,
 		Tooltip = 'Silently adjusts your aim towards the enemy'
@@ -2586,6 +2617,11 @@ run(function()
     local Background
     local Color = {}
     local Reference = {}
+    -- model -> adornee part recorded at billboard creation, so removal cleanup
+    -- doesn't depend on PrimaryPart still being set (it's often nil by then)
+    local ModelParts = {}
+    -- per-kit tag connections, disconnected whenever the tracked kit changes
+    local kitConns = {}
     local Folder = Instance.new('Folder')
     Folder.Parent = vape.gui
 
@@ -2602,6 +2638,12 @@ run(function()
 
     local function Added(v, icon)
         if not v then return end
+        -- Billboards live under vape.gui (CoreGui). Tag/added signals invoke this
+        -- on game threads at identity 2, where parenting into CoreGui silently
+        -- throws — which is why only enable-time (exploit thread) objects showed.
+        if vape.ThreadFix then
+            setthreadidentity(8)
+        end
         if Reference[v] then
             if Reference[v].Billboard then
                 Reference[v].Billboard:Destroy()
@@ -2644,47 +2686,86 @@ run(function()
         }
     end
 
-    local function addKit(tag, icon)
-        if not KitESP then return end
-
-        local addedConn = collectionService:GetInstanceAddedSignal(tag):Connect(function(v)
-            if v.PrimaryPart then
+    -- A model is often tagged a frame before its PrimaryPart is assigned. Reading
+    -- v.PrimaryPart at tag time then gives nil and the billboard is skipped forever
+    -- (why it only worked after a disable/re-enable, once the models were fully built).
+    -- Wait for PrimaryPart before adding.
+    local function addWhenReady(v, icon)
+        if not v then return end
+        if v.PrimaryPart then
+            ModelParts[v] = v.PrimaryPart
+            Added(v.PrimaryPart, icon)
+            return
+        end
+        task.spawn(function()
+            local timeout = os.clock() + 5
+            while not v.PrimaryPart and v.Parent and os.clock() < timeout do
+                task.wait()
+            end
+            if v.PrimaryPart and KitESP and KitESP.Enabled then
+                ModelParts[v] = v.PrimaryPart
                 Added(v.PrimaryPart, icon)
             end
         end)
-        if KitESP.Clean then KitESP:Clean(addedConn) end
+    end
 
-        local removedConn = collectionService:GetInstanceRemovedSignal(tag):Connect(function(v)
-            if v.PrimaryPart and Reference[v.PrimaryPart] then
-                if Reference[v.PrimaryPart].Billboard then
-                    Reference[v.PrimaryPart].Billboard:Destroy()
+    -- Drops every billboard and per-kit tag connection. Called on disable AND on
+    -- kit change, so stale objects from the previous kit can't linger.
+    local function clearTracked()
+        for _, c in kitConns do
+            pcall(function() c:Disconnect() end)
+        end
+        table.clear(kitConns)
+        if vape.ThreadFix then
+            setthreadidentity(8)
+        end
+        Folder:ClearAllChildren()
+        table.clear(Reference)
+        table.clear(ModelParts)
+    end
+
+    local function addKit(tag, icon)
+        table.insert(kitConns, collectionService:GetInstanceAddedSignal(tag):Connect(function(v)
+            addWhenReady(v, icon)
+        end))
+
+        table.insert(kitConns, collectionService:GetInstanceRemovedSignal(tag):Connect(function(v)
+            local part = ModelParts[v] or v.PrimaryPart
+            ModelParts[v] = nil
+            if part and Reference[part] then
+                if vape.ThreadFix then
+                    setthreadidentity(8)
                 end
-                Reference[v.PrimaryPart] = nil
+                if Reference[part].Billboard then
+                    Reference[part].Billboard:Destroy()
+                end
+                Reference[part] = nil
             end
-        end)
-        if KitESP.Clean then KitESP:Clean(removedConn) end
+        end))
 
         for _, v in pairs(collectionService:GetTagged(tag)) do
-            if v.PrimaryPart then
-                Added(v.PrimaryPart, icon)
-            end
+            addWhenReady(v, icon)
         end
     end
+
+    -- Bumped each toggle so a stale enable-loop from a quick off/on can't keep
+    -- running alongside the new one.
+    local loopId = 0
 
     KitESP = vape.Categories.Render:CreateModule({
         Name = 'KitESP',
         Function = function(callback)
+            loopId += 1
             if callback then
-                repeat task.wait(0.1) until store.equippedKit ~= '' or (not KitESP.Enabled)
-                local kit = KitESP.Enabled and ESPKits[store.equippedKit] or nil
-                if kit then
-                    addKit(kit[1], kit[2])
-                end
+                local myId = loopId
 
                 if KitESP.Clean then
                     KitESP:Clean(vapeEvents.EntityDeathEvent.Event:Connect(function(deathTable)
                         local deadEnt = entitylib.getEntity(deathTable.entityInstance)
                         if deadEnt and deadEnt.RootPart and Reference[deadEnt.RootPart] then
+                            if vape.ThreadFix then
+                                setthreadidentity(8)
+                            end
                             if Reference[deadEnt.RootPart].Billboard then
                                 Reference[deadEnt.RootPart].Billboard:Destroy()
                             end
@@ -2692,9 +2773,25 @@ run(function()
                         end
                     end))
                 end
+
+                -- Kits can change mid-session (kit swap, new match): whenever the
+                -- equipped kit differs from what we're tracking, wipe the old
+                -- kit's billboards/connections and start tracking the new tag.
+                local lastKit = nil
+                repeat
+                    local kit = store.equippedKit
+                    if kit ~= lastKit then
+                        lastKit = kit
+                        clearTracked()
+                        local info = ESPKits[kit]
+                        if info then
+                            addKit(info[1], info[2])
+                        end
+                    end
+                    task.wait(0.5)
+                until (not KitESP.Enabled) or loopId ~= myId
             else
-                Folder:ClearAllChildren()
-                table.clear(Reference)
+                clearTracked()
             end
         end,
         Tooltip = 'ESP for certain kit related objects'
@@ -3421,37 +3518,6 @@ run(function()
 				task.wait(0.1)
 			until not AutoKit.Enabled
 		end,
-		block_kicker = function()
-			local old = bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition
-			bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition = function(...)
-				local origin, dir = select(2, ...)
-				local plr = entitylib.EntityMouse({
-					Part = 'RootPart',
-					Range = 1000,
-					Origin = origin,
-					Players = true,
-					Wallcheck = true
-				})
-	
-				if plr then
-					local calc = prediction.SolveTrajectory(task.wait(workspace:GetServerTimeNow()), origin, 100, 20, plr.RootPart.Position, plr.RootPart.Velocity, workspace.Gravity, plr.HipHeight, plr.Jumping and 42.6 or nil)
-	
-					if calc then
-						for i, v in debug.getstack(2) do
-							if v == dir then
-								debug.setstack(2, i, CFrame.lookAt(origin, calc).LookVector)
-							end
-						end
-					end
-				end
-	
-				return old(...)
-			end
-	
-			AutoKit:Clean(function()
-				bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition = old
-			end)
-		end,
 		cat = function()
 			local old = bedwars.CatController.leap
 			bedwars.CatController.leap = function(...)
@@ -3508,30 +3574,6 @@ run(function()
 				if ent and getItem('guitar') then
 					bedwars.Client:Get(remotes.GuitarHeal):SendToServer({
 						healTarget = ent.Character
-					})
-				end
-	
-				task.wait(0.1)
-			until not AutoKit.Enabled
-		end,
-		summoner = function()
-			repeat
-				local plr = entitylib.EntityPosition({
-					Range = 22,
-					Part = 'RootPart',
-					Players = true,
-					Sort = sortmethods.Health
-				})
-	
-				if plr and (not Legit.Enabled or (lplr.Character:GetAttribute('Health') or 0) > 0) then
-					local localPosition = entitylib.character.RootPart.Position
-					local shootDir = CFrame.lookAt(localPosition, plr.RootPart.Position).LookVector
-					localPosition += shootDir * math.max((localPosition - plr.RootPart.Position).Magnitude - 16, 0)
-	
-					bedwars.Client:Get(remotes.SummonerClawAttack):SendToServer({
-						position = localPosition,
-						direction = shootDir,
-						clientTime = workspace:GetServerTimeNow()
 					})
 				end
 	
