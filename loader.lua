@@ -4,6 +4,9 @@ local isfile = isfile or function(file)
 	end)
 	return suc and res ~= nil and res ~= ''
 end
+local delfile = delfile or function(file)
+	writefile(file, '')
+end
 local cloneref = cloneref or function(ref)
 	return ref
 end
@@ -170,6 +173,54 @@ local function chooseDefaultConfig()
 	)
 end
 
+-- Fetches the GitHub profiles folder listing; returns the decoded {name=,path=,type=} array, or nil on failure.
+local function fetchProfilesListing()
+	local reqSuc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
+	end)
+	if not (reqSuc and res and res ~= '404: Not Found') then return nil end
+	local bodySuc, body = pcall(function()
+		return cloneref(game:GetService('HttpService')):JSONDecode(res)
+	end)
+	if not (bodySuc and body and typeof(body) == 'table') then return nil end
+	return body
+end
+
+-- Downloads every file in a profiles listing concurrently.
+local function downloadProfilesListing(body)
+	local pending = 0
+	local done = Instance.new('BindableEvent')
+	for _, v in body do
+		if v.type == 'file' then
+			pending += 1
+			task.spawn(function()
+				pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
+				pending -= 1
+				if pending <= 0 then
+					done:Fire()
+				end
+			end)
+		end
+	end
+	if pending > 0 then
+		done.Event:Wait()
+	end
+	done:Destroy()
+end
+
+-- Returns the sha of the most recent commit that touched profiles/ on GitHub, or nil on failure.
+local function fetchProfilesCommit()
+	local reqSuc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1', true)
+	end)
+	if not (reqSuc and res and res ~= '404: Not Found') then return nil end
+	local bodySuc, body = pcall(function()
+		return cloneref(game:GetService('HttpService')):JSONDecode(res)
+	end)
+	if not (bodySuc and body and typeof(body) == 'table' and body[1] and body[1].sha) then return nil end
+	return body[1].sha
+end
+
 -- Detect the very first run (empty/near-empty profiles folder) BEFORE downloading, so we
 -- know afterwards whether to show the prompts below.
 local firstRunProfiles = false
@@ -199,37 +250,63 @@ end
 local downloadedConfigs = false
 if firstRunProfiles and not declinedDownload and wantsDownload then
 	pcall(function()
-		local reqSuc, res = pcall(function()
-			return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
-		end)
-		if reqSuc and res and res ~= '404: Not Found' then
-			local bodySuc, body = pcall(function()
-				return cloneref(game:GetService('HttpService')):JSONDecode(res)
-			end)
-			if bodySuc and body and typeof(body) == 'table' then
-				local pending = 0
-				local done = Instance.new('BindableEvent')
-				for _, v in body do
-					if v.type == 'file' then
-						pending += 1
-						task.spawn(function()
-							pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
-							pending -= 1
-							if pending <= 0 then
-								done:Fire()
-							end
-						end)
-					end
-				end
-				if pending > 0 then
-					done.Event:Wait()
-				end
-				done:Destroy()
-			end
+		local body = fetchProfilesListing()
+		if body then
+			downloadProfilesListing(body)
 		end
 	end)
 	pcall(function()
 		downloadedConfigs = #listfiles('pistonware/profiles') >= 3
+	end)
+	-- Record which commit this download reflects, so later sessions can tell whether
+	-- profiles/ has changed on GitHub since (see the sync prompt below).
+	if downloadedConfigs then
+		pcall(function()
+			local commit = fetchProfilesCommit()
+			if commit then
+				writefile('pistonware/profiles/profilecommit.txt', commit)
+			end
+		end)
+	end
+end
+
+-- Existing installs (3+ profiles): if profiles/ has changed on GitHub since the last
+-- download/sync, offer to overwrite the shipped configs with the latest ones. Only the
+-- files that exist in the GitHub profiles folder are deleted/redownloaded -- profiles the
+-- user made themselves are left alone. Skipped on reinjects/teleports (shared.vapereload)
+-- so it only ever asks once per session, on the first manual execution.
+if not firstRunProfiles and not declinedDownload and not shared.vapereload then
+	pcall(function()
+		local latestCommit = fetchProfilesCommit()
+		local cachedCommit = isfile('pistonware/profiles/profilecommit.txt') and readfile('pistonware/profiles/profilecommit.txt'):gsub('%s', '') or nil
+		if latestCommit and latestCommit ~= cachedCommit then
+			local wantsSync = createCornerPrompt(
+				'Pistonware',
+				'Would you like to sync to the latest config?',
+				{
+					{text = 'Yes', key = true, color = Color3.fromRGB(45, 150, 90)},
+					{text = 'No', key = false, color = Color3.fromRGB(150, 45, 45)},
+				},
+				60, false
+			)
+			if wantsSync == true then
+				local body = fetchProfilesListing()
+				if body then
+					for _, v in body do
+						if v.type == 'file' then
+							local localPath = 'pistonware/'..({v.path:gsub(' ', '%%20')})[1]
+							if isfile(localPath) then
+								delfile(localPath)
+							end
+						end
+					end
+					downloadProfilesListing(body)
+					writefile('pistonware/profiles/profilecommit.txt', latestCommit)
+				end
+			end
+			-- On "No"/timeout the stored commit stays stale, so the prompt returns next
+			-- session until the user agrees to sync once.
+		end
 	end)
 end
 
