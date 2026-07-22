@@ -4,9 +4,6 @@ local isfile = isfile or function(file)
 	end)
 	return suc and res ~= nil and res ~= ''
 end
-local delfile = delfile or function(file)
-	writefile(file, '')
-end
 local cloneref = cloneref or function(ref)
 	return ref
 end
@@ -174,9 +171,10 @@ local function chooseDefaultConfig()
 end
 
 -- Fetches the GitHub profiles folder listing; returns the decoded {name=,path=,type=} array, or nil on failure.
-local function fetchProfilesListing()
+-- Pass a commit sha as `ref` to get the listing exactly as of that commit instead of branch head.
+local function fetchProfilesListing(ref)
 	local reqSuc, res = pcall(function()
-		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles'..(ref and ('?ref='..ref) or ''), true)
 	end)
 	if not (reqSuc and res and res ~= '404: Not Found') then return nil end
 	local bodySuc, body = pcall(function()
@@ -186,15 +184,36 @@ local function fetchProfilesListing()
 	return body
 end
 
--- Downloads every file in a profiles listing concurrently.
-local function downloadProfilesListing(body)
+-- Downloads every file in a profiles listing concurrently. When `commit` is given, files are
+-- fetched pinned to that exact commit sha and overwritten unconditionally -- branch-path raw
+-- URLs can serve CDN-cached content for up to ~5 minutes after a push, which would make a
+-- "sync" quietly reinstall the old profiles.
+local function downloadProfilesListing(body, commit)
 	local pending = 0
 	local done = Instance.new('BindableEvent')
 	for _, v in body do
 		if v.type == 'file' then
 			pending += 1
+			local relPath = ({v.path:gsub(' ', '%%20')})[1]
 			task.spawn(function()
-				pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
+				if commit then
+					pcall(function()
+						for attempt = 1, 4 do
+							local suc, res = pcall(function()
+								return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..commit..'/'..relPath, true)
+							end)
+							if suc and res and res ~= '' and res ~= '404: Not Found' then
+								writefile('pistonware/'..relPath, res)
+								break
+							end
+							if attempt < 4 then
+								task.wait(attempt)
+							end
+						end
+					end)
+				else
+					pcall(downloadFile, 'pistonware/'..relPath)
+				end
 				pending -= 1
 				if pending <= 0 then
 					done:Fire()
@@ -290,17 +309,19 @@ if not firstRunProfiles and not declinedDownload and not shared.vapereload then
 				60, false
 			)
 			if wantsSync == true then
-				local body = fetchProfilesListing()
+				-- If a previous instance is still injected, uninject it BEFORE overwriting:
+				-- Uninject() saves the old in-memory config to disk as its first step, and
+				-- main.lua would otherwise trigger it right after us -- clobbering the
+				-- freshly synced profiles with the old settings. Same for its autosave loop.
+				if shared.vape then
+					pcall(function() shared.vape:Uninject() end)
+					shared.vape = nil
+				end
+				-- Listing and file contents both pinned to latestCommit so a sync right after
+				-- a push can't grab a stale CDN copy of the branch head.
+				local body = fetchProfilesListing(latestCommit)
 				if body then
-					for _, v in body do
-						if v.type == 'file' then
-							local localPath = 'pistonware/'..({v.path:gsub(' ', '%%20')})[1]
-							if isfile(localPath) then
-								delfile(localPath)
-							end
-						end
-					end
-					downloadProfilesListing(body)
+					downloadProfilesListing(body, latestCommit)
 					writefile('pistonware/profiles/profilecommit.txt', latestCommit)
 				end
 			end
