@@ -7988,7 +7988,7 @@ run(function()
                 char = char.HumanoidRootPart.Parent
             end
         end
-        return typeof(char) == "Instance" and char or nil
+        return typeof(char) == "Instance" and cloneref(char) or nil
     end
 
     local function isArmor(name)
@@ -8132,10 +8132,13 @@ end)
 						AnimDisabler.Connection = runService.Heartbeat:Connect(function()
 							local character = lplr.Character
 							if not character then return end
+							character = cloneref(character)
 							local humanoid = character:FindFirstChildOfClass('Humanoid')
 							if not humanoid then return end
+							humanoid = cloneref(humanoid)
 							local animator = humanoid:FindFirstChildOfClass('Animator')
 							if animator then
+								animator = cloneref(animator)
 								for _, track in animator:GetPlayingAnimationTracks() do
 									track:Stop()
 								end
@@ -8149,8 +8152,10 @@ end)
 					end
 					local character = lplr.Character
 					if character then
+						character = cloneref(character)
 						local animate = character:FindFirstChild('Animate')
 						if animate then
+							animate = cloneref(animate)
 							animate.Disabled = true
 							animate.Disabled = false
 						end
