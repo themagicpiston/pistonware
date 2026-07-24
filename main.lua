@@ -215,7 +215,17 @@ if not shared.VapeIndependent then
 		pcall(function() executorName = identifyexecutor and identifyexecutor() or '' end)
 		task.wait(executorName == 'Opiumware' and 30 or 5)
 	end
-	loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
+	-- pcall'd + surfaced: an error thrown while universal.lua *executes* used to propagate out
+	-- of main.lua entirely, silently skipping the game script below and finishLoading() --
+	-- which looks like "universal loaded but no game file ever downloaded".
+	local universalOk, universalErr = pcall(function()
+		loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
+	end)
+	if not universalOk then
+		pcall(function()
+			vape:CreateNotification('Vape', 'universal.lua failed: '..tostring(universalErr), 30, 'alert')
+		end)
+	end
 
 	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
 	-- A cached-but-empty file is treated as missing and refetched: a truncated write from an
@@ -223,7 +233,14 @@ if not shared.VapeIndependent then
 	-- nothing -- indistinguishable from the game script never loading at all.
 	local cached = isfile(gamePath) and readfile(gamePath) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
-		loadstring(cached, tostring(game.PlaceId))(...)
+		local gameOk, gameErr = pcall(function()
+			loadstring(cached, tostring(game.PlaceId))(...)
+		end)
+		if not gameOk then
+			pcall(function()
+				vape:CreateNotification('Vape', 'game script failed: '..tostring(gameErr), 30, 'alert')
+			end)
+		end
 	elseif not shared.PistonwareDeveloper then
 		-- Single fetch (the old code requested this URL twice: once to probe, then again
 		-- inside downloadFile) and load straight from the response, so a stale/corrupt
@@ -233,7 +250,14 @@ if not shared.VapeIndependent then
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
-			loadstring(res, tostring(game.PlaceId))(...)
+			local gameOk, gameErr = pcall(function()
+				loadstring(res, tostring(game.PlaceId))(...)
+			end)
+			if not gameOk then
+				pcall(function()
+					vape:CreateNotification('Vape', 'game script failed: '..tostring(gameErr), 30, 'alert')
+				end)
+			end
 		end
 	end
 	finishLoading()
