@@ -215,17 +215,11 @@ if not shared.VapeIndependent then
 		pcall(function() executorName = identifyexecutor and identifyexecutor() or '' end)
 		task.wait(executorName == 'Opiumware' and 30 or 5)
 	end
-	-- pcall'd + surfaced: an error thrown while universal.lua *executes* used to propagate out
-	-- of main.lua entirely, silently skipping the game script below and finishLoading() --
-	-- which looks like "universal loaded but no game file ever downloaded".
-	local universalOk, universalErr = pcall(function()
+	-- pcall'd: an error thrown while universal.lua *executes* would otherwise propagate out of
+	-- main.lua entirely, skipping the game script below and finishLoading() with it.
+	pcall(function()
 		loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
 	end)
-	if not universalOk then
-		pcall(function()
-			vape:CreateNotification('Vape', 'universal.lua failed: '..tostring(universalErr), 30, 'alert')
-		end)
-	end
 
 	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
 	-- A cached-but-empty file is treated as missing and refetched: a truncated write from an
@@ -235,12 +229,7 @@ if not shared.VapeIndependent then
 	if cached and cached:gsub('%s', '') ~= '' then
 		-- pcall(fn, ...) rather than pcall(function() fn(...) end): '...' is only valid
 		-- directly in this chunk, never inside a nested non-vararg function.
-		local gameOk, gameErr = pcall(loadstring(cached, tostring(game.PlaceId)), ...)
-		if not gameOk then
-			pcall(function()
-				vape:CreateNotification('Vape', 'game script failed: '..tostring(gameErr), 30, 'alert')
-			end)
-		end
+		pcall(loadstring(cached, tostring(game.PlaceId)), ...)
 	elseif not shared.PistonwareDeveloper then
 		-- Single fetch (the old code requested this URL twice: once to probe, then again
 		-- inside downloadFile) and load straight from the response, so a stale/corrupt
@@ -250,12 +239,7 @@ if not shared.VapeIndependent then
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
-			local gameOk, gameErr = pcall(loadstring(res, tostring(game.PlaceId)), ...)
-			if not gameOk then
-				pcall(function()
-					vape:CreateNotification('Vape', 'game script failed: '..tostring(gameErr), 30, 'alert')
-				end)
-			end
+			pcall(loadstring(res, tostring(game.PlaceId)), ...)
 		end
 	end
 	finishLoading()
