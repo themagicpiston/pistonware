@@ -209,19 +209,31 @@ if not shared.VapeIndependent then
 	-- downloading doesn't need the game loaded; only wait here, right before touching game/character state
 	if not game:IsLoaded() then
 		repeat task.wait() until game:IsLoaded()
-		task.wait(identifyexecutor() == 'Opiumware' and 30 or 5)
+		-- identifyexecutor is absent on some executors (common on mobile); calling it
+		-- unguarded errors here and aborts everything below, including the game script.
+		local executorName = ''
+		pcall(function() executorName = identifyexecutor and identifyexecutor() or '' end)
+		task.wait(executorName == 'Opiumware' and 30 or 5)
 	end
 	loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
-	if isfile('pistonware/games/'..game.PlaceId..'.lua') then
-		loadstring(readfile('pistonware/games/'..game.PlaceId..'.lua'), tostring(game.PlaceId))(...)
-	else
-		if not shared.PistonwareDeveloper then
-			local suc, res = pcall(function()
-				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/games/'..game.PlaceId..'.lua', true)
-			end)
-			if suc and res ~= '404: Not Found' then
-				loadstring(downloadFile('pistonware/games/'..game.PlaceId..'.lua'), tostring(game.PlaceId))(...)
-			end
+
+	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
+	-- A cached-but-empty file is treated as missing and refetched: a truncated write from an
+	-- earlier failed download reads back as "present", and loadstring('') silently does
+	-- nothing -- indistinguishable from the game script never loading at all.
+	local cached = isfile(gamePath) and readfile(gamePath) or nil
+	if cached and cached:gsub('%s', '') ~= '' then
+		loadstring(cached, tostring(game.PlaceId))(...)
+	elseif not shared.PistonwareDeveloper then
+		-- Single fetch (the old code requested this URL twice: once to probe, then again
+		-- inside downloadFile) and load straight from the response, so a stale/corrupt
+		-- cache file can't shadow what we just downloaded.
+		local suc, res = pcall(function()
+			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/games/'..game.PlaceId..'.lua', true)
+		end)
+		if suc and res and res ~= '' and res ~= '404: Not Found' then
+			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
+			loadstring(res, tostring(game.PlaceId))(...)
 		end
 	end
 	finishLoading()
