@@ -233,9 +233,9 @@ if not shared.VapeIndependent then
 	-- nothing -- indistinguishable from the game script never loading at all.
 	local cached = isfile(gamePath) and readfile(gamePath) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
-		local gameOk, gameErr = pcall(function()
-			loadstring(cached, tostring(game.PlaceId))(...)
-		end)
+		-- pcall(fn, ...) rather than pcall(function() fn(...) end): '...' is only valid
+		-- directly in this chunk, never inside a nested non-vararg function.
+		local gameOk, gameErr = pcall(loadstring(cached, tostring(game.PlaceId)), ...)
 		if not gameOk then
 			pcall(function()
 				vape:CreateNotification('Vape', 'game script failed: '..tostring(gameErr), 30, 'alert')
@@ -250,9 +250,7 @@ if not shared.VapeIndependent then
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
-			local gameOk, gameErr = pcall(function()
-				loadstring(res, tostring(game.PlaceId))(...)
-			end)
+			local gameOk, gameErr = pcall(loadstring(res, tostring(game.PlaceId)), ...)
 			if not gameOk then
 				pcall(function()
 					vape:CreateNotification('Vape', 'game script failed: '..tostring(gameErr), 30, 'alert')
