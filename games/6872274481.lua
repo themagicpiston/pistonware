@@ -1547,12 +1547,17 @@ run(function()
 	local CPS
 	local BlockCPS = {}
 	local Thread
-	
-	local function AutoClick()
+
+	local function stopClicking()
 		if Thread then
 			task.cancel(Thread)
+			Thread = nil
 		end
-	
+	end
+
+	local function AutoClick()
+		stopClicking()
+
 		Thread = task.delay(1 / 7, function()
 			repeat
 				if not bedwars.AppController:isLayerOpen(bedwars.UILayers.MAIN) then
@@ -1586,8 +1591,7 @@ run(function()
 	
 				AutoClicker:Clean(inputService.InputEnded:Connect(function(input)
 					if input.UserInputType == Enum.UserInputType.MouseButton1 and Thread then
-						task.cancel(Thread)
-						Thread = nil
+						stopClicking()
 					end
 				end))
 	
@@ -1596,10 +1600,7 @@ run(function()
 						pcall(function()
 							AutoClicker:Clean(lplr.PlayerGui.MobileUI[v].MouseButton1Down:Connect(AutoClick))
 							AutoClicker:Clean(lplr.PlayerGui.MobileUI[v].MouseButton1Up:Connect(function()
-								if Thread then
-									task.cancel(Thread)
-									Thread = nil
-								end
+								stopClicking()
 							end))
 						end)
 					end
@@ -7496,18 +7497,33 @@ shared.bedwars = {
     _baseGetSpeed       = _baseGetSpeed,
 }
 
-local function downloadGameFile(path)
-    if isfile(path) then return readfile(path) end
-    local suc, res = pcall(function()
-        return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/'..select(1, path:gsub('pistonware/', '')), true)
-    end)
-    if suc and res ~= '404: Not Found' then
-        if path:find('.lua') then
+-- bedwars.lua is the ONLY file fetched from Codeberg -- everything else comes from GitHub --
+-- so the URL is hardcoded rather than built from a path. Codeberg's raw endpoint
+-- intermittently 504s with an empty body, which hurts more here than anywhere else because
+-- this file is ~280KB, hence the retries. A failed download returns nil instead of falling
+-- through to readfile() on a file that was never written (that errored out and took the
+-- whole script down with it).
+local function downloadBedwars()
+    local path = 'pistonware/games/bedwars.lua'
+    local cached = isfile(path) and readfile(path) or nil
+    if cached and cached:gsub('%s', '') ~= '' then return cached end
+    for attempt = 1, 4 do
+        local suc, res = pcall(function()
+            return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua', true)
+        end)
+        if suc and res and res ~= '' and res ~= '404: Not Found' then
             res = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res
+            pcall(writefile, path, res)
+            return res
         end
-        writefile(path, res)
+        if attempt < 4 then
+            task.wait(attempt)
+        end
     end
-    return readfile(path)
+    return nil
 end
 
-loadstring(downloadGameFile("pistonware/games/bedwars.lua"))()
+local bedwarsSource = downloadBedwars()
+if bedwarsSource then
+    loadstring(bedwarsSource)()
+end
