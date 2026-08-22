@@ -26,7 +26,7 @@
 	SOFTWARE.
 ]]
 
--- // Environment changes in the VM are not supposed to alter the behaviour of the VM so we localise globals beforehand
+--[[ // Environment changes should not alter VM behaviour, so globals are localised beforehand. ]]
 local type = type
 local pcall = pcall
 local error = error
@@ -69,24 +69,24 @@ local ttisstring = function(v) return type(v) == "string" end
 local ttisboolean = function(v) return type(v) == "boolean" end
 local ttisfunction = function(v) return type(v) == "function" end
 
--- // opList contains information about the instruction, each instruction is defined in this format:
--- // {OP_NAME, OP_MODE, K_MODE, HAS_AUX}
--- // OP_MODE specifies what type of registers the instruction uses if any
---		0 = NONE
---		1 = A
---		2 = AB
---		3 = ABC
---		4 = AD
---		5 = AE
--- // K_MODE specifies if the instruction has a register that holds a constant table index, which will be directly converted to the constant in the 2nd pass
---		0 = NONE
---		1 = AUX
---		2 = C
---		3 = D
---		4 = AUX import
---		5 = AUX boolean low 1 bit
---		6 = AUX number low 24 bits
--- // HAS_AUX boolean specifies whether the instruction is followed up with an AUX word, which may be used to execute the instruction.
+--[[ // opList contains information about the instruction, each instruction is defined in this format:
+// {OP_NAME, OP_MODE, K_MODE, HAS_AUX}
+// OP_MODE specifies what type of registers the instruction uses if any
+	0 = NONE
+	1 = A
+	2 = AB
+	3 = ABC
+	4 = AD
+	5 = AE
+// K_MODE specifies if the instruction has a register that holds a constant table index, which will be directly converted to the constant in the 2nd pass
+	0 = NONE
+	1 = AUX
+	2 = C
+	3 = D
+	4 = AUX import
+	5 = AUX boolean low 1 bit
+	6 = AUX number low 24 bits
+// HAS_AUX boolean specifies whether the instruction is followed up with an AUX word, which may be used to execute the instruction. ]]
 
 local opList = {
 	{ "NOP", 0, 0, false },
@@ -175,6 +175,18 @@ local opList = {
 	{ "GETUDATAKS", 3, 1, true },
 	{ "SETUDATAKS", 3, 1, true },
 	{ "NAMECALLUDATA", 3, 1, true },
+}
+
+--[[ These opcodes are described by the bytecode table but have no interpreter branch below.
+Rejecting them while decoding keeps unsupported bytecode from failing much later with a partial
+VM state or a misleading nil-index error. ]]
+local unsupportedOpcodes = {
+	[60] = true, --[[ FASTCALL3 ]]
+	[62] = true, --[[ DEP_FORGLOOP_NEXT ]]
+	[69] = true, --[[ COVERAGE ]]
+	[83] = true, --[[ GETUDATAKS ]]
+	[84] = true, --[[ SETUDATAKS ]]
+	[85] = true --[[ NAMECALLUDATA ]]
 }
 
 local LUA_MULTRET = -1
@@ -309,6 +321,9 @@ local function luau_deserialize(bytecode, luau_settings)
 		local opcode = bit32_band(value * 203, 0xFF)
 
 		local opinfo = opList[opcode + 1]
+		if not opinfo or unsupportedOpcodes[opcode] then
+			error("Unsupported Opcode: " .. (opinfo and opinfo[1] or tostring(opcode)) .. " op: " .. opcode, 0)
+		end
 		local opname = opinfo[1]
 		local opmode = opinfo[2]
 		local kmode = opinfo[3]
@@ -355,13 +370,13 @@ local function luau_deserialize(bytecode, luau_settings)
 	local function checkkmode(inst, k)
 		local kmode = inst.kmode
 
-		if kmode == 1 then --// AUX
+		if kmode == 1 then --[[// AUX ]]
 			inst.K = k[inst.aux +  1]
-		elseif kmode == 2 then --// C
+		elseif kmode == 2 then --[[// C ]]
 			inst.K = k[inst.C + 1]
-		elseif kmode == 3 then--// D
+		elseif kmode == 3 then--[[// D ]]
 			inst.K = k[inst.D + 1]
-		elseif kmode == 4 then --// AUX import
+		elseif kmode == 4 then --[[// AUX import ]]
 			local extend = inst.aux
 			local count = bit32_rshift(extend, 30)
 			local id0 = bit32_band(bit32_rshift(extend, 20), 0x3FF)
@@ -385,15 +400,15 @@ local function luau_deserialize(bytecode, luau_settings)
 					count, inst.K0, inst.K1, inst.K2
 				)
 			end
-		elseif kmode == 5 then --// AUX boolean low 1 bit
+		elseif kmode == 5 then --[[// AUX boolean low 1 bit ]]
 			inst.K = bit32_extract(inst.aux, 0, 1) == 1
 			inst.KN = bit32_extract(inst.aux, 31, 1) == 1
-		elseif kmode == 6 then --// AUX number low 24 bits
+		elseif kmode == 6 then --[[// AUX number low 24 bits ]]
 			inst.K = k[bit32_extract(inst.aux, 0, 24) + 1]
 			inst.KN = bit32_extract(inst.aux, 31, 1) == 1
-		elseif kmode == 7 then --// B
+		elseif kmode == 7 then --[[// B ]]
 			inst.K = k[inst.B + 1]
-		elseif kmode == 8 then --// AUX number low 16 bits
+		elseif kmode == 8 then --[[// AUX number low 16 bits ]]
 			inst.K = bit32_band(inst.aux, 0xf)
 		end
 	end
@@ -405,7 +420,7 @@ local function luau_deserialize(bytecode, luau_settings)
 		local isvararg = readByte() ~= 0
 
 		if luauVersion >= 4 then
-			readByte() --// flags
+			readByte() --[[// flags ]]
 			local typesize = readVarInt();
 			cursor = cursor + typesize;
 		end
@@ -435,26 +450,26 @@ local function luau_deserialize(bytecode, luau_settings)
 			local kt = readByte()
 			local k
 
-			if kt == 0 then --// Nil
+			if kt == 0 then --[[// Nil ]]
 				k = nil
-			elseif kt == 1 then --// Bool
+			elseif kt == 1 then --[[// Bool ]]
 				k = readByte() ~= 0
-			elseif kt == 2 then --// Number
+			elseif kt == 2 then --[[// Number ]]
 				k = readDouble()
-			elseif kt == 3 then --// String
+			elseif kt == 3 then --[[// String ]]
 				k = stringList[readVarInt()]
-			elseif kt == 4 then --// Import
+			elseif kt == 4 then --[[// Import ]]
 				k = readWord()
-			elseif kt == 5 then --// Table
+			elseif kt == 5 then --[[// Table ]]
 				local dataLength = readVarInt()
 				k = table_create(dataLength)
 
 				for i = 1, dataLength do
 					k[i] = readVarInt()
 				end
-			elseif kt == 6 then --// Closure
+			elseif kt == 6 then --[[// Closure ]]
 				k = readVarInt()
-			elseif kt == 7 then --// Vector
+			elseif kt == 7 then --[[// Vector ]]
 				local x,y,z,w = readFloat(), readFloat(), readFloat(), readFloat()
 
 				if luau_settings.vectorSize == 4 then
@@ -462,14 +477,14 @@ local function luau_deserialize(bytecode, luau_settings)
 				else
 					k = luau_settings.vectorCtor(x,y,z)
 				end
-			elseif kt == 8 then --// Table With Constants
+			elseif kt == 8 then --[[// Table With Constants ]]
 				local dataLength = readVarInt()
 				k = table_create(dataLength)
 
 				for i = 1, dataLength do
 					k[readVarInt()] = readSignedWord()
 				end
-			elseif kt == 9 then --// Integer
+			elseif kt == 9 then --[[// Integer ]]
 				local sign_flag = readByte()
 				k = readVarInt()
 
@@ -481,7 +496,7 @@ local function luau_deserialize(bytecode, luau_settings)
 			klist[i] = k
 		end
 
-		-- // 2nd pass to replace constant references in the instruction
+		--[[ // 2nd pass to replace constant references in the instruction ]]
 		for i = 1, sizecode do
 			checkkmode(codelist[i], klist)
 		end
@@ -504,7 +519,7 @@ local function luau_deserialize(bytecode, luau_settings)
 			debugname = "(??)"
 		end
 
-		-- // lineinfo
+		--[[ // lineinfo ]]
 		local lineinfoenabled = readByte() ~= 0
 		local instructionlineinfo = nil
 
@@ -531,12 +546,12 @@ local function luau_deserialize(bytecode, luau_settings)
 			instructionlineinfo = table_create(sizecode)
 
 			for i = 1, sizecode do
-				--// p->abslineinfo[pc >> p->linegaplog2] + p->lineinfo[pc];
+				--[[ // p->abslineinfo[pc >> p->linegaplog2] + p->lineinfo[pc]; ]]
 				table_insert(instructionlineinfo, abslineinfo[bit32_rshift(i - 1, linegaplog2) + 1] + lineinfo[i])
 			end
 		end
 
-		-- // debuginfo
+		--[[ // debuginfo ]]
 		if readByte() ~= 0 then
 			local sizel = readVarInt()
 			for i = 1, sizel do
@@ -576,7 +591,7 @@ local function luau_deserialize(bytecode, luau_settings)
 		}
 	end
 
-	-- userdataRemapping (not used in VM, left unused)
+	--[[ userdataRemapping (unused by the VM) ]]
 	if typesVersion == 3 then
 		local index = readByte()
 
@@ -596,8 +611,8 @@ local function luau_deserialize(bytecode, luau_settings)
 
 	local mainProto = protoList[readVarInt() + 1]
 
-	--cursor += 40 -- lol
-	--assert(cursor == buffer_len(stream), "deserializer cursor position mismatch")
+	--[[ cursor += 40 -- lol
+	assert(cursor == buffer_len(stream), "deserializer cursor position mismatch") ]]
 
 	mainProto.debugname = "(main)"
 
@@ -643,7 +658,7 @@ local function luau_load(module, env, luau_settings)
 			if luau_settings.errorHandling then
 				debugging, stack, protos, code, varargs = ...
 			else
-				--// Copied from error handling wrapper
+				--[[ // Copied from error handling wrapper ]]
 				local passed = table_pack(...)
 				stack = table_create(proto.maxstacksize)
 				varargs = {
@@ -687,7 +702,7 @@ local function luau_load(module, env, luau_settings)
 				end
 
 				if op == 0 then --[[ NOP ]]
-					--// Do nothing
+					--[[ // Do nothing ]]
 				elseif op == 1 then --[[ BREAK ]]
 					if breakHook then
 						breakHook(stack, debugging, proto, module, upvals)
@@ -710,12 +725,12 @@ local function luau_load(module, env, luau_settings)
 
 					stack[inst.A] = extensions[kv] or env[kv]
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 8 then --[[ SETGLOBAL ]]
 					local kv = inst.K
 					env[kv] = stack[inst.A]
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 9 then --[[ GETUPVAL ]]
 					local uv = upvals[inst.B + 1]
 					stack[inst.A] = uv.store[uv.index]
@@ -727,7 +742,7 @@ local function luau_load(module, env, luau_settings)
 						if uv.index >= inst.A then
 							uv.value = uv.store[uv.index]
 							uv.store = uv
-							uv.index = "value" --// self reference
+							uv.index = "value" --[[// self reference ]]
 							open_upvalues[i] = nil
 						end
 					end
@@ -744,7 +759,7 @@ local function luau_load(module, env, luau_settings)
 						stack[inst.A] = import[inst.K1][inst.K2]
 					end
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 13 then --[[ GETTABLE ]]
 					stack[inst.A] = stack[inst.B][stack[inst.C]]
 				elseif op == 14 then --[[ SETTABLE ]]
@@ -753,12 +768,12 @@ local function luau_load(module, env, luau_settings)
 					local index = inst.K
 					stack[inst.A] = stack[inst.B][index]
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 16 then --[[ SETTABLEKS ]]
 					local index = inst.K
 					stack[inst.B][index] = stack[inst.A]
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 17 then --[[ GETTABLEN ]]
 					stack[inst.A] = stack[inst.B][inst.C + 1]
 				elseif op == 18 then --[[ SETTABLEN ]]
@@ -777,15 +792,15 @@ local function luau_load(module, env, luau_settings)
 
 						local type = pseudo.A
 
-						if type == 0 then --// value
+						if type == 0 then --[[// value ]]
 							local upvalue = {
 								value = stack[pseudo.B],
-								index = "value",--// self reference
+								index = "value",--[[// self reference ]]
 							}
 							upvalue.store = upvalue
 
 							upvalues[i] = upvalue
-						elseif type == 1 then --// reference
+						elseif type == 1 then --[[// reference ]]
 							local index = pseudo.B
 							local prev = open_upvalues[index]
 
@@ -798,7 +813,7 @@ local function luau_load(module, env, luau_settings)
 							end
 
 							upvalues[i] = prev
-						elseif type == 2 then --// upvalue
+						elseif type == 2 then --[[// upvalue ]]
 							upvalues[i] = upvals[pseudo.B + 1]
 						end
 					end
@@ -812,11 +827,11 @@ local function luau_load(module, env, luau_settings)
 
 					stack[A + 1] = sb
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 
 					local useFallback = true
 
-					--// Special handling for native namecall behaviour
+					--[[ // Special handling for native namecall behaviour ]]
 					local useNativeHandler = luau_settings.useNativeNamecall
 
 					if useNativeHandler then
@@ -825,7 +840,7 @@ local function luau_load(module, env, luau_settings)
 						local callInst = code[pc]
 						local callOp = callInst.opcode
 
-						--// Copied from the CALL handler under
+						--[[ // Copied from the CALL handler below ]]
 						local callA, callB, callC = callInst.A, callInst.B, callInst.C
 
 						if stepHook then
@@ -844,7 +859,7 @@ local function luau_load(module, env, luau_settings)
 						if ret_list[1] == true then
 							useFallback = false
 
-							pc += 1 --// Skip next CALL instruction
+							pc += 1 --[[// Skip next CALL instruction ]]
 
 							inst = callInst
 							op = callOp
@@ -1026,7 +1041,7 @@ local function luau_load(module, env, luau_settings)
 				elseif op == 53 then --[[ NEWTABLE ]]
 					stack[inst.A] = table_create(inst.aux)
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 54 then --[[ DUPTABLE ]]
 					local template = inst.K
 					local serialized = {}
@@ -1045,7 +1060,7 @@ local function luau_load(module, env, luau_settings)
 
 					table_move(stack, B, B + c - 1, inst.aux, stack[A])
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 56 then --[[ FORNPREP ]]
 					local A = inst.A
 
@@ -1154,13 +1169,13 @@ local function luau_load(module, env, luau_settings)
 					end
 				elseif op == 59 then --[[ FORGPREP_INEXT ]]
 					if not ttisfunction(stack[inst.A]) then
-						error(string_format("attempt to iterate over a %s value", type(stack[inst.A]))) -- FORGPREP_INEXT encountered non-function value
+						error(string_format("attempt to iterate over a %s value", type(stack[inst.A]))) --[[ FORGPREP_INEXT encountered non-function value ]]
 					end
 
 					pc += inst.D
 				elseif op == 61 then --[[ FORGPREP_NEXT ]]
 					if not ttisfunction(stack[inst.A]) then
-						error(string_format("attempt to iterate over a %s value", type(stack[inst.A]))) -- FORGPREP_NEXT encountered non-function value
+						error(string_format("attempt to iterate over a %s value", type(stack[inst.A]))) --[[ FORGPREP_NEXT encountered non-function value ]]
 					end
 
 					pc += inst.D
@@ -1175,7 +1190,7 @@ local function luau_load(module, env, luau_settings)
 
 					table_move(varargs.list, 1, b, A, stack)
 				elseif op == 64 then --[[ DUPCLOSURE ]]
-					local newPrototype = protolist[inst.K + 1] --// correct behavior would be to reuse the prototype if possible but it would not be useful here
+					local newPrototype = protolist[inst.K + 1] --[[// correct behavior would be to reuse the prototype if possible but it would not be useful here ]]
 
 					local nups = newPrototype.nups
 					local upvalues = table_create(nups)
@@ -1186,17 +1201,17 @@ local function luau_load(module, env, luau_settings)
 						pc += 1
 
 						local type = pseudo.A
-						if type == 0 then --// value
+						if type == 0 then --[[// value ]]
 							local upvalue = {
 								value = stack[pseudo.B],
-								index = "value",--// self reference
+								index = "value",--[[// self reference ]]
 							}
 							upvalue.store = upvalue
 
 							upvalues[i] = upvalue
 
-							--// references dont get handled by DUPCLOSURE
-						elseif type == 2 then --// upvalue
+							--[[ // References are not handled by DUPCLOSURE. ]]
+						elseif type == 2 then --[[// upvalue ]]
 							upvalues[i] = upvals[pseudo.B + 1]
 						end
 					end
@@ -1206,7 +1221,7 @@ local function luau_load(module, env, luau_settings)
 					local kv = inst.K
 					stack[inst.A] = kv
 
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 67 then --[[ JUMPX ]]
 					if interruptHook then
 						interruptHook(stack, debugging, proto, module, upvals)
@@ -1226,10 +1241,10 @@ local function luau_load(module, env, luau_settings)
 					--[[ Skipped ]]
 				elseif op == 74 then --[[ FASTCALL2 ]]
 					--[[ Skipped ]]
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 75 then --[[ FASTCALL2K ]]
 					--[[ Skipped ]]
-					pc += 1 --// adjust for aux
+					pc += 1 --[[// adjust for aux ]]
 				elseif op == 76 then --[[ FORGPREP ]]
 					local iterator = stack[inst.A]
 
@@ -1299,7 +1314,7 @@ local function luau_load(module, env, luau_settings)
 			for i, uv in open_upvalues do
 				uv.value = uv.store[uv.index]
 				uv.store = uv
-				uv.index = "value" --// self reference
+				uv.index = "value" --[[// self reference ]]
 				open_upvalues[i] = nil
 			end
 

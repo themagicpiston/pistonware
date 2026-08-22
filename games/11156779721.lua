@@ -33,7 +33,7 @@ local Crypt = require(replicatedStorage.Crypt)
 
 local top = replicatedStorage:WaitForChild('Water'):WaitForChild('top')
 local topY = top.Position.Y + top.Size.Y / 2
---local anticheatloop = getconnections(main.Marco.OnClientEvent)[1].Function
+--[[ local anticheatloop = getconnections(main.Marco.OnClientEvent)[1].Function ]]
 
 local function getSpeed()
 	local factor = 3.25
@@ -157,7 +157,7 @@ run(function()
 		Tooltip = 'Tiredless simulator'
 	})
 end)
-	
+
 local Attacking
 run(function()
 	local Killaura
@@ -191,7 +191,7 @@ run(function()
 	local function block(state)
 		if blocking == state then return end
 		blocking = state
-		--autoBlock:FireServer(state)
+		--[[ autoBlock:FireServer(state) ]]
 	end
 
 	Killaura = vape.Categories.Blatant:CreateModule({
@@ -490,7 +490,7 @@ run(function()
 						if state == Enum.HumanoidStateType.Climbing then return end
 	
 						local root, velo = entitylib.character.RootPart, getSpeed()
-						local moveDirection = AntiFallDirection or entitylib.character.Humanoid.MoveDirection
+						local moveDirection = entitylib.character.Humanoid.MoveDirection
 						local destination = (moveDirection * math.max(velo - entitylib.character.Humanoid.WalkSpeed, 0) * dt)
 	
 						if WallCheck.Enabled then
@@ -748,7 +748,7 @@ run(function()
 		Name = 'Breaker',
 		Function = function(callback)
 			if callback then
-				local oldhp = -1
+				local oldhealth = -1
 	
 				for _, obj in workspace.worldResources:GetDescendants() do
 					if obj:GetAttribute('health') then 
@@ -809,4 +809,3 @@ run(function()
 		Default = true
 	})
 end)
-	

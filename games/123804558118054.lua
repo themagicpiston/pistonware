@@ -6,6 +6,10 @@ local loadstring = function(...)
 	end
 	return res
 end
+local function runChunk(source, name)
+	local chunk = loadstring(source, name)
+	if chunk then chunk() end
+end
 local isfile = isfile or function(file)
 	local suc, res = pcall(function()
 		return readfile(file)
@@ -30,14 +34,14 @@ end
 
 vape.Place = 5938036553
 if isfile('pistonware/games/'..vape.Place..'.lua') then
-	loadstring(readfile('pistonware/games/'..vape.Place..'.lua'), 'bedwars')()
+	runChunk(readfile('pistonware/games/'..vape.Place..'.lua'), 'bedwars')
 else
 	if not shared.PistonwareDeveloper then
 		local suc, res = pcall(function()
 			return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/'..vape.Place..'.lua', true)
 		end)
 		if suc and res ~= '404: Not Found' then
-			loadstring(downloadFile('pistonware/games/'..vape.Place..'.lua'), 'bedwars')()
+			runChunk(downloadFile('pistonware/games/'..vape.Place..'.lua'), 'bedwars')
 		end
 	end
 end

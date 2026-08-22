@@ -129,7 +129,7 @@ run(function()
 		DefaultMax = 12
 	})
 end)
-	
+
 run(function()
 	local old
 	
@@ -821,7 +821,7 @@ run(function()
 	
 								local block = store.blocks[currentpos]
 								if not block then
-									blockpos = checkAdjacent(currentpos) and currentpos or blockProximity(currentpos)
+									local blockpos = checkAdjacent(currentpos) and currentpos or blockProximity(currentpos)
 									if blockpos then
 										local fake = replicatedStorage.Assets.Blocks[btype]:Clone()
 										fake.Name = 'TempBlock'
@@ -909,13 +909,13 @@ run(function()
 		local nextItem, itemTier
 		for i, v in category.tiers do
 			if currencytable[v.name] then
-				nextItem, nextTier = category.tiers[i + 1], i + 1
+				nextItem, itemTier = category.tiers[i + 1], i + 1
 				break
 			end
 		end
 	
 		if nextItem and canBuy(nextItem, currencytable) then
-			buyItem(nextItem, nextTier, category.name, currencytable)
+			buyItem(nextItem, itemTier, category.name, currencytable)
 		end
 	end
 	
@@ -1018,7 +1018,7 @@ run(function()
 		Name = 'Buy Pickaxe',
 		Function = function(callback)
 			npctick = tick()
-			Functions[1] = callback and function(currencytable, shop)
+			Functions[3] = callback and function(currencytable, shop)
 				if not shop then return end
 				buyTier(bd.BedwarsShop[3].items[1], currencytable)
 			end or nil
@@ -1073,6 +1073,7 @@ run(function()
 	local Breaker
 	local Value
 	local OnlyPlayer
+	local Range
 	
 	local function getBlocksInPoints(s, e)
 		local list = {}
@@ -1156,4 +1157,3 @@ run(function()
 		end
 	})
 end)
-	

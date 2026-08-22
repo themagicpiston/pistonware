@@ -49,7 +49,10 @@ local prediction = vape.Libraries.prediction
 local targetinfo = vape.Libraries.targetinfo
 local sessioninfo = vape.Libraries.sessioninfo
 local getcustomasset = vape.Libraries.getcustomasset
-local drawingactor = loadstring(downloadFile('pistonware/libraries/drawing.lua'), 'drawing')(...)
+local drawingChunk = loadstring(downloadFile('pistonware/libraries/drawing.lua'), 'drawing')
+if not drawingChunk then return end
+local drawingactor = drawingChunk(...)
+if not drawingactor then return end
 local function notif(...)
 	return vape:CreateNotification(...)
 end
@@ -135,7 +138,7 @@ local function hookEvent(id, rfunc)
 		frontlines.Functions[func] = hook
 		return function()
 			if not frontlines.Functions[func] then return end
-			--restorefunction(func)
+			--[[ restorefunction(func) ]]
 			hookfunction(func, frontlines.Functions[func])
 			frontlines.Functions[func] = nil
 		end
@@ -543,7 +546,7 @@ run(function()
 	
 	local function getTarget(origin, obj)
 		if rand.NextNumber(rand, 0, 100) > (AutoFire.Enabled and 100 or HitChance.Value) then return end
-		--local targetPart = (Random.new().NextNumber(Random.new(), 0, 100) < (AutoFire.Enabled and 100 or HeadshotChance.Value)) and 'Head' or 'RootPart'
+		--[[ local targetPart = (Random.new().NextNumber(Random.new(), 0, 100) < (AutoFire.Enabled and 100 or HeadshotChance.Value)) and 'Head' or 'RootPart' ]]
 		local targetPart = 'RootPart'
 		local ent = entitylib['Entity'..Mode.Value]({
 			Range = Range.Value,
@@ -736,7 +739,7 @@ run(function()
 		Visible = false
 	})
 end)
-	
+
 run(function()
 	local Sprint
 	
@@ -817,6 +820,7 @@ run(function()
 	local Spread
 	local FireRate
 	local Automatic
+	local GunModifications
 	
 	GunModifications = vape.Categories.Blatant:CreateModule({
 		Name = 'GunModifications',
@@ -1629,4 +1633,3 @@ run(function()
 		end
 	})
 end)
-	

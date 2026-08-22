@@ -3,6 +3,13 @@ if not shared.PistonwareAuthenticated then
 	return
 end
 
+--[[ Every module in this file and in bedwars.lua is registered inside one of these -- 60 blocks
+here, 59 there, all at top level, and bedwars.lua takes this same function through bw.run.
+Unprotected, an error anywhere in any of them aborted the rest of the file: every module
+below the failure never registered, and in bedwars.lua the completion signal on the last
+line never ran either, so main.lua sat in waitForModules for the full 120s before loading a
+profile against a half-built module set. One game update touching one API took the whole
+script down that way. Contained here, a bad block costs its own modules and nothing else. ]]
 local run = function(func)
 	if shared.VapeSmoothBoot then task.wait() end
 	local ok, err = pcall(func)
@@ -41,11 +48,11 @@ local lightingService = cloneref(game:GetService('Lighting'))
 local teleportService = cloneref(game:GetService("TeleportService"))
 local virtualInputManager = cloneref(game:GetService('VirtualInputManager'))
 
--- identifyexecutor exists but THROWS on several mobile executors, and this runs at the top
--- level of the file -- so an unguarded call here does not degrade one feature, it kills the
--- whole game script before a single module registers. main.lua already carries a comment
--- saying exactly this about its own call; these three never got the same treatment, and this
--- is the file BedWars users load.
+--[[ identifyexecutor exists but THROWS on several mobile executors, and this runs at the top
+level of the file -- so an unguarded call here does not degrade one feature, it kills the
+whole game script before a single module registers. main.lua already carries a comment
+saying exactly this about its own call; these three never got the same treatment, and this
+is the file BedWars users load. ]]
 local function executorName()
 	local ok, name = pcall(function()
 		return identifyexecutor and ({identifyexecutor()})[1] or nil
@@ -96,19 +103,19 @@ local TrapDisabler
 local AntiFallPart
 local bedwars, remotes, sides, oldinvrender, oldSwing = {}, {}, {}
 
--- Resolves a player's active enchant to its icon. Enchants replicate as
--- StatusEffect_<type> attributes on the character (with a matching _stacks
--- attribute that is skipped), so the type has to be run back through
--- StatusEffectMeta and stripped of its _1/_2/_3 level suffix before EnchantMeta
--- will recognise it. Indexed rather than precomputed because the set changes
--- constantly mid-fight.
---
--- Has to sit BELOW the `local bedwars` declaration above, not up with the rest of
--- `store`. A local is only in scope for code that comes after it, so from up there
--- these `bedwars` references compiled against the (never-assigned) global instead of
--- capturing the local as an upvalue -- the file assigns the local later, which this
--- closure would never have seen. Deferring the call didn't help; it was scope, not
--- timing.
+--[[ Resolves a player's active enchant to its icon. Enchants replicate as
+StatusEffect_<type> attributes on the character (with a matching _stacks
+attribute that is skipped), so the type has to be run back through
+StatusEffectMeta and stripped of its _1/_2/_3 level suffix before EnchantMeta
+will recognise it. Indexed rather than precomputed because the set changes
+constantly mid-fight.
+
+Has to sit BELOW the `local bedwars` declaration above, not up with the rest of
+`store`. A local is only in scope for code that comes after it, so from up there
+these `bedwars` references compiled against the (never-assigned) global instead of
+capturing the local as an upvalue -- the file assigns the local later, which this
+closure would never have seen. Deferring the call didn't help; it was scope, not
+timing. ]]
 store.enchants = setmetatable({}, {
 	__index = function(self, plr)
 		return {
@@ -276,12 +283,12 @@ local function getTool(breakType)
 	return best, slot
 end
 
--- Fallback for a block type nothing in the inventory is specialised for -- wool while
--- carrying a pickaxe but no shears, say. getTool only matches a tool declaring the
--- block's own breakType, so it returns nil there and the swap was skipped entirely,
--- leaving the sword in hand. A break tool still beats that, so take the strongest one
--- available judged by its best break value across all types. Only consulted after an
--- exact type match fails, so shears still win for wool whenever they're carried.
+--[[ Fallback for a block type nothing in the inventory is specialised for -- wool while
+carrying a pickaxe but no shears, say. getTool only matches a tool declaring the
+block's own breakType, so it returns nil there and the swap was skipped entirely,
+leaving the sword in hand. A break tool still beats that, so take the strongest one
+available judged by its best break value across all types. Only consulted after an
+exact type match fails, so shears still win for wool whenever they're carried. ]]
 local function getBestBreakTool()
 	local best, maxDmg = nil, 0
 	for _, item in store.inventory.inventory.items do
@@ -395,7 +402,7 @@ local function _baseGetSpeed()
 end
 
 local function getSpeed()
-    -- Delegate to shared.bedwars.getSpeed if DamageBoost has wrapped it
+    --[[ Delegate to shared.bedwars.getSpeed if DamageBoost has wrapped it ]]
     local bw = shared.bedwars
     if bw and type(bw.getSpeed) == "function" then
         return bw.getSpeed()
@@ -438,8 +445,8 @@ local function isTarget(plr)
 	return table.find(vape.Categories.Targets.ListEnabled, plr.Name) and true
 end
 
-local function notif(...) return
-	vape:CreateNotification(...)
+local function notif(...)
+	return vape:CreateNotification(...)
 end
 
 local function removeTags(str)
@@ -478,16 +485,16 @@ local function waitForChildOfType(obj, name, timeout, prop)
 	return returned
 end
 
--- Root part for a non-player entity. Prefers a rig's HumanoidRootPart over whatever
--- the model names as its PrimaryPart, and settles for either.
---
--- Player dummies -- the tutorial ones included -- are character rigs, and a rig is
--- under no obligation to name a PrimaryPart. Asking for PrimaryPart alone spent the
--- whole timeout and then handed back nil, and a nil root is why the dummy never
--- reached the entity list at all. Where a rig does name one it is often UpperTorso,
--- which is the name the helper above already had to special-case; taking the root part
--- directly sidesteps that too. Monsters that are not rigs at all -- crates, statues --
--- have no HumanoidRootPart and still fall back to PrimaryPart.
+--[[ Root part for a non-player entity. Prefers a rig's HumanoidRootPart over whatever
+the model names as its PrimaryPart, and settles for either.
+
+Player dummies -- the tutorial ones included -- are character rigs, and a rig is
+under no obligation to name a PrimaryPart. Asking for PrimaryPart alone spent the
+whole timeout and then handed back nil, and a nil root is why the dummy never
+reached the entity list at all. Where a rig does name one it is often UpperTorso,
+which is the name the helper above already had to special-case; taking the root part
+directly sidesteps that too. Monsters that are not rigs at all -- crates, statues --
+have no HumanoidRootPart and still fall back to PrimaryPart. ]]
 local function waitForRootPart(char, timeout)
 	local check = os.clock() + timeout
 	repeat
@@ -555,9 +562,9 @@ local sortmethods = {
 		return a.Entity.Health < b.Entity.Health
 	end,
 	Angle = function(a, b)
-		-- acos is monotonically DECREASING on [-1, 1], so comparing the raw dots
-		-- the other way round gives the identical ordering without two acos calls
-		-- per comparison -- this runs O(n log n) per Heartbeat when sorting by Angle
+		--[[ acos is monotonically DECREASING on [-1, 1], so comparing the raw dots
+		the other way round gives the identical ordering without two acos calls
+		per comparison -- this runs O(n log n) per Heartbeat when sorting by Angle ]]
 		local selfroot = entitylib.character.RootPart
 		local selfrootpos = selfroot.Position
 		local localfacing = selfroot.CFrame.LookVector * Vector3.new(1, 0, 1)
@@ -570,28 +577,28 @@ local sortmethods = {
 run(function()
 	local oldstart = entitylib.start
 
-	-- A Practice room dummy, by either of the two things that mark one.
-	-- training-room-entity-controller watches the tag and then reads the attribute off
-	-- the instance; the attribute is the half that actually shows up on a dummy in the
-	-- explorer, so neither is trusted alone.
+	--[[ A Practice room dummy is identified by either of the two markers.
+	training-room-entity-controller watches the tag and then reads the attribute off
+	the instance; the attribute is the half that actually shows up on a dummy in the
+	explorer, so neither is trusted alone. ]]
 	local function isTrainingDummy(ent)
 		return ent:HasTag('trainingRoomDummy') or ent:GetAttribute('TrainingRoomDummy') ~= nil
 	end
 
 	local function customEntity(ent)
-		-- Inventory entities are the shop keepers and other furniture standing around a
-		-- lobby, which is why they are skipped. But a dummy is one too -- it wears armor
-		-- and holds an item, so it has the same ArmorInvItem/HandInvItem rig a player
-		-- does -- and this guard was throwing away the only thing in the Practice room
-		-- worth hitting, no matter which tag found it.
+		--[[ Inventory entities are the shop keepers and other furniture standing around a
+		lobby, which is why they are skipped. But a dummy is one too -- it wears armor
+		and holds an item, so it has the same ArmorInvItem/HandInvItem rig a player
+		does -- and this guard was throwing away the only thing in the Practice room
+		worth hitting, no matter which tag found it. ]]
 		if ent:HasTag('inventory-entity') and not (ent:HasTag('Monster') or isTrainingDummy(ent)) then
 			return
 		end
 
-		-- Monsters are watched under their own tag as well as 'entity' (see start
-		-- below), so anything carrying both arrives here twice and would be registered
-		-- twice -- two list entries for one character, counting double against Max
-		-- targets and drawing two of every box.
+		--[[ Monsters are watched under their own tag as well as 'entity' (see start
+		below), so anything carrying both arrives here twice and would be registered
+		twice -- two list entries for one character, counting double against Max
+		targets and drawing two of every box. ]]
 		if entitylib.EntityThreads[ent] or entitylib.getEntity(ent) then
 			return
 		end
@@ -600,33 +607,33 @@ run(function()
 			local droneplr = playersService:GetPlayerByUserId(self.Character:GetAttribute('PlayerUserId'))
 			return not droneplr or lplr:GetAttribute('Team') ~= droneplr:GetAttribute('Team')
 		end or function(self)
-			-- Nothing without a team is anybody's teammate. Practice and tutorial
-			-- dummies carry no Team attribute, and in the lobby neither do we, so the
-			-- plain comparison had nil equal to nil and read every dummy as friendly --
-			-- untargetable in exactly the place where they are the only thing to hit.
-			-- In a real match this changes nothing: a team-less monster was already
-			-- targetable there, since our own team is set.
+			--[[ Nothing without a team is anybody's teammate. Practice and tutorial
+			dummies carry no Team attribute, and in the lobby neither do we, so the
+			plain comparison had nil equal to nil and read every dummy as friendly --
+			untargetable in exactly the place where they are the only thing to hit.
+			In a real match this changes nothing: a team-less monster was already
+			targetable there, since our own team is set. ]]
 			local theirteam = self.Character:GetAttribute('Team')
 			if theirteam == nil then return true end
 			return lplr:GetAttribute('Team') ~= theirteam
 		end)
 	end
 
-	-- Dummies are entities the 'entity' tag alone never reaches, and they come in two
-	-- kinds under two different tags:
-	--
-	--   Monster             tutorial dummies. The game's own entity-util resolves these
-	--                       through its inventory-entity branch, which returns before it
-	--                       ever asks whether the instance carries 'entity' -- so a
-	--                       player dummy is a full entity to the game while being
-	--                       invisible to a watcher that only knows the one tag. Monster
-	--                       is what the game itself watches for them, in
-	--                       player-dummy-controller and in the tutorial's kill tasks.
-	--   trainingRoomDummy   the Practice room's dummies, tagged and driven entirely by
-	--                       training-room-entity-controller.
-	--
-	-- customEntity dedupes, so anything holding more than one of these is still
-	-- registered once.
+	--[[ Dummies are entities the 'entity' tag alone never reaches, and they come in two
+	kinds under two different tags:
+
+	  Monster             tutorial dummies. The game's own entity-util resolves these
+	                      through its inventory-entity branch, which returns before it
+	                      ever asks whether the instance carries 'entity' -- so a
+	                      player dummy is a full entity to the game while being
+	                      invisible to a watcher that only knows the one tag. Monster
+	                      is what the game itself watches for them, in
+	                      player-dummy-controller and in the tutorial's kill tasks.
+	  trainingRoomDummy   the Practice room's dummies, tagged and driven entirely by
+	                      training-room-entity-controller.
+
+	customEntity dedupes, so anything holding more than one of these is still
+	registered once. ]]
 	local ENTITY_TAGS = {'entity', 'Monster', 'trainingRoomDummy'}
 
 	entitylib.start = function()
@@ -823,12 +830,12 @@ run(function()
 end)
 entitylib.start()
 
--- pistonware funcs
+--[[ pistonware funcs ]]
 
 local genv = getgenv()
--- Idempotent shared-state defaults: fill a key only if a previous execution
--- hasn't already set it. Add new flags here instead of another line below.
--- (== nil, not `or`, so a stored `false` is never clobbered back to default.)
+--[[ Idempotent shared-state defaults: fill a key only if a previous execution
+hasn't already set it. Add new flags here instead of another line below.
+(== nil, not `or`, so a stored `false` is never clobbered back to default.) ]]
 for key, default in pairs({
 	IsLongJumping            = false,
 	LongJumpFireballThrown   = false,
@@ -854,34 +861,34 @@ lplr.CharacterAdded:Connect(function(c)
     ensureCharPrimaryPart(c)
 end)
 
--- == shared __namecall guard ==
--- There is exactly ONE global __namecall hook in the whole product and it lives
--- here, in the unobfuscated file. Every namecall in the game -- including the
--- tens of thousands Roact issues while it builds and re-renders the item shop --
--- passes through this function, so it must stay native-speed Lua. A hook
--- installed from bedwars.lua costs a Luraph VM re-entry on each of those calls,
--- which is what turned opening the shop (and every purchase re-render) into a
--- visible hitch while leaving the unobfuscated build smooth.
---
--- Modules that need to see or block a specific remote register the exact
--- (Instance, method) pair here via shared.bedwars.namecallGuard instead. The hot
--- path cost is one hash lookup; handlers only ever run for instances somebody
--- actually asked about.
+--[[ == shared __namecall guard ==
+There is exactly ONE global __namecall hook in the whole product and it lives
+here, in the unobfuscated file. Every namecall in the game -- including the
+tens of thousands Roact issues while it builds and re-renders the item shop --
+passes through this function, so it must stay native-speed Lua. A hook
+installed from bedwars.lua costs a Luraph VM re-entry on each of those calls,
+which is what turned opening the shop (and every purchase re-render) into a
+visible hitch while leaving the unobfuscated build smooth.
+
+Modules that need to see or block a specific remote register the exact
+(Instance, method) pair here via shared.bedwars.namecallGuard instead. The hot
+path cost is one hash lookup; handlers only ever run for instances somebody
+actually asked about. ]]
 local namecallWatch = {}
 local namecallGuard = {}
 
--- handler may be `true` to swallow the call outright, or a function. From a function:
---   nil / false       -- let the call through unchanged
---   a table           -- REPLACEMENT ARGUMENTS, table.pack shape (`n` plus 1..n), forwarded
---                        to the same method in place of the originals
---   any other truthy  -- swallow the call
--- Method names are matched exactly as getnamecallmethod() reports them.
---
--- The table form exists so a module can rewrite what a remote sends without installing a
--- second __namecall hook of its own. That is not a style preference: a hook installed from
--- bedwars.lua charges a Luraph VM re-entry to EVERY namecall in the game, and the item shop
--- issues tens of thousands of them per Roact render -- enough to take the client down when
--- the shop opens. Registering here costs one hash lookup on the hot path instead.
+--[[ handler may be `true` to swallow the call outright, or a function. From a function:
+  nil / false       -- let the call through unchanged
+  a table           -- REPLACEMENT ARGUMENTS, table.pack shape (`n` plus 1..n), forwarded
+                       to the same method in place of the originals
+  any other truthy  -- swallow the call
+Method names are matched exactly as getnamecallmethod() reports them.
+
+The table form exists so a module can rewrite what a remote sends without installing a
+second __namecall hook of its own. That is not a style preference: a hook installed from
+bedwars.lua charges a Luraph VM re-entry to EVERY namecall in the game, and the item shop
+issues tens of thousands of them per Roact render -- enough to take the client down when
+the shop opens. Registering here costs one hash lookup on the hot path instead. ]]
 function namecallGuard.watch(inst, method, handler)
     if typeof(inst) ~= 'Instance' or type(method) ~= 'string' then return false end
     local entry = namecallWatch[inst]
@@ -893,12 +900,12 @@ function namecallGuard.watch(inst, method, handler)
     return true
 end
 
--- Marks that the __namecall body below understands a table return as replacement arguments.
--- bedwars.lua ships from GitLab and this file from GitHub, and both are cached independently,
--- so the two genuinely can run out of step. Against a guard that predates the contract a
--- returned table reads as plain truthy -- i.e. "swallow" -- so the call the handler meant to
--- adjust is eaten instead, and the module looks broken rather than absent. Modules test this
--- before registering a rewriting handler.
+--[[ Marks that the __namecall body below understands a table return as replacement arguments.
+bedwars.lua ships from GitLab and this file from GitHub, and both are cached independently,
+so the two genuinely can run out of step. Against a guard that predates the contract a
+returned table reads as plain truthy -- i.e. "swallow" -- so the call the handler meant to
+adjust is eaten instead, and the module looks broken rather than absent. Modules test this
+before registering a rewriting handler. ]]
 namecallGuard.rewrites = true
 
 function namecallGuard.block(inst, method)
@@ -958,36 +965,36 @@ mt.__namecall = function(self, ...)
             return
         elseif handler then
             local ok, result = pcall(handler, self, ...)
-            -- Any truthy non-table result swallows the call, as it always did.
+            --[[ Any truthy non-table result swallows the call, as it always did. ]]
             if ok and result ~= nil and result ~= false and type(result) ~= 'table' then
                 return
             end
             local replacement = (ok and type(result) == 'table') and result or nil
 
-            -- Forward as a NAMECALL wherever that is still correct, because the
-            -- index-and-call path below is observably different from the outside. It
-            -- turns one `remote:FireServer(x)` into an __index plus a direct call, so
-            -- anything instrumenting the method itself -- a remote spy, another
-            -- executor hook -- sees the call a second time and reports the remote as
-            -- firing twice. Only ever one packet reached the server, but the duplicate
-            -- is indistinguishable from a real double-send when you are debugging one,
-            -- and SwordHit is watched for rate limiting, so every sword swing hit it.
-            --
-            -- The original concern is real but narrower than it looks:
-            -- getnamecallmethod() reports the LAST namecall made on this thread, so if
-            -- the handler made namecalls of its own, oldNamecall would dispatch off
-            -- whatever it touched last. That is testable rather than assumed -- re-read
-            -- it and compare. Unchanged means no handler namecall clobbered it and
-            -- oldNamecall dispatches exactly what we entered with.
+            --[[ Forward as a NAMECALL wherever that is still correct, because the
+            index-and-call path below is observably different from the outside. It
+            turns one `remote:FireServer(x)` into an __index plus a direct call, so
+            anything instrumenting the method itself -- a remote spy, another
+            executor hook -- sees the call a second time and reports the remote as
+            firing twice. Only ever one packet reached the server, but the duplicate
+            is indistinguishable from a real double-send when you are debugging one,
+            and SwordHit is watched for rate limiting, so every sword swing hit it.
+
+            The concern remains, but it is narrower than it looks:
+            getnamecallmethod() reports the LAST namecall made on this thread, so if
+            the handler made namecalls of its own, oldNamecall would dispatch off
+            whatever it touched last. That is testable rather than assumed -- re-read
+            it and compare. Unchanged means no handler namecall clobbered it and
+            oldNamecall dispatches exactly what we entered with. ]]
             if not replacement and getnamecallmethod() == method then
                 return oldNamecall(self, ...)
             end
 
-            -- Fallback for the two cases the above cannot cover: a handler that
-            -- rewrote the arguments (oldNamecall would forward the originals), and a
-            -- handler whose own namecalls moved getnamecallmethod() out from under us.
-            -- Indexing the method off self carries it with the value and cannot be
-            -- clobbered, at the cost of the duplicate observation described above.
+            --[[ Fallback for the two cases the above cannot cover: a handler that
+            rewrote the arguments (oldNamecall would forward the originals), and a
+            handler whose own namecalls moved getnamecallmethod() out from under us.
+            Indexing the method off self carries it with the value and cannot be
+            clobbered, at the cost of the duplicate observation described above. ]]
             local fn = self[method]
             if type(fn) == 'function' then
                 if replacement then
@@ -1045,21 +1052,21 @@ function RunLoops:UnbindFromHeartbeat(name)
     end
 end
 
--- Substring match of an instance name against a TextList's switched-on entries.
---
--- Reads ListEnabled, not Objects. Objects holds the list window's row BUTTONS, and
--- every one of them has Text = '' (the visible text lives on a child TextLabel) and
--- the default Name 'TextButton' -- so the old version compared every name against
--- the literal string "textbutton" and matched nothing, ever. Objects is also the
--- wrong set even when read correctly: it holds every entry, including the ones the
--- user switched off. ListEnabled is the enabled subset and is what the rest of the
--- script reads.
---
--- Plain-text find, since item names carry '-' and '(' which read as pattern syntax
--- and would either mis-match or throw.
+--[[ Substring match of an instance name against a TextList's switched-on entries.
+
+Reads ListEnabled, not Objects. Objects holds the list window's row BUTTONS, and
+every one of them has Text = '' (the visible text lives on a child TextLabel) and
+the default Name 'TextButton' -- so the old version compared every name against
+the literal string "textbutton" and matched nothing, ever. Objects is also the
+wrong set even when read correctly: it holds every entry, including the ones the
+user switched off. ListEnabled is the enabled subset and is what the rest of the
+script reads.
+
+Plain-text find, since item names carry '-' and '(' which read as pattern syntax
+and would either mis-match or throw. ]]
 local function entryMatches(objName, list)
     if type(objName) ~= "string" or type(list) ~= "table" then return false end
-    -- A bare array of strings is accepted too, so callers can pass List.ListEnabled.
+    --[[ A bare array of strings is accepted too, so callers can pass List.ListEnabled. ]]
     local entries = list.ListEnabled or list.List or list
     if type(entries) ~= "table" then return false end
     local lowerName = objName:lower()
@@ -1080,10 +1087,10 @@ local function safeGetProto(func, index)
     if success then
         return proto
     else
-        -- Developer-only. This prints a raw function pointer and an index, which means nothing
-        -- to a user and fires on executors whose debug.getproto is simply missing -- so on
-        -- those it used to spray the console on every call for no reason. The caller already
-        -- handles nil.
+        --[[ Developer-only. This prints a raw function pointer and an index, which means nothing
+        to a user and fires on executors whose debug.getproto is simply missing -- so on
+        those it used to spray the console on every call for no reason. The caller already
+        handles nil. ]]
         if shared.PistonwareDeveloper then
             warn('[pistonware] getproto failed -- function:', func, 'index:', index)
         end
@@ -1091,13 +1098,13 @@ local function safeGetProto(func, index)
     end
 end
 
--- The `out` barrel re-exports sound-manager, but each of its re-exports is guarded by
--- `or {}`, so a build where that submodule fails to resolve silently drops the key and
--- leaves SoundManager nil -- which is how "attempt to index nil with 'playSound'" reached
--- both SoundChanger and the projectile launch sound. Handing back a stub instead of nil is
--- what fixes that: a dozen call sites across both files index this directly and none of
--- them are worth taking down over a missing sound effect. Every method on the stub is a
--- no-op, and SoundChanger's hook and restore still work against it.
+--[[ The `out` barrel re-exports sound-manager, but each of its re-exports is guarded by
+`or {}`, so a build where that submodule fails to resolve silently drops the key and
+leaves SoundManager nil -- which is how "attempt to index nil with 'playSound'" reached
+both SoundChanger and the projectile launch sound. Handing back a stub instead of nil is
+what fixes that: a dozen call sites across both files index this directly and none of
+them are worth taking down over a missing sound effect. Every method on the stub is a
+no-op, and SoundChanger's hook and restore still work against it. ]]
 local function resolveSoundManager()
     local ok, res = pcall(function()
         return require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).SoundManager
@@ -1107,7 +1114,7 @@ local function resolveSoundManager()
     return setmetatable({}, {__index = function() return blankFunction end})
 end
 
--- pistonware funcs
+--[[ pistonware funcs ]]
 
 run(function()
 	local KnitInit, Knit
@@ -1119,11 +1126,11 @@ run(function()
 		task.wait()
 	until KnitInit
 
-	-- pcall'd, and with a deadline. Two separate hazards, both fatal here before the fix:
-	-- Knit.Start is nil if a game update reshapes Knit, and debug.getupvalue(nil, 1) THROWS --
-	-- which killed this block before the bedwars table on the next line was ever built, taking
-	-- every module in this file and bedwars.lua with it. And a Knit that loads but never
-	-- finishes starting parked this loop at frame rate for the rest of the session.
+	--[[ The wait is protected by pcall and has a deadline. Two separate hazards, both fatal here before the fix:
+	Knit.Start is nil if a game update reshapes Knit, and debug.getupvalue(nil, 1) THROWS --
+	which killed this block before the bedwars table on the next line was ever built, taking
+	every module in this file and bedwars.lua with it. And a Knit that loads but never
+	finishes starting parked this loop at frame rate for the rest of the session. ]]
 	local knitDeadline = os.clock() + 60
 	while true do
 		local started, value = pcall(debug.getupvalue, Knit.Start, 1)
@@ -1260,7 +1267,7 @@ run(function()
 	for i, v in remoteNames do
 		local remote = dumpRemote(debug.getconstants(v))
 		if remote == '' then
-			--notif('Pistonware', 'Failed to grab remote ('..i..')', 10, 'alert')
+			--[[ notif('Pistonware', 'Failed to grab remote ('..i..')', 10, 'alert') ]]
 		end
 		remotes[i] = remote
 	end
@@ -1336,9 +1343,9 @@ run(function()
 		return getBlockHealth(block, bedwars.BlockController:getBlockPosition(blockpos)) / tool
 	end
 
-	-- Published for the same reason breakBlock and placeBlock are: Breaker's 'Health' mode
-	-- ranks the blocks around you and has to measure them the way the dig-spot ranking
-	-- inside breakBlock already does, or the two disagree about what is cheapest.
+	--[[ Published for the same reason breakBlock and placeBlock are: Breaker's 'Health' mode
+	ranks the blocks around you and has to measure them the way the dig-spot ranking
+	inside breakBlock already does, or the two disagree about what is cheapest. ]]
 	bedwars.getBlockHits = getBlockHits
 
 	--[[
@@ -1365,12 +1372,12 @@ run(function()
 		cost it is on rather than everything reachable. An exposed bed is answered on the first
 		pop, at zero cost, instead of after a full sweep of everything joined to it.
 
-		Finishing that one cost band is the part worth keeping deliberately. Ties are the
+		The search intentionally finishes that cost band. Ties are the
 		normal case here, not an edge case -- every cell of a one-layer cover is the same one
 		block from the target -- and which of them the answer names decides where the break
 		actually lands. The nearest to the player wins it; see the loop.
 
-		Nothing is cached, and that is a decision rather than an omission. There used to be a
+		Nothing is cached by design. There used to be a
 		table of answers keyed by target cell, from when a call cost a full sweep and paying it
 		every pass was unthinkable. It has to go now that the cost is made of block HEALTH:
 		health falls with every hit landed, changes nothing about the layout and fires no event
@@ -1420,26 +1427,26 @@ run(function()
 			return top
 		end
 
-		-- Cheapest wins, and the nearest of the cheapest wins the tie.
-		--
-		-- The tie is not an edge case, it is the normal case: every cell of a one-layer cover
-		-- costs the same one block to get through, so the top of the pile, the far side and
-		-- the face you are standing at are all equally cheap, and picking whichever the queue
-		-- happened to reach first is picking at random. Which of them the answer names decides
-		-- where the break lands, and a spot on the wrong side of a structure is one Block Check
-		-- then has to walk all the way back -- when it can, and it could not always.
+		--[[ Cheapest wins, and the nearest of the cheapest wins the tie.
+
+		The tie is not an edge case, it is the normal case: every cell of a one-layer cover
+		costs the same one block to get through, so the top of the pile, the far side and
+		the face you are standing at are all equally cheap, and picking whichever the queue
+		happened to reach first is picking at random. Which of them the answer names decides
+		where the break lands, and a spot on the wrong side of a structure is one Block Check
+		then has to walk all the way back -- when it can, and it could not always. ]]
 		local best, bestcost, bestrange
 		for _ = 1, 10000 do
 			local node = pop()
 			if not node then break end
 
 			local cost, current = node[1], node[2]
-			-- Nodes come off cheapest first, so once one costs more than the answer already
-			-- in hand, nothing still queued can beat it. The slack is for float noise: two
-			-- routes through the same blocks can add up in different orders.
+			--[[ Nodes come off cheapest first, so once one costs more than the answer already
+			in hand, nothing still queued can beat it. The slack is for float noise: two
+			routes through the same blocks can add up in different orders. ]]
 			if best and cost > bestcost + 0.0001 then break end
-			-- A cell can sit in the heap more than once, from before its distance was
-			-- improved; the first pop is the good one and the rest are stale.
+			--[[ A cell can sit in the heap more than once, from before its distance was
+			improved; the first pop is the good one and the rest are stale. ]]
 			if visited[current] then continue end
 			visited[current] = true
 
@@ -1477,27 +1484,27 @@ run(function()
 		end
 	end
 
-	-- Where does the line from the player to this dig spot first meet a block? That block is
-	-- what someone standing here would actually hit swinging at it, and it is what has to come
-	-- off before anything behind it can be reached. calculatePath calls a cell diggable when
-	-- ANY of its six faces touches air, including the face underneath it or the one on the far
-	-- side, so its answer on its own happily digs a covered bed straight through its cover.
-	--
-	-- Marched cell by cell along the whole line. It used to hop one cell at a time along
-	-- whichever axis dominated, which is blind in exactly the case that matters: a dig spot up
-	-- on a mound has air beside it on that axis, so the very first hop found nothing, the walk
-	-- stopped, and the spot reported itself as the thing in the way -- Block Check waving
-	-- through a break into the middle of a structure with the wall in front of the player
-	-- untouched. A march cannot miss it: the wall is on the line whether or not it happens to
-	-- lie along the dominant axis.
-	--
-	-- Done against the block store rather than with a raycast: blocks render through chunked
-	-- geometry, so a ray reports chunk parts instead of the block the store hands back and
-	-- cannot tell a target apart from whatever covers it.
-	--
-	-- t runs 0 at the player to 1 at the dig spot: next* is the t at which the march crosses
-	-- into the following cell on that axis, delta* is the t one whole cell costs there, and an
-	-- axis the line does not move along never comes up for its turn.
+	--[[ Where does the line from the player to this dig spot first meet a block? That block is
+	what someone standing here would actually hit swinging at it, and it is what has to come
+	off before anything behind it can be reached. calculatePath calls a cell diggable when
+	ANY of its six faces touches air, including the face underneath it or the one on the far
+	side, so its answer on its own happily digs a covered bed straight through its cover.
+
+		The code now marches cell by cell along the whole line. It used to hop one cell at a time along
+	whichever axis dominated, which is blind in exactly the case that matters: a dig spot up
+	on a mound has air beside it on that axis, so the very first hop found nothing, the walk
+	stopped, and the spot reported itself as the thing in the way -- Block Check waving
+	through a break into the middle of a structure with the wall in front of the player
+	untouched. A march cannot miss it: the wall is on the line whether or not it happens to
+	lie along the dominant axis.
+
+	Done against the block store rather than with a raycast: blocks render through chunked
+	geometry, so a ray reports chunk parts instead of the block the store hands back and
+	cannot tell a target apart from whatever covers it.
+
+	t runs 0 at the player to 1 at the dig spot: next* is the t at which the march crosses
+	into the following cell on that axis, delta* is the t one whole cell costs there, and an
+	axis the line does not move along never comes up for its turn. ]]
 	local function boundary(index, component, delta)
 		if delta == 0 then
 			return 0, math.huge, math.huge
@@ -1509,8 +1516,8 @@ run(function()
 	local function frontOf(worldpos)
 		if not entitylib.isAlive then return worldpos end
 
-		-- From the head, not the root: it is the eye line that decides what is reachable, and
-		-- a root at foot height reads a floor block as cover when nothing is in the way.
+		--[[ From the head, not the root: it is the eye line that decides what is reachable, and
+		a root at foot height reads a floor block as cover when nothing is in the way. ]]
 		local head = entitylib.character.Head
 		local origin = (head and head.Position) or entitylib.character.RootPart.Position
 		local direction = worldpos - origin
@@ -1521,10 +1528,10 @@ run(function()
 		local stepy, nexty, deltay = boundary(y, origin.Y, direction.Y)
 		local stepz, nextz, deltaz = boundary(z, origin.Z, direction.Z)
 
-		-- 30 studs of reach is ten cells, and a diagonal line crosses at most one boundary per
-		-- axis per cell, so this cannot run out before the spot does.
+		--[[ 30 studs of reach is ten cells, and a diagonal line crosses at most one boundary per
+		axis per cell, so this cannot run out before the spot does. ]]
 		for _ = 1, 40 do
-			-- every axis past its last boundary: the spot itself is the next thing on the line
+			--[[ every axis past its last boundary: the spot itself is the next thing on the line ]]
 			if nextx > 1 and nexty > 1 and nextz > 1 then break end
 
 			if nextx <= nexty and nextx <= nextz then
@@ -1540,11 +1547,11 @@ run(function()
 
 			local block = getPlacedBlock(cell * 3)
 			if block then
-				-- Something unbreakable on the line means there is no shot at this spot at
-				-- all, and naming it would only send the break at a block that never yields.
-				-- Hand the spot back unchanged, and say so: 'nothing in the way' and 'no way
-				-- through' arrive as the same spot otherwise, and the caller has to tell a
-				-- clear shot from a sealed one.
+				--[[ Something unbreakable on the line means there is no shot at this spot at
+				all, and naming it would only send the break at a block that never yields.
+				Hand the spot back unchanged, and say so: 'nothing in the way' and 'no way
+				through' arrive as the same spot otherwise, and the caller has to tell a
+				clear shot from a sealed one. ]]
 				if block:GetAttribute('NoBreak') then return worldpos, true end
 				return cell * 3
 			end
@@ -1560,19 +1567,19 @@ run(function()
 		end
 	end
 
-	-- blockcheck: when true, walk the chosen dig spot back to whatever physically stands
-	--   between it and the player, so cover comes off first instead of being mined through.
-	--   Anything else (false, or the nil every other caller passes) leaves the original
-	--   behaviour completely alone -- pathfind and dig, cover or no cover.
-	-- method: 'Distance' ranks candidates by how far the dig spot is from the player;
-	--   anything else keeps the original ranking, fewest hits to get through. The ranking
-	--   still decides which cell is aimed at; blockcheck only walks that choice back to
-	--   whatever is physically in front of it.
-	-- autotool: pick the tool by selecting its hotbar slot (what the AutoTool module does)
-	--   instead of equipping it directly. The correct tool is equipped either way -- this
-	--   only decides which route gets used.
-	-- The ranking matters: picking purely by hit count can settle on a spot on the far side
-	-- of the block, and the 30-stud guard below then aborts the break outright.
+	--[[ blockcheck: when true, walk the chosen dig spot back to whatever physically stands
+	  between it and the player, so cover comes off first instead of being mined through.
+	  Anything else (false, or the nil every other caller passes) leaves the original
+	  behaviour completely alone -- pathfind and dig, cover or no cover.
+	method: 'Distance' ranks candidates by how far the dig spot is from the player;
+	  anything else keeps the original ranking, fewest hits to get through. The ranking
+	  still decides which cell is aimed at; blockcheck only walks that choice back to
+	  whatever is physically in front of it.
+	autotool: pick the tool by selecting its hotbar slot (what the AutoTool module does)
+	  instead of equipping it directly. The correct tool is equipped either way -- this
+	  only decides which route gets used.
+	The ranking matters: picking purely by hit count can settle on a spot on the far side
+	of the block, and the 30-stud guard below then aborts the break outright. ]]
 	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method, autotool)
 		if lplr:GetAttribute('DenyBlockBreak') or not entitylib.isAlive then return end
 		local handler = bedwars.BlockController:getHandlerRegistry():getHandler(block.Name)
@@ -1585,18 +1592,18 @@ run(function()
 			local cell = v * 3
 			local dpos, dcost, dpath = calculatePath(block, cell)
 			if dpos then
-				-- Does this candidate land on the block itself rather than on something
-				-- covering it? calculatePath answers with the cell it started from when that
-				-- cell already touches air, so dpos == cell IS 'this side of the block is
-				-- open'. Preferred outright, because aiming at the target beats aiming at its
-				-- cover and 'Distance' would otherwise rank a nearer cover cell above an open
-				-- bed. It is only a preference: blockcheck still gets the last word below, and
-				-- sends the break back onto the cover when the open side cannot be reached
-				-- from where the player stands.
+				--[[ Does this candidate land on the block itself rather than on something
+				covering it? calculatePath answers with the cell it started from when that
+				cell already touches air, so dpos == cell IS 'this side of the block is
+				open'. Preferred outright, because aiming at the target beats aiming at its
+				cover and 'Distance' would otherwise rank a nearer cover cell above an open
+				bed. It is only a preference: blockcheck still gets the last word below, and
+				sends the break back onto the cover when the open side cannot be reached
+				from where the player stands. ]]
 				local ddirect = dpos == cell
 				local score = method == 'Distance' and (selfpos - dpos).Magnitude or dcost
-				-- Kept a strict boolean: a single-celled block offers one candidate, so for
-				-- every caller but a bed this collapses to the original `score < cost`
+				--[[ Kept a strict boolean: a single-celled block offers one candidate, so for
+				every caller but a bed this collapses to the original `score < cost` ]]
 				local better
 				if ddirect ~= direct then
 					better = ddirect
@@ -1609,24 +1616,24 @@ run(function()
 			end
 		end
 
-		-- Block Check. The spot chosen above is picked by the selected metric, but it can sit
-		-- behind the cover (an air face under the bed, or one on its far side, or a cell up on
-		-- top of a mound) and hitting it there is what reads as mining straight through the
-		-- blocks. Take the first cell the eye line actually runs into instead, so the cover
-		-- comes off from the side the player is standing on.
-		--
-		-- No exceptions, and that is the point of it. Everything that used to be waved through
-		-- here -- a face pointing your way is open, the target itself is exposed somewhere --
-		-- turned out to mean 'exposed' in a sense that had nothing to do with being reachable
-		-- from where the player is standing, and each one came back as a break going through a
-		-- wall. There is nothing to lose by asking every time: a spot already at the front of
-		-- the line is what the march meets first, so it hands back exactly that spot. An open
-		-- bed you can see is hit; the same bed with wool in front of it gets the wool stripped.
+		--[[ Block Check. The spot chosen above is picked by the selected metric, but it can sit
+		behind the cover (an air face under the bed, or one on its far side, or a cell up on
+		top of a mound) and hitting it there is what reads as mining straight through the
+		blocks. Take the first cell the eye line actually runs into instead, so the cover
+		comes off from the side the player is standing on.
+
+		There are no exceptions. Everything that used to be waved through
+		here -- a face pointing your way is open, the target itself is exposed somewhere --
+		turned out to mean 'exposed' in a sense that had nothing to do with being reachable
+		from where the player is standing, and each one came back as a break going through a
+		wall. There is nothing to lose by asking every time: a spot already at the front of
+		the line is what the march meets first, so it hands back exactly that spot. An open
+		bed you can see is hit; the same bed with wool in front of it gets the wool stripped. ]]
 		if blockcheck and pos then
 			local front = frontOf(pos)
 			if front ~= pos then
-				-- path described the old target; drop it so the visualiser stops drawing a
-				-- chain that no longer leads anywhere
+				--[[ path described the old target; drop it so the visualiser stops drawing a
+				chain that no longer leads anywhere ]]
 				pos, path = front, nil
 			end
 		end
@@ -1634,45 +1641,45 @@ run(function()
 		if pos then
 			if (entitylib.character.RootPart.Position - pos).Magnitude > 30 then return end
 			local dblock, dpos = getPlacedBlock(pos)
-			-- Nothing standing where the path said to dig: the world moved under the answer
-			-- between working it out and acting on it. Next pass works out a fresh one.
+			--[[ Nothing standing where the path said to dig: the world moved under the answer
+			between working it out and acting on it. Next pass works out a fresh one. ]]
 			if not dblock then return end
 
-			-- Never swing at something the game marks unbreakable for our own team, whatever
-			-- the caller thought it was aiming at. The dig spot is routinely NOT the block that
-			-- was ranked -- Block Check redirects it onto whatever stands in the way -- so a
-			-- caller's own filtering says nothing about what ends up taking the damage, and the
-			-- one thing that must never take damage is our own bed. One attribute read, the
-			-- same one the game marks it with.
+			--[[ Never swing at something the game marks unbreakable for our own team, whatever
+			the caller thought it was aiming at. The dig spot is routinely NOT the block that
+			was ranked -- Block Check redirects it onto whatever stands in the way -- so a
+			caller's own filtering says nothing about what ends up taking the damage, and the
+			one thing that must never take damage is our own bed. One attribute read, the
+			same one the game marks it with. ]]
 			if dblock:GetAttribute('Team'..(lplr:GetAttribute('Team') or -1)..'NoBreak') ~= nil then return end
 
-			-- The recent-swing gate keeps the sword in hand mid-fight for callers that
-			-- pass autotool=false. When the caller explicitly asked for AutoTool it has
-			-- to win instead: Breaker runs its loop continuously, so with a killaura or
-			-- autoclicker active lastAttack is refreshed constantly, this window never
-			-- opened and the tool swap simply never happened -- the block got mined with
-			-- whatever was already held.
+			--[[ The recent-swing gate keeps the sword in hand mid-fight for callers that
+			pass autotool=false. When the caller explicitly asked for AutoTool it has
+			to win instead: Breaker runs its loop continuously, so with a killaura or
+			autoclicker active lastAttack is refreshed constantly, this window never
+			opened and the tool swap simply never happened -- the block got mined with
+			whatever was already held. ]]
 			local blockmeta = bedwars.ItemMeta[dblock.Name]
 			blockmeta = blockmeta and blockmeta.block
 			if blockmeta and (autotool or (workspace:GetServerTimeNow() - bedwars.SwordController.lastAttack) > 0.4) then
 				local breaktype = blockmeta.breakType
-				-- store.tools is only rebuilt when the Rodux inventory fires an items
-				-- change, so it can still be empty (or stale) at the moment a break
-				-- starts. Rescan on a miss rather than silently skipping the swap --
-				-- a nil here meant the whole block below was skipped and the block got
-				-- mined with the sword, which looks exactly like AutoTool doing nothing.
+				--[[ store.tools is only rebuilt when the Rodux inventory fires an items
+				change, so it can still be empty (or stale) at the moment a break
+				starts. Rescan on a miss rather than silently skipping the swap --
+				a nil here meant the whole block below was skipped and the block got
+				mined with the sword, which looks exactly like AutoTool doing nothing. ]]
 				local tool = breaktype and (store.tools[breaktype] or getTool(breaktype))
-				-- Exact type match first (shears for wool), then the best break tool
-				-- carried (a pickaxe on wool). Gated on autotool so the other callers,
-				-- which pass it nil, keep their previous hold-the-sword behaviour.
+				--[[ Exact type match first (shears for wool), then the best break tool
+				carried (a pickaxe on wool). Gated on autotool so the other callers,
+				which pass it nil, keep their previous hold-the-sword behaviour. ]]
 				if not tool and autotool then
 					tool = getBestBreakTool()
 				end
 				if tool and tool.tool then
-					-- autotool: move the hotbar selection onto the tool the way the AutoTool
-					-- module does it -- an InventorySelectHotbarSlot dispatch, i.e. the same
-					-- path as pressing the number key -- so the swap happens through the
-					-- game's own selection instead of a bare EquipItem.
+					--[[ autotool: move the hotbar selection onto the tool the way the AutoTool
+					module does it -- an InventorySelectHotbarSlot dispatch, i.e. the same
+					path as pressing the number key -- so the swap happens through the
+					game's own selection instead of a bare EquipItem. ]]
 					local slot
 					if autotool then
 						for i, v in store.inventory.hotbar or {} do
@@ -1682,14 +1689,14 @@ run(function()
 							end
 						end
 					end
-					-- Both, not either. The hotbar dispatch only moves the client's
-					-- selected slot; it is not proof the character actually ended up
-					-- holding the tool. Treating a successful dispatch as "done" and
-					-- skipping the equip is what left the sword in hand while the UI
-					-- showed the pickaxe selected -- and block damage is resolved from
-					-- what is actually held (BlockEngine.calculateBlockDamage takes the
-					-- player), so the block still got mined with the sword. switchItem
-					-- no-ops when the tool is already in hand, so this costs nothing.
+					--[[ Both, not either. The hotbar dispatch only moves the client's
+					selected slot; it is not proof the character actually ended up
+					holding the tool. Treating a successful dispatch as "done" and
+					skipping the equip is what left the sword in hand while the UI
+					showed the pickaxe selected -- and block damage is resolved from
+					what is actually held (BlockEngine.calculateBlockDamage takes the
+					player), so the block still got mined with the sword. switchItem
+					no-ops when the tool is already in hand, so this costs nothing. ]]
 					if slot then
 						hotbarSwitch(slot)
 					end
@@ -1750,11 +1757,11 @@ run(function()
 		table.insert(sides, Vector3.FromNormalId(v) * 3)
 	end
 
-	-- Coalesces inventory-change fan-out so a single shop purchase (which causes
-	-- multiple bedwars.Store updates in one frame) only notifies the downstream
-	-- listeners (AutoBuy / AutoConsume / AutoHotbar, each doing full inventory
-	-- scans) once per frame instead of once per store dispatch. The synchronous
-	-- store.tools/store.hand updates are kept inline so nothing reads stale data.
+	--[[ Coalesces inventory-change fan-out so a single shop purchase (which causes
+	multiple bedwars.Store updates in one frame) only notifies the downstream
+	listeners (AutoBuy / AutoConsume / AutoHotbar, each doing full inventory
+	scans) once per frame instead of once per store dispatch. The synchronous
+	store.tools/store.hand updates are kept inline so nothing reads stale data. ]]
 	local invFireQueued = false
 	local pendingAmount = false
 	local function flushInventoryEvents()
@@ -1786,7 +1793,7 @@ run(function()
 			local itemsChanged  = newinv.inventory.items ~= oldinv.inventory.items
 
 			if itemsChanged then
-				-- keep tool cache synchronous (small scans, read elsewhere immediately)
+				--[[ keep tool cache synchronous (small scans, read elsewhere immediately) ]]
 				store.tools.sword = getSword()
 				for _, v in {'stone', 'wood', 'wool'} do
 					store.tools[v] = getTool(v)
@@ -1808,8 +1815,8 @@ run(function()
 				}
 			end
 
-			-- Defer the event fan-out to end-of-frame so multiple dispatches in the
-			-- same frame coalesce into a single notification to each listener.
+			--[[ Defer the event fan-out to end-of-frame so multiple dispatches in the
+			same frame coalesce into a single notification to each listener. ]]
 			if invChanged and not invFireQueued then
 				invFireQueued = true
 				task.defer(flushInventoryEvents)
@@ -1842,18 +1849,18 @@ run(function()
 		})
 	end))
 
-	-- cache projectile names we care about
+	--[[ cache projectile names we care about ]]
 	local validProjectiles = {
 		arrow = true,
 		snowball = true
 	}
 
-	-- optimized ZapNetworking hook
+	--[[ optimized ZapNetworking hook ]]
 	vape:Clean(bedwars.ZapNetworking.ProjectileLaunchZap.On(function(origin, projectileType, tool, shooter)
 		task.defer(function()
 			local lowerType = tostring(projectileType):lower()
 			if validProjectiles[lowerType] then
-				-- only search nearby objects, not entire workspace
+				--[[ only search nearby objects, not entire workspace ]]
 				for _, obj in ipairs(workspace:GetChildren()) do
 					if validProjectiles[obj.Name:lower()] then
 						local root = obj:FindFirstChildWhichIsA("BasePart")
@@ -1864,7 +1871,7 @@ run(function()
 								tool = tool,
 								shooter = shooter
 							})
-							break -- stop after first match
+							break --[[ stop after first match ]]
 						end
 					end
 				end
@@ -2048,23 +2055,23 @@ run(function()
 	local ClickAim
 	local Shake
 
-	-- Shake nudges the aim off the target's RootPart by a random angle. Rolled as an
-	-- ANGLE rather than a world-space offset so the slider means the same thing at 3
-	-- studs as it does at 30 -- a fixed stud offset is a wild swing up close and nothing
-	-- at range.
-	--
-	-- The slider is a percentage of shakemax rather than raw degrees: past about five
-	-- degrees the aim is no longer pointed at anyone, so the useful range was crammed
-	-- into the bottom of a degree scale. 100% is shakemax and the two layers below are
-	-- budgeted to hit exactly that at the extreme, so the number on the slider is the
-	-- real fraction of full deflection.
-	--
-	-- Two layers, because either alone falls flat. The wander re-rolls a direction every
-	-- 15-45ms and is chased fast enough to nearly arrive before the next roll; on its own
-	-- it still traces a continuous path and reads as drift. The per-frame noise on top is
-	-- untracked white noise, and that is the layer that actually reads as jitter. Split
-	-- 60/40 so the pair tops out at the slider's percentage rather than 1.6x it.
-	local shakemax = 5 -- degrees of deflection at 100%
+	--[[ Shake nudges the aim off the target's RootPart by a random angle. Rolled as an
+	ANGLE rather than a world-space offset so the slider means the same thing at 3
+	studs as it does at 30 -- a fixed stud offset is a wild swing up close and nothing
+	at range.
+
+	The slider is a percentage of shakemax rather than raw degrees: past about five
+	degrees the aim is no longer pointed at anyone, so the useful range was crammed
+	into the bottom of a degree scale. 100% is shakemax and the two layers below are
+	budgeted to hit exactly that at the extreme, so the number on the slider is the
+	real fraction of full deflection.
+
+	Two layers, because either alone falls flat. The wander re-rolls a direction every
+	15-45ms and is chased fast enough to nearly arrive before the next roll; on its own
+	it still traces a continuous path and reads as drift. The per-frame noise on top is
+	untracked white noise, and that is the layer that actually reads as jitter. Split
+	60/40 so the pair tops out at the slider's percentage rather than 1.6x it. ]]
+	local shakemax = 5 --[[ degrees of deflection at 100% ]]
 	local rand = Random.new()
 	local shakeoffset, shaketarget, shakestamp = Vector2.zero, Vector2.zero, 0
 	local shakeapplied = CFrame.identity
@@ -2075,12 +2082,12 @@ run(function()
 			return CFrame.identity
 		end
 		if os.clock() >= shakestamp then
-			-- the interval is itself random, so there is no steady beat to the wander
+			--[[ the interval is itself random, so there is no steady beat to the wander ]]
 			shakestamp = os.clock() + rand:NextNumber(0.015, 0.045)
 			shaketarget = Vector2.new(rand:NextNumber(-1, 1), rand:NextNumber(-1, 1))
 		end
-		-- dt-scaled so the chase rate is the same on 30fps and 240fps, clamped so a frame
-		-- spike can't overshoot past the target
+		--[[ dt-scaled so the chase rate is the same on 30fps and 240fps, clamped so a frame
+		spike can't overshoot past the target ]]
 		shakeoffset = shakeoffset:Lerp(shaketarget, math.min(dt * 45, 1))
 		local noise = Vector2.new(rand:NextNumber(-1, 1), rand:NextNumber(-1, 1))
 		local offset = (shakeoffset * 0.6) + (noise * 0.4)
@@ -2088,10 +2095,10 @@ run(function()
 		return CFrame.Angles(offset.Y * amount, offset.X * amount, 0)
 	end
 
-	-- Ignore decoy/NPC models named "Falcon" (e.g. workspace["Falcon-1"]).
-	-- A real player named Falcon still has a backing Player object AND a valid
-	-- (hyphen-free) username, so gating on "no Player" only skips fake models
-	-- while never sparing an actual person called Falcon.
+	--[[ Ignore decoy/NPC models named "Falcon" (e.g. workspace["Falcon-1"]).
+	A real player named Falcon still has a backing Player object AND a valid
+	(hyphen-free) username, so gating on "no Player" only skips fake models
+	while never sparing an actual person called Falcon. ]]
 	local function isFalconDecoy(ent)
 		if not ent or ent.Player then return false end
 		local name = ent.Character and ent.Character.Name
@@ -2102,9 +2109,9 @@ run(function()
 		Name = 'AimAssist',
 		Function = function(callback)
 			if not callback then
-				-- nothing is going to strip it back off once we stop writing the camera,
-				-- and a stale one would be subtracted from a camera that no longer holds
-				-- it on the first frame after a re-enable
+				--[[ nothing is going to strip it back off once we stop writing the camera,
+				and a stale one would be subtracted from a camera that no longer holds
+				it on the first frame after a re-enable ]]
 				shakeapplied = CFrame.identity
 				shakeoffset, shaketarget = Vector2.zero, Vector2.zero
 			end
@@ -2128,14 +2135,14 @@ run(function()
 							if angle >= (math.rad(AngleSlider.Value) / 2) then return end
 							targetinfo.Targets[ent] = tick() + 1
 							local aimspeed = AimSpeed.Value + (StrafeIncrease.Enabled and (inputService:IsKeyDown(Enum.KeyCode.A) or inputService:IsKeyDown(Enum.KeyCode.D)) and 10 or 0)
-							-- Strip last frame's shake, aim from that, then hang this frame's
-							-- off the result -- the shake sits OUTSIDE the aim lerp. Folded
-							-- into the lerp target it was a low-pass away from invisible: at
-							-- the default aim speed the camera closes only ~10% of the gap per
-							-- frame, so anything re-rolled faster than a few Hz averaged out
-							-- to almost nothing no matter what the slider said. Stripping it
-							-- first is also what keeps the leftovers from compounding frame
-							-- over frame into a slow wander.
+							--[[ Strip last frame's shake, aim from that, then hang this frame's
+							off the result -- the shake sits OUTSIDE the aim lerp. Folded
+							into the lerp target it was a low-pass away from invisible: at
+							the default aim speed the camera closes only ~10% of the gap per
+							frame, so anything re-rolled faster than a few Hz averaged out
+							to almost nothing no matter what the slider said. Stripping it
+							first is also what keeps the leftovers from compounding frame
+							over frame into a slow wander. ]]
 							local base = gameCamera.CFrame * shakeapplied:Inverse()
 							local aimed = base:Lerp(CFrame.lookAt(base.p, ent.RootPart.Position), aimspeed * dt)
 							shakeapplied = shakeRotation(dt)
@@ -2172,7 +2179,7 @@ run(function()
 		Min = 1,
 		Max = 30,
 		Default = 30,
-		-- 'Suffx' was a typo, so the slider drew a bare number with no unit.
+		--[[ 'Suffx' was a typo, so the slider drew a bare number with no unit. ]]
 		Suffix = function(val)
 			return val == 1 and 'stud' or 'studs'
 		end
@@ -2533,13 +2540,13 @@ run(function()
 	local BlacklistOres
 	local BlacklistHive
 
-	-- The cooldown the game ships with, restored on disable and used as the "don't
-	-- speed this one up" value for blacklisted blocks.
+	--[[ The cooldown the game ships with, restored on disable and used as the "don't
+	speed this one up" value for blacklisted blocks. ]]
 	local VANILLA_COOLDOWN = 0.3
 
-	-- Name of the block currently under the crosshair, read through the same block
-	-- selector AutoTool and Schematica use. Mode 1 is SELECT (the block being looked
-	-- at); mode 0 is PLACE, which resolves to the empty cell in front of it instead.
+	--[[ Name of the block currently under the crosshair, read through the same block
+	selector AutoTool and Schematica use. Mode 1 is SELECT (the block being looked
+	at); mode 0 is PLACE, which resolves to the empty cell in front of it instead. ]]
 	local function targetedBlockName()
 		local ok, name = pcall(function()
 			local breaker = bedwars.BlockBreakController.blockBreaker
@@ -2551,10 +2558,10 @@ run(function()
 		return ok and name or nil
 	end
 
-	-- Ores are named <material>_ore_mesh_block. Matched as a plain substring plus a
-	-- trailing _ore, so diamond/emerald/gold are covered without hardcoding a list
-	-- that a new ore would silently fall out of. Neither pattern can hit 'store' or
-	-- 'core' -- both need the underscore.
+	--[[ Ores are named <material>_ore_mesh_block. Matched as a plain substring plus a
+	trailing _ore, so diamond/emerald/gold are covered without hardcoding a list
+	that a new ore would silently fall out of. Neither pattern can hit 'store' or
+	'core' -- both need the underscore. ]]
 	local function isOre(name)
 		return name:find('ore_mesh_block', 1, true) ~= nil or name:match('_ore$') ~= nil
 	end
@@ -2574,11 +2581,11 @@ run(function()
 		Function = function(callback)
 			if callback then
 				repeat
-					-- With every blacklist off this is the original once-per-100ms
-					-- setCooldown and costs exactly what it used to. With one on we need
-					-- to react the frame the crosshair moves onto a blacklisted block,
-					-- otherwise the stale value lets a fast hit or two through before the
-					-- next poll catches up -- so tighten to per-frame only in that case.
+					--[[ With every blacklist off this is the original once-per-100ms
+					setCooldown and costs exactly what it used to. With one on we need
+					to react the frame the crosshair moves onto a blacklisted block,
+					otherwise the stale value lets a fast hit or two through before the
+					next poll catches up -- so tighten to per-frame only in that case. ]]
 					local filtering = BlacklistBeds.Enabled or BlacklistOres.Enabled or BlacklistHive.Enabled
 					bedwars.BlockBreakController.blockBreaker:setCooldown(filtering and currentCooldown() or Time.Value)
 					if filtering then
@@ -2648,7 +2655,7 @@ run(function()
 				Fly:Clean(runService.PreSimulation:Connect(function(dt)
 					if entitylib.isAlive and isnetworkowner(entitylib.character.RootPart) then
 						local char = entitylib.character
-						local balloons = lplr.Character:GetAttribute('InflatedBalloons')  -- one attribute read, not two
+						local balloons = lplr.Character:GetAttribute('InflatedBalloons')  --[[ one attribute read, not two ]]
 						local flyAllowed = (balloons and balloons > 0) or store.matchState == 2
 						local mass = (1.5 + (flyAllowed and 6 or 0) * (os.clock() % 0.4 < 0.2 and -1 or 1)) + ((up + down) * VerticalValue.Value)
 						local root, moveDirection = char.RootPart, char.Humanoid.MoveDirection
@@ -3094,10 +3101,10 @@ run(function()
     local Background
     local Color = {}
     local Reference = {}
-    -- model -> adornee part recorded at billboard creation, so removal cleanup
-    -- doesn't depend on PrimaryPart still being set (it's often nil by then)
+    --[[ model -> adornee part recorded at billboard creation, so removal cleanup
+    doesn't depend on PrimaryPart still being set (it's often nil by then) ]]
     local ModelParts = {}
-    -- per-kit tag connections, disconnected whenever the tracked kit changes
+    --[[ per-kit tag connections, disconnected whenever the tracked kit changes ]]
     local kitConns = {}
     local Folder = Instance.new('Folder')
     Folder.Parent = vape.gui
@@ -3115,9 +3122,9 @@ run(function()
 
     local function Added(v, icon)
         if not v then return end
-        -- Billboards live under vape.gui (CoreGui). Tag/added signals invoke this
-        -- on game threads at identity 2, where parenting into CoreGui silently
-        -- throws — which is why only enable-time (exploit thread) objects showed.
+        --[[ Billboards live under vape.gui (CoreGui). Tag/added signals invoke this
+        on game threads at identity 2, where parenting into CoreGui silently
+        throws — which is why only enable-time (exploit thread) objects showed. ]]
         if vape.ThreadFix then
             setthreadidentity(8)
         end
@@ -3155,7 +3162,7 @@ run(function()
         uicorner.CornerRadius = UDim.new(0, 4)
         uicorner.Parent = image
 
-        -- Store all references including Blur and ImageLabel
+        --[[ Store all references including Blur and ImageLabel ]]
         Reference[v] = {
             Billboard = billboard,
             Blur = blur,
@@ -3163,10 +3170,10 @@ run(function()
         }
     end
 
-    -- A model is often tagged a frame before its PrimaryPart is assigned. Reading
-    -- v.PrimaryPart at tag time then gives nil and the billboard is skipped forever
-    -- (why it only worked after a disable/re-enable, once the models were fully built).
-    -- Wait for PrimaryPart before adding.
+    --[[ A model is often tagged a frame before its PrimaryPart is assigned. Reading
+    v.PrimaryPart at tag time then gives nil and the billboard is skipped forever
+    (why it only worked after a disable/re-enable, once the models were fully built).
+    Wait for PrimaryPart before adding. ]]
     local function addWhenReady(v, icon)
         if not v then return end
         if v.PrimaryPart then
@@ -3186,8 +3193,8 @@ run(function()
         end)
     end
 
-    -- Drops every billboard and per-kit tag connection. Called on disable AND on
-    -- kit change, so stale objects from the previous kit can't linger.
+    --[[ Drops every billboard and per-kit tag connection. Called on disable AND on
+    kit change, so stale objects from the previous kit can't linger. ]]
     local function clearTracked()
         for _, c in kitConns do
             pcall(function() c:Disconnect() end)
@@ -3225,8 +3232,8 @@ run(function()
         end
     end
 
-    -- Bumped each toggle so a stale enable-loop from a quick off/on can't keep
-    -- running alongside the new one.
+    --[[ Bumped each toggle so a stale enable-loop from a quick off/on can't keep
+    running alongside the new one. ]]
     local loopId = 0
 
     KitESP = vape.Categories.Render:CreateModule({
@@ -3251,9 +3258,9 @@ run(function()
                     end))
                 end
 
-                -- Kits can change mid-session (kit swap, new match): whenever the
-                -- equipped kit differs from what we're tracking, wipe the old
-                -- kit's billboards/connections and start tracking the new tag.
+                --[[ Kits can change mid-session (kit swap, new match): whenever the
+                equipped kit differs from what we're tracking, wipe the old
+                kit's billboards/connections and start tracking the new tag. ]]
                 local lastKit = nil
                 repeat
                     local kit = store.equippedKit
@@ -3333,8 +3340,8 @@ run(function()
 	end)
 	
 	local methodused
-	-- assigned once the Updated table below exists; lets the rank fetch redraw a tag when
-	-- the division finally lands
+	--[[ assigned once the Updated table below exists; lets the rank fetch redraw a tag when
+	the division finally lands ]]
 	local refreshTag
 
 	local RankMeta = (function()
@@ -3355,17 +3362,17 @@ run(function()
 		return meta and meta.image or nil
 	end
 
-	-- the icons ride the right edge of the text, so everywhere that re-measures the tag has
-	-- to move them as well. They pack outward from the end of the text in list order,
-	-- and a slot is consumed only by an icon that is actually SHOWING something.
-	--
-	-- Existence isn't enough: both icons get created up front whenever their toggle is
-	-- on, and start blank -- rank until the async fetch lands (or forever, if the player
-	-- is unranked), enchant whenever nothing is currently applied. A blank one used to
-	-- hold its slot, which is what left the hole. Skipping it means an enchant-only
-	-- player draws exactly where a rank icon would have gone, a rank-only player is
-	-- unaffected, and with both showing they sit flush against each other -- the same
-	-- 30px step the equipment row above uses, so the two rows line up.
+	--[[ the icons ride the right edge of the text, so everywhere that re-measures the tag has
+	to move them as well. They pack outward from the end of the text in list order,
+	and a slot is consumed only by an icon that is actually SHOWING something.
+
+	Existence isn't enough: both icons get created up front whenever their toggle is
+	on, and start blank -- rank until the async fetch lands (or forever, if the player
+	is unranked), enchant whenever nothing is currently applied. A blank one used to
+	hold its slot, which is what left the hole. Skipping it means an enchant-only
+	player draws exactly where a rank icon would have gone, a rank-only player is
+	unaffected, and with both showing they sit flush against each other -- the same
+	30px step the equipment row above uses, so the two rows line up. ]]
 	local ICON_SIZE = 30
 	local rightIcons = {'RankIcon', 'EnchantIcon'}
 	local function positionIcons(nametag, width)
@@ -3390,8 +3397,8 @@ run(function()
 		rankRequested[plr.UserId] = true
 		task.spawn(function()
 			pcall(function()
-				-- forced: getRanks skips the server call once its cache holds anything, so
-				-- an uncached player would otherwise never resolve
+				--[[ forced: getRanks skips the server call once its cache holds anything, so
+				an uncached player would otherwise never resolve ]]
 				controller:getRanks({plr.UserId}, true):andThen(function()
 					if refreshTag then refreshTag(ent) end
 				end)
@@ -3399,10 +3406,10 @@ run(function()
 		end)
 	end
 
-	-- The guards are kept without the logging: every step of the chain
-	-- (store.enchants -> StatusEffectMeta -> EnchantMeta) throws on a nil table rather
-	-- than returning nil, so a missing piece has to fall out as a blank icon instead of
-	-- an error escaping into the tag build.
+	--[[ The guards are kept without the logging: every step of the chain
+	(store.enchants -> StatusEffectMeta -> EnchantMeta) throws on a nil table rather
+	than returning nil, so a missing piece has to fall out as a blank icon instead of
+	an error escaping into the tag build. ]]
 	local function getEnchantImage(plr)
 		if not plr then return nil end
 		if not (store.enchants and bedwars.EnchantMeta) then return nil end
@@ -3412,10 +3419,10 @@ run(function()
 		return suc and res or nil
 	end
 
-	-- Enchants come and go as StatusEffect_* attributes on the character, several times
-	-- over a fight, and far more often than EntityUpdated fires -- so the icon gets its
-	-- own watcher rather than riding the health/equipment refresh and showing a stale
-	-- enchant in between. Keyed by entity and torn down with the tag.
+	--[[ Enchants come and go as StatusEffect_* attributes on the character, several times
+	over a fight, and far more often than EntityUpdated fires -- so the icon gets its
+	own watcher rather than riding the health/equipment refresh and showing a stale
+	enchant in between. Keyed by entity and torn down with the tag. ]]
 	local enchantConns = {}
 
 	local function unwatchEnchant(ent)
@@ -3443,21 +3450,21 @@ run(function()
 
 	local function getDeviceEmoji(plr)
 		if not plr then return nil end
-		-- checked on the character too, in case the attribute is written there
+		--[[ checked on the character too, in case the attribute is written there ]]
 		local inputType = plr:GetAttribute('UserInputType')
 		if inputType == nil and plr.Character then
 			inputType = plr.Character:GetAttribute('UserInputType')
 		end
 		if inputType == nil then return nil end
 		if type(inputType) == 'number' then
-			-- Enum.UserInputType values: Touch 7, Keyboard 8, Gamepad1..8 9-16
+			--[[ Enum.UserInputType values: Touch 7, Keyboard 8, Gamepad1..8 9-16 ]]
 			if inputType == 7 then return deviceEmojis.touch end
 			if inputType == 8 then return deviceEmojis.keyboard end
 			if inputType >= 9 and inputType <= 16 then return deviceEmojis.gamepad end
 			return deviceEmojis.keyboard
 		end
-		-- covers a plain string and an EnumItem alike ("Enum.UserInputType.Touch"), and the
-		-- platform-flavoured values some servers write instead of the enum names
+		--[[ covers a plain string and an EnumItem alike ("Enum.UserInputType.Touch"), and the
+		platform-flavoured values some servers write instead of the enum names ]]
 		local name = tostring(inputType):lower()
 		if name:find('gamepad') or name:find('console') or name:find('xbox') or name:find('playstation') then
 			return deviceEmojis.gamepad
@@ -3465,9 +3472,9 @@ run(function()
 		if name:find('touch') or name:find('mobile') or name:find('phone') or name:find('tablet') then
 			return deviceEmojis.touch
 		end
-		-- anything left that carries a value at all is a desktop input (keyboard, any of
-		-- the mouse variants, MouseMovement, TextInput...), so fall through rather than
-		-- silently showing nothing
+		--[[ anything left that carries a value at all is a desktop input (keyboard, any of
+		the mouse variants, MouseMovement, TextInput...), so fall through rather than
+		silently showing nothing ]]
 		return name ~= '' and deviceEmojis.keyboard or nil
 	end
 
@@ -3477,7 +3484,7 @@ run(function()
 				if not Targets.Players.Enabled and ent.Player then return end
 				if not Targets.NPCs.Enabled and ent.NPC then return end
 				if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
-				if Reference[ent] then return end -- Prevent duplicates
+				if Reference[ent] then return end --[[ Prevent duplicates ]]
 
 				local nametag = Instance.new('TextLabel')
 				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
@@ -3516,11 +3523,11 @@ run(function()
 				nametag.Name = ent.Player and ent.Player.Name or ent.Character.Name
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 
-				-- Rank Icon: sits immediately to the right of the text, so it has to be
-				-- built after the text has been measured
+				--[[ Rank Icon: sits immediately to the right of the text, so it has to be
+				built after the text has been measured ]]
 				if Rank.Enabled and ent.Player then
-					-- no Position here: positionIcons below owns the layout, and setting
-					-- one now would flash the icon at a slot it may not end up in
+					--[[ no Position here: positionIcons below owns the layout, and setting
+					one now would flash the icon at a slot it may not end up in ]]
 					local Icon = Instance.new('ImageLabel')
 					Icon.Name = 'RankIcon'
 					Icon.Size = UDim2.fromOffset(ICON_SIZE, ICON_SIZE)
@@ -3544,7 +3551,7 @@ run(function()
 					watchEnchant(ent)
 				end
 
-				-- after both right-side icons exist, so each lands at its own slot
+				--[[ after both right-side icons exist, so each lands at its own slot ]]
 				positionIcons(nametag, size.X)
 
 				nametag.AnchorPoint = Vector2.new(0.5, 1)
@@ -3578,8 +3585,8 @@ run(function()
 				nametag.Text.ZIndex = 2
 				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
 
-				-- Drawing text only; the rank icon needs an ImageLabel, which this render
-				-- path has no equivalent for
+				--[[ Drawing text only; the rank icon needs an ImageLabel, which this render
+				path has no equivalent for ]]
 				if Device.Enabled and ent.Player then
 					local emoji = getDeviceEmoji(ent.Player)
 					if emoji then
@@ -3618,8 +3625,8 @@ run(function()
 		end,
 		Drawing = function(ent)
 			pcall(function()
-				-- the Drawing path never creates the watcher, but Removed runs for
-				-- entities whose tag was built under the other method too
+				--[[ the Drawing path never creates the watcher, but Removed runs for
+				entities whose tag was built under the other method too ]]
 				unwatchEnchant(ent)
 				local v = Reference[ent]
 				if v then
@@ -3762,8 +3769,8 @@ run(function()
 	local Loop = {
 		Normal = function()
 			pcall(function()
-				-- Local player's position is identical for every nametag this frame;
-				-- resolve the property chain once instead of per-entity.
+				--[[ Local player's position is identical for every nametag this frame;
+				resolve the property chain once instead of per-entity. ]]
 				local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
 				for ent, nametag in Reference do
 					if not nametag or not nametag.Parent then
@@ -3789,9 +3796,9 @@ run(function()
 						local mag = selfPos and math.floor((selfPos - ent.RootPart.Position).Magnitude) or 0
 						if Sizes[ent] ~= mag then
 							nametag.Text = string.format(Strings[ent], mag)
-							local ize = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-							nametag.Size = UDim2.fromOffset(ize.X + 8, ize.Y + 7)
-							positionIcons(nametag, ize.X)
+						local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+						nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
+						positionIcons(nametag, size.X)
 							Sizes[ent] = mag
 						end
 					end
@@ -3801,8 +3808,8 @@ run(function()
 		end,
 		Drawing = function()
 			pcall(function()
-				-- Local player's position is identical for every nametag this frame;
-				-- resolve the property chain once instead of per-entity.
+				--[[ Local player's position is identical for every nametag this frame;
+				resolve the property chain once instead of per-entity. ]]
 				local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
 				for ent, nametag in Reference do
 					if not nametag or not nametag.Text or not nametag.BG then
@@ -3878,10 +3885,10 @@ run(function()
 					NameTags:Clean(runService.RenderStepped:Connect(Loop[methodused]))
 				end
 
-				-- UserInputType can replicate after the tag was built (and changes when a
-				-- player switches input), and the tag is only rebuilt on health/equipment
-				-- updates -- which is why the emoji was missing on some players and not
-				-- others. Redraw whoever's attribute lands or changes.
+				--[[ UserInputType can replicate after the tag was built (and changes when a
+				player switches input), and the tag is only rebuilt on health/equipment
+				updates -- which is why the emoji was missing on some players and not
+				others. Redraw whoever's attribute lands or changes. ]]
 				local function watchDevice(plr)
 					NameTags:Clean(plr:GetAttributeChangedSignal('UserInputType'):Connect(function()
 						if not Device.Enabled then return end
@@ -3902,8 +3909,8 @@ run(function()
 						Removed[methodused](i)
 					end
 				end
-				-- the loop above only reaches entities that still have a tag; sweep the
-				-- rest so no attribute listener outlives the module
+				--[[ the loop above only reaches entities that still have a tag; sweep the
+				rest so no attribute listener outlives the module ]]
 				for ent in enchantConns do
 					unwatchEnchant(ent)
 				end
@@ -4398,14 +4405,14 @@ run(function()
 		Name = 'AutoKit',
 		Function = function(callback)
 			if callback then
-				-- Every kit loop below touches Instances and fires remotes, and this
-				-- thread is whatever enabled the module -- a profile apply on load, or a
-				-- GUI click -- neither of which carries the elevated identity. Without
-				-- this, farmer_cletus' harvest remote throws 'lacking capability Plugin'
-				-- on the first crop in range and takes the whole kit loop with it, since
-				-- nothing here is pcall'd. Set once for the thread rather than inside
-				-- the loops: it persists across task.wait, and every kit function runs
-				-- on this same thread.
+				--[[ Every kit loop below touches Instances and fires remotes, and this
+				thread is whatever enabled the module -- a profile apply on load, or a
+				GUI click -- neither of which carries the elevated identity. Without
+				this, farmer_cletus' harvest remote throws 'lacking capability Plugin'
+				on the first crop in range and takes the whole kit loop with it, since
+				nothing here is pcall'd. Set once for the thread rather than inside
+				the loops: it persists across task.wait, and every kit function runs
+				on this same thread. ]]
 				if vape.ThreadFix then
 					setthreadidentity(8)
 				end
@@ -4688,9 +4695,9 @@ run(function()
 	local Network
 	local Lower
 	local Delay
-	-- Item drop -> the tick() at which another request for it is allowed. Weak keys so drops
-	-- that get picked up or destroyed fall out on their own rather than piling up for the
-	-- round; cleared on disable regardless.
+	--[[ Item drop -> the tick() at which another request for it is allowed. Weak keys so drops
+	that get picked up or destroyed fall out on their own rather than piling up for the
+	round; cleared on disable regardless. ]]
 	local pickups = setmetatable({}, {__mode = 'k'})
 
 	PickupRange = vape.Categories.Utility:CreateModule({
@@ -4710,15 +4717,15 @@ run(function()
 							if (localPosition - v.Position).Magnitude <= Range.Value then
 								if Lower.Enabled and (localPosition.Y - v.Position.Y) < (entitylib.character.HipHeight - 1) then continue end
 
-								-- One request per drop per Delay, rather than one per pass.
-								-- This loop runs at 10hz and had nothing holding it back, so
-								-- it re-asked for every drop in range until the server got
-								-- round to removing it -- three items on the floor is already
-								-- 1800 calls a minute against the 299 the server's rate
-								-- limiter allows. AntiBanwave mirrors that budget and drops
-								-- the overflow, which is why pickups died with it enabled.
-								-- The first sighting is still instant: an unseen drop has no
-								-- entry here, so it goes out on the pass that spots it.
+								--[[ One request per drop per Delay, rather than one per pass.
+								This loop runs at 10hz and had nothing holding it back, so
+								it re-asked for every drop in range until the server got
+								round to removing it -- three items on the floor is already
+								1800 calls a minute against the 299 the server's rate
+								limiter allows. AntiBanwave mirrors that budget and drops
+								the overflow, which is why pickups died with it enabled.
+								The first sighting is still instant: an unseen drop has no
+								entry here, so it goes out on the pass that spots it. ]]
 								if (pickups[v] or 0) >= tick() then continue end
 								pickups[v] = tick() + Delay.Value
 
@@ -4892,26 +4899,26 @@ run(function()
 		return nil
 	end
 	
-	-- MatchState.RUNNING (match-state module: PRE 0, RUNNING 1, POST 2).
+	--[[ MatchState.RUNNING (match-state module: PRE 0, RUNNING 1, POST 2). ]]
 	local MATCH_RUNNING = 1
-	-- A whole queue teleports into the server at once, but slow clients keep trickling in for a
-	-- while after the match has already flipped to RUNNING, and until the server finishes with
-	-- them they look exactly like a mid-match join: Spectator with no Team. Anyone who turns up
-	-- inside this window counts as part of the original queue.
+	--[[ A whole queue teleports into the server at once, but slow clients keep trickling in for a
+	while after the match has already flipped to RUNNING, and until the server finishes with
+	them they look exactly like a mid-match join: Spectator with no Team. Anyone who turns up
+	inside this window counts as part of the original queue. ]]
 	local JOIN_GRACE = 45
-	-- Time to let a Team assignment land before calling someone team-less.
+	--[[ Time to let a Team assignment land before calling someone team-less. ]]
 	local SETTLE = 10
 	local matchRunningSince
-	-- Weak keys: entries for players who left go away on their own instead of pinning the Player
-	-- instance for the rest of the session.
+	--[[ Weak keys: entries for players who left go away on their own instead of pinning the Player
+	instance for the rest of the session. ]]
 	local arrivedAfter = setmetatable({}, {__mode = 'k'})
 	local resolved = setmetatable({}, {__mode = 'k'})
 
-	-- Seconds the match has been RUNNING, or nil if it is not. Injecting mid-match starts this
-	-- clock at injection rather than at the true match start, which only ever makes the check
-	-- below more conservative. Read straight off the store rather than store.matchState: the
-	-- mirror is only filled in by the Store.changed handler, so it still reads PRE for the first
-	-- dispatch or two after injecting into an already-running match.
+	--[[ Seconds the match has been RUNNING, or nil if it is not. Injecting mid-match starts this
+	clock at injection rather than at the true match start, which only ever makes the check
+	below more conservative. Read straight off the store rather than store.matchState: the
+	mirror is only filled in by the Store.changed handler, so it still reads PRE for the first
+	dispatch or two after injecting into an already-running match. ]]
 	local function matchRunningFor()
 		if bedwars.Store:getState().Game.matchState ~= MATCH_RUNNING then
 			matchRunningSince = nil
@@ -4929,24 +4936,24 @@ run(function()
 		if resolved[plr] or not isSpectating(plr) then return end
 		if bedwars.Store:getState().Game.customMatch then return end
 
-		-- Gate on when the player ARRIVED, not on when this check happens to fire. A late
-		-- loader's Spectator attribute can settle minutes into the match, long past the grace
-		-- window, so keying the window off 'now' -- as this did by having no window at all --
-		-- is what flagged them. nil means they were already here when StaffDetector turned on,
-		-- and we never saw them arrive, so there is nothing to judge.
+		--[[ Gate on when the player ARRIVED, not on when this check happens to fire. A late
+		loader's Spectator attribute can settle minutes into the match, long past the grace
+		window, so accepting any late check, as the old version did, is what flagged them. nil
+		means they were already here when StaffDetector turned on,
+		and we never saw them arrive, so there is nothing to judge. ]]
 		local arrival = arrivedAfter[plr]
 		if not arrival or arrival < JOIN_GRACE then return end
 
 		resolved[plr] = true
-		-- Let them finish loading before deciding they have no team. 'PlayerConnected' is the
-		-- game's own has-this-client-finished-connecting flag (GamePlayer.hasFinishedConnecting).
+		--[[ Let them finish loading before deciding they have no team. 'PlayerConnected' is the
+		game's own has-this-client-finished-connecting flag (GamePlayer.hasFinishedConnecting). ]]
 		local deadline = os.clock() + 30
 		while plr.Parent and plr:GetAttribute('PlayerConnected') ~= true and os.clock() < deadline do
 			task.wait(0.5)
 		end
 		task.wait(SETTLE)
-		-- Re-verify. A late loader has a Team by now, at which point there was never anything
-		-- to report; clearing resolved lets a genuine later transition still be caught.
+		--[[ Re-verify. A late loader has a Team by now, at which point there was never anything
+		to report; clearing resolved lets a genuine later transition still be caught. ]]
 		if not plr.Parent or not isSpectating(plr) then
 			resolved[plr] = nil
 			return
@@ -4963,8 +4970,8 @@ run(function()
 			end
 			return ids
 		end)
-		-- GetFriendsAsync throws on rate limits and on private friend lists. A failed lookup is
-		-- not evidence of anything -- treating it as 'has no friends here' would flag on nothing.
+		--[[ GetFriendsAsync throws on rate limits and on private friend lists. A failed lookup is
+		not evidence of anything -- treating it as 'has no friends here' would flag on nothing. ]]
 		if not suc then
 			resolved[plr] = nil
 			return
@@ -4990,13 +4997,13 @@ run(function()
 		elseif getRole(plr, 5774246) >= 100 then
 			staffFunction(plr, 'staff_role')
 		else
-			-- Spawned rather than called inline: checkJoin now yields while the player settles,
-			-- and blocking the signal handler would stall every later attribute change on them.
+			--[[ Spawned rather than called inline: checkJoin now yields while the player settles,
+			and blocking the signal handler would stall every later attribute change on them. ]]
 			StaffDetector:Clean(plr:GetAttributeChangedSignal('Spectator'):Connect(function()
 				task.spawn(checkJoin, plr)
 			end))
-			-- Covers a mid-match join whose Spectator attribute replicated with the player, so
-			-- no change signal ever fires for it.
+			--[[ Covers a mid-match join whose Spectator attribute replicated with the player, so
+			no change signal ever fires for it. ]]
 			task.spawn(checkJoin, plr)
 
 			if not plr:GetAttribute('ClanTag') then
@@ -5016,8 +5023,8 @@ run(function()
 			if callback then
 				StaffDetector:Clean(playersService.PlayerAdded:Connect(playerAdded))
 				for _, v in playersService:GetPlayers() do
-					-- existing = true: these were already here, so no arrival stamp and no
-					-- impossible-join check. The blacklist and staff-role checks still run.
+					--[[ existing = true: these were already here, so no arrival stamp and no
+					impossible-join check. The blacklist and staff-role checks still run. ]]
 					task.spawn(playerAdded, v, true)
 				end
 			else
@@ -5293,10 +5300,10 @@ run(function()
 		chest = chest and chest.Value or nil
 		if not chest or (Delays[chest] or 0) >= tick() then return end
 
-		-- Counts what can actually be taken rather than what is in there. The gate used to
-		-- be #GetChildren() > 1, but only Accessories are ever pulled -- so a chest holding
-		-- anything else, or armour a ChestGetItem keeps failing on, never emptied and this
-		-- kept firing at it for the rest of the round.
+		--[[ Counts what can actually be taken rather than what is in there. The gate used to
+		be #GetChildren() > 1, but only Accessories are ever pulled -- so a chest holding
+		anything else, or armour a ChestGetItem keeps failing on, never emptied and this
+		kept firing at it for the rest of the round. ]]
 		local accessories = {}
 		for _, v in chest:GetChildren() do
 			if v:IsA('Accessory') then
@@ -5305,13 +5312,13 @@ run(function()
 		end
 		if #accessories == 0 then return end
 
-		-- Two SetObservedChest calls go out per pass, so the old fixed 0.2s was 600 calls a
-		-- minute off a single chest in range -- against the 299 the server's rate limiter
-		-- allows, and doubling with every extra chest. AntiBanwave mirrors that budget and
-		-- swallows the overflow (going over is a rate_limit_exceeded detection, and the
-		-- server discards the calls either way), which is what looked like chest looting
-		-- breaking partway through a round. Slider so a chest-dense skywars map can be given
-		-- more room; the accessory gate above is what keeps the steady-state cost at zero.
+		--[[ Two SetObservedChest calls go out per pass, so the old fixed 0.2s was 600 calls a
+		minute off a single chest in range -- against the 299 the server's rate limiter
+		allows, and doubling with every extra chest. AntiBanwave mirrors that budget and
+		swallows the overflow (going over is a rate_limit_exceeded detection, and the
+		server discards the calls either way), which is what looked like chest looting
+		breaking partway through a round. The slider gives a chest-dense skywars map more
+		more room; the accessory gate above is what keeps the steady-state cost at zero. ]]
 		Delays[chest] = tick() + Delay.Value
 		bedwars.Client:GetNamespace('Inventory'):Get('SetObservedChest'):SendToServer(chest)
 
@@ -5331,8 +5338,8 @@ run(function()
 		Function = function(callback)
 			if callback then
 				local chests = collection('chest', ChestSteal)
-				-- The enabled check is the exit, not just the queue type: without it, toggling the
-				-- module back off inside a test queue left this spinning at frame rate forever.
+				--[[ The enabled check is the exit, not just the queue type: without it, toggling the
+				module back off inside a test queue left this spinning at frame rate forever. ]]
 				repeat task.wait(0.1) until store.queueType ~= 'bedwars_test' or (not ChestSteal.Enabled)
 				if not ChestSteal.Enabled then return end
 				if (not Skywars.Enabled) or store.queueType:find('skywars') then
@@ -5355,8 +5362,8 @@ run(function()
 					until not ChestSteal.Enabled
 				end
 			else
-				-- Keyed by chest folder, which is destroyed with the chest -- without this
-				-- the table holds a reference to every chest looted this session.
+				--[[ Keyed by chest folder, which is destroyed with the chest -- without this
+				the table holds a reference to every chest looted this session. ]]
 				table.clear(Delays)
 			end
 		end,
@@ -5738,13 +5745,13 @@ run(function()
 		if entitylib.isAlive then
 			local localPosition = entitylib.character.RootPart.Position
 			for _, v in store.shop do
-				-- GetPivot rather than .Position: the BedwarsItemShop tag sits on the
-				-- shop container, not on a part -- the game's own getShopkeeperModel
-				-- resolves the NPC as tagged:FindFirstChildWhichIsA('Model'), so the
-				-- tagged instance is whatever holds desertMerchant. When that's a
-				-- Model, .Position doesn't exist and indexing it throws, taking this
-				-- whole function down so no shop ever registers. GetPivot is defined
-				-- on both Model and BasePart, so it works either way.
+				--[[ GetPivot rather than .Position: the BedwarsItemShop tag sits on the
+				shop container, not on a part -- the game's own getShopkeeperModel
+				resolves the NPC as tagged:FindFirstChildWhichIsA('Model'), so the
+				tagged instance is whatever holds desertMerchant. When that's a
+				Model, .Position doesn't exist and indexing it throws, taking this
+				whole function down so no shop ever registers. GetPivot is defined
+				on both Model and BasePart, so it works either way. ]]
 				if (v.RootPart:GetPivot().Position - localPosition).Magnitude <= 20 then
 					shop = v.Upgrades or v.Shop or nil
 					upgrades = upgrades or v.Upgrades
@@ -5853,16 +5860,16 @@ run(function()
 				if not AutoBuy.Enabled then return end
 				if BedwarsCheck.Enabled and not store.queueType:find('bedwars') then return end
 	
-				-- A pass that bought nothing used to latch AutoBuy off entirely
-				-- (npctick = tick() + math.huge), leaving InventoryAmountChanged as the
-				-- only way back in. Anything that changes what you can afford without
-				-- changing your inventory left it asleep -- a teammate's upgrade
-				-- unlocking the next tier, store.shopLoaded flipping true after the
-				-- latch, a kit swap rewriting the sword table, an edit to the Item list
-				-- -- so standing at the shop with the currency already in hand bought
-				-- nothing until some unrelated pickup happened to poke it. Re-check on a
-				-- bounded interval instead, and only while actually in range of a
-				-- shopkeeper: one shop scan every 0.3s, worst case ~0.4s to buy.
+				--[[ A pass that bought nothing used to latch AutoBuy off entirely
+				(npctick = tick() + math.huge), leaving InventoryAmountChanged as the
+				only way back in. Anything that changes what you can afford without
+				changing your inventory left it asleep -- a teammate's upgrade
+				unlocking the next tier, store.shopLoaded flipping true after the
+				latch, a kit swap rewriting the sword table, an edit to the Item list
+				-- so standing at the shop with the currency already in hand bought
+				nothing until some unrelated pickup happened to poke it. Re-check on a
+				bounded interval instead, and only while actually in range of a
+				shopkeeper: one shop scan every 0.3s, worst case ~0.4s to buy. ]]
 				local idlerecheck = 0.3
 				local lastupgrades, wasnear, buytick = nil, false, 0
 
@@ -5875,10 +5882,10 @@ run(function()
 						end
 					end
 
-					-- Walking into range (or swapping shopkeeper) buys on this pass rather
-					-- than sitting out whatever idle wait was left over. math.max keeps a
-					-- pending post-purchase cooldown intact, so stepping back into range
-					-- right after a buy can't re-fire it off a stale currencytable.
+					--[[ Walking into range (or swapping shopkeeper) buys on this pass rather
+					than sitting out whatever idle wait was left over. math.max keeps a
+					pending post-purchase cooldown intact, so stepping back into range
+					right after a buy can't re-fire it off a stale currencytable. ]]
 					if npc and (not wasnear or lastupgrades ~= upgrades) then
 						npctick = math.max(tick(), buytick)
 						lastupgrades = upgrades
@@ -5895,9 +5902,9 @@ run(function()
 								end
 							end
 						end
-						-- 0.4s after a purchase so the next pass reads an inventory the
-						-- server has already updated: currencytable is rebuilt from it each
-						-- pass, and a stale read buys the same tier twice.
+						--[[ 0.4s after a purchase so the next pass reads an inventory the
+						server has already updated: currencytable is rebuilt from it each
+						pass, and a stale read buys the same tier twice. ]]
 						buytick = waitcheck and (tick() + 0.4) or buytick
 						npctick = tick() + (waitcheck and 0.4 or idlerecheck)
 					end
@@ -6472,8 +6479,8 @@ run(function()
 				table.clear(v.Hotbar)
 			end
 			table.clear(self.Hotbars)
-			-- `or {}`: a profile written before HotbarList worked has no hotbar array,
-			-- and indexing nil here would take the whole profile load down with it.
+			--[[ `or {}`: a profile written before HotbarList worked has no hotbar array,
+			and indexing nil here would take the whole profile load down with it. ]]
 			for _, v in savetab.Hotbars or {} do
 				self:AddHotbar(v)
 			end
@@ -7024,12 +7031,12 @@ run(function()
 	local Nametags
 	local effects, util = {}, {}
 
-	-- The game's own nametag builder, stashed the first time we stub it so disable can
-	-- put it back. This is the ONLY thing that builds a character nametag -- the game
-	-- turns Roblox's own Humanoid name display off (NameDisplayDistance = 0,
-	-- DisplayDistanceType = None) and then calls this for every entity, players and
-	-- mobs alike -- so stubbing it and never restoring it left the session with no
-	-- nametags on anyone until a rejoin, whatever the module's knob said.
+	--[[ The game's own nametag builder, stashed the first time we stub it so disable can
+	put it back. This is the ONLY thing that builds a character nametag -- the game
+	turns Roblox's own Humanoid name display off (NameDisplayDistance = 0,
+	DisplayDistanceType = None) and then calls this for every entity, players and
+	mobs alike -- so stubbing it and never restoring it left the session with no
+	nametags on anyone until a rejoin, whatever the module's knob said. ]]
 	local oldAddGameNametag
 
 	local function removeGameNametags()
@@ -7045,11 +7052,11 @@ run(function()
 		end
 	end
 
-	-- Puts the builder back and re-runs it over everything currently tagged as an
-	-- entity, since the tags we closed above won't come back on their own until that
-	-- character is re-tagged (i.e. respawns). addGameNametag bails on its own for
-	-- anyone whose tag is already open, so this fills in the gaps without doubling
-	-- anybody up, and it still honours NoNametag / shouldShowNametag.
+	--[[ Puts the builder back and re-runs it over everything currently tagged as an
+	entity, since the tags we closed above won't come back on their own until that
+	character is re-tagged (i.e. respawns). addGameNametag bails on its own for
+	anyone whose tag is already open, so this fills in the gaps without doubling
+	anybody up, and it still honours NoNametag / shouldShowNametag. ]]
 	local function restoreGameNametags()
 		local controller = bedwars.NametagController
 		if not (controller and oldAddGameNametag) then return end
@@ -7092,10 +7099,10 @@ run(function()
 				end
 	
 				if Nametags.Enabled then
-					-- the module's own thread parks here in the lobby. It used to wait
-					-- on matchState alone, so turning FPS Boost off before the match
-					-- started still stubbed the nametags the moment it did -- hence the
-					-- re-check on both flags after the wait.
+					--[[ the module's own thread parks here in the lobby. It used to wait
+					on matchState alone, so turning FPS Boost off before the match
+					started still stubbed the nametags the moment it did -- hence the
+					re-check on both flags after the wait. ]]
 					repeat task.wait(0.1) until store.matchState ~= 0 or not (FPSBoost.Enabled and Nametags.Enabled)
 					if FPSBoost.Enabled and Nametags.Enabled then
 						removeGameNametags()
@@ -7135,11 +7142,11 @@ run(function()
 		end,
 		Default = true
 	})
-	-- Split out of the module body and defaulted off. It used to run unconditionally
-	-- whenever FPS Boost was on, with no way to keep the framerate work and keep the
-	-- nametags. Doesn't borrow Kill/Visualizer's re-toggle trick: that restarts the
-	-- whole module, and the enable path parks on matchState for as long as the lobby
-	-- lasts, so this drives its own state directly.
+	--[[ Split out of the module body and defaulted off. It used to run unconditionally
+	whenever FPS Boost was on, with no way to keep the framerate work and keep the
+	nametags. Doesn't borrow Kill/Visualizer's re-toggle trick: that restarts the
+	whole module, and the enable path parks on matchState for as long as the lobby
+	lasts, so this drives its own state directly. ]]
 	Nametags = FPSBoost:CreateToggle({
 		Name = 'Hide Nametags',
 		Function = function(callback)
@@ -7162,7 +7169,7 @@ end)
 run(function()
 	local HitColor
 	local Color
-	-- weak keys so highlights destroyed mid-session don't sit in here until disable
+	--[[ weak keys so highlights destroyed mid-session don't sit in here until disable ]]
 	local done = setmetatable({}, {__mode = 'k'})
 	
 	HitColor = vape.Legit:CreateModule({
@@ -7170,14 +7177,14 @@ run(function()
 		Function = function(callback)
 			if callback then
 				repeat
-					-- same colour for every entity this tick; compute once, not per-entity
+					--[[ same colour for every entity this tick; compute once, not per-entity ]]
 					local fill = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 					local trans = Color.Opacity
 					for _, v in entitylib.List do
 						local highlight = v.Character and v.Character:FindFirstChild('_DamageHighlight_')
 						if highlight then
-							-- set, not array: the table.find here was a linear scan
-							-- per entity per tick that only grew as highlights piled up
+							--[[ set, not array: the table.find here was a linear scan
+							per entity per tick that only grew as highlights piled up ]]
 							done[highlight] = true
 							highlight.FillColor = fill
 							highlight.FillTransparency = trans
@@ -8203,11 +8210,11 @@ run(function()
 end)
 end)
 
--- == bedwars module loader ==
--- Exposes shared.bedwars and loads the external obfuscatable module
+--[[ == bedwars module loader ==
+Exposes shared.bedwars and loads the external obfuscatable module ]]
 
 shared.bedwars = {
-    -- Services
+    --[[ Services ]]
     playersService      = playersService,
     replicatedStorage   = replicatedStorage,
     runService          = runService,
@@ -8224,7 +8231,7 @@ shared.bedwars = {
     teleportService     = teleportService,
 	virtualInputManager = virtualInputManager,
 
-    -- Framework
+    --[[ Framework ]]
     vape                = vape,
     vapeEvents          = vapeEvents,
     entitylib           = entitylib,
@@ -8233,7 +8240,7 @@ shared.bedwars = {
     color               = color,
     uipallet            = uipallet,
 
-    -- Game state
+    --[[ Game state ]]
     lplr                = lplr,
     gameCamera          = gameCamera,
     bedwars             = bedwars,
@@ -8244,7 +8251,7 @@ shared.bedwars = {
     vapeConnections     = vapeConnections,
     RunLoops            = RunLoops,
 
-    -- Utilities
+    --[[ Utilities ]]
     run                 = run,
     blankFunction       = blankFunction,
     notif               = notif,
@@ -8272,21 +8279,21 @@ shared.bedwars = {
     namecallGuard       = namecallGuard,
 }
 
--- bedwars.lua is the ONLY file fetched from GitLab -- everything else comes from GitHub -- and
--- it sits at the REPO ROOT there (gitlab.com/pistonware/pistonware/bedwars.lua).
---
--- What lives at that URL is a ~220 byte REDIRECT to LuaArmor's loader endpoint, not the
--- protected build; LuaArmor hosts the build itself and serves the current one on every request,
--- which is what keeps security updates and Heartbeat live.
---
--- It is never written to disk and, outside developer mode, never read from disk. This is the
--- one file whose integrity the key system rests on, so it gets neither the caching nor the
--- commit tracking that every other file in the project has -- both turned out to be ways to get
--- a tampered local file executed in its place. See downloadBedwars for why the developer hatch
--- is the one exception and why it no longer costs anything.
---
--- The payload validates the global script_key server-side on execution. The loader's key gate
--- is what sets it; nothing here can substitute for it.
+--[[ bedwars.lua is the ONLY file fetched from GitLab -- everything else comes from GitHub -- and
+it sits at the REPO ROOT there (gitlab.com/pistonware/pistonware/bedwars.lua).
+
+What lives at that URL is a ~220 byte REDIRECT to LuaArmor's loader endpoint, not the
+protected build; LuaArmor hosts the build itself and serves the current one on every request,
+which is what keeps security updates and Heartbeat live.
+
+It is never written to disk and, outside developer mode, never read from disk. This is the
+one file whose integrity the key system rests on, so it gets neither the caching nor the
+commit tracking that every other file in the project has -- both turned out to be ways to get
+a tampered local file executed in its place. See downloadBedwars for why the developer hatch
+is the one exception and why it no longer costs anything.
+
+The payload validates the global script_key server-side on execution. The loader's key gate
+is what sets it; nothing here can substitute for it. ]]
 
 --[[
     Fetches the payload redirect from GitLab. Outside developer mode it is NEVER cached and
@@ -8314,23 +8321,23 @@ shared.bedwars = {
     trip that used to precede it.
 ]]
 local function downloadBedwars()
-    -- Developer mode runs the local file instead of fetching. This hatch was removed and is
-    -- now back, and the reason it is safe this time is specific, so it is worth stating:
-    --
-    -- It was removed because a local payload meant ZERO contact with LuaArmor. The published
-    -- loader ships plaintext, so anyone could set the developer flag, drop any bedwars.lua at
-    -- this path, and have pistonware execute it forever -- unkeyed, with no request that could
-    -- ever notice.
-    --
-    -- It is back because bedwars.lua now validates its own key (the session block at the top
-    -- of it). The genuine source contacts LuaArmor whether it was loaded from disk or off the
-    -- network, so loading it locally no longer grants an unkeyed session -- the file refuses by
-    -- itself. What the hatch still helps is someone running a payload they have already dumped
-    -- and stripped, and for them it is a convenience rather than a capability: anyone holding a
-    -- working stripped payload has no need of this loader to run it.
-    --
-    -- PUBLIC_BUILD nulls shared.PistonwareDeveloper and locks it behind a metatable, so this
-    -- branch is unreachable from the published loader unless that loader is itself edited.
+    --[[ Developer mode runs the local file instead of fetching. This hatch was removed and is
+    now back, and the reason it is safe this time is specific, so it is worth stating:
+
+    It was removed because a local payload meant ZERO contact with LuaArmor. The published
+    loader ships plaintext, so anyone could set the developer flag, drop any bedwars.lua at
+    this path, and have pistonware execute it forever -- unkeyed, with no request that could
+    ever notice.
+
+    It is back because bedwars.lua now validates its own key (the session block at the top
+    of it). The genuine source contacts LuaArmor whether it was loaded from disk or off the
+    network, so loading it locally no longer grants an unkeyed session -- the file refuses by
+    itself. What the hatch still helps is someone running a payload they have already dumped
+    and stripped, and for them it is a convenience rather than a capability: anyone holding a
+    working stripped payload has no need of this loader to run it.
+
+    PUBLIC_BUILD nulls shared.PistonwareDeveloper and locks it behind a metatable, so this
+    branch is unreachable from the published loader unless that loader is itself edited. ]]
     if shared.PistonwareDeveloper then
         local suc, res = pcall(function()
             if not isfile('pistonware/games/bedwars.lua') then return nil end
@@ -8340,8 +8347,8 @@ local function downloadBedwars()
             warn('[pistonware] developer mode: running local games/bedwars.lua (not the published build)')
             return res
         end
-        -- Falls through to the network rather than failing: a developer with no local copy, or
-        -- one that does not compile, still wants a working script.
+        --[[ Falls through to the network rather than failing: a developer with no local copy, or
+        one that does not compile, still wants a working script. ]]
         warn('[pistonware] developer mode: no usable local games/bedwars.lua -- using the published build')
     end
 
@@ -8349,8 +8356,8 @@ local function downloadBedwars()
         local suc, res = pcall(function()
             return game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
         end)
-        -- compile check: during an outage HttpGet can hand back the 503/error page as the body,
-        -- which the ~=''/'404' tests would accept
+        --[[ compile check: during an outage HttpGet can hand back the 503/error page as the body,
+        which the ~=''/'404' tests would accept ]]
         if suc and res and res ~= '' and res ~= '404: Not Found' and loadstring(res) ~= nil then
             return res
         end
@@ -8359,28 +8366,28 @@ local function downloadBedwars()
         end
     end
 
-    -- Every attempt failed. Returns nil rather than falling back to a local copy: a local copy
-    -- is precisely what must never be executed here, and there is nothing useful it could do
-    -- anyway, since what it contains still needs LuaArmor reachable to run.
+    --[[ Every attempt failed. Returns nil rather than falling back to a local copy: a local copy
+    is precisely what must never be executed here, and there is nothing useful it could do
+    anyway, since what it contains still needs LuaArmor reachable to run. ]]
     return nil
 end
 
--- LuaArmor blanks the global script_key as soon as it has authenticated -- an anti-key-theft
--- measure, so another script running later in the same session cannot read it back out. That
--- makes the key single-use per session, and ANY second load of the payload (the GUI's Reinject
--- button, a re-run of this file, a manual execute after injecting) lands on 'No key found',
--- which does not merely fail: LuaArmor puts up a modal Auth Error with a Leave button and never
--- returns. Everything downstream of the call below is then stranded -- including main.lua's
--- finishLoading(), which is what applies your saved profile, so the symptom is a GUI that loads
--- with Profile 'default' and an empty Profiles list rather than an obvious error.
---
--- shared.PistonwareKey is the loader's own copy of the validated key and is never blanked, so
--- re-publishing from it immediately before each load makes the key effectively reusable.
--- Written to every table the payload might read it from, not just one. Executors do not agree
--- on what a loadstring'd chunk's environment is: on most, a bare global assignment lands in
--- getgenv(), but several mobile executors sandbox chunks so that the two are different tables,
--- and _G is different again. Whichever one the payload looks at has to have the key in it, and
--- writing all three costs nothing. Returns false when there is no key to publish.
+--[[ LuaArmor blanks the global script_key as soon as it has authenticated -- an anti-key-theft
+measure, so another script running later in the same session cannot read it back out. That
+makes the key single-use per session, and ANY second load of the payload (the GUI's Reinject
+button, a re-run of this file, a manual execute after injecting) lands on 'No key found',
+which does not merely fail: LuaArmor puts up a modal Auth Error with a Leave button and never
+returns. Everything downstream of the call below is then stranded -- including main.lua's
+finishLoading(), which is what applies your saved profile, so the symptom is a GUI that loads
+with Profile 'default' and an empty Profiles list rather than an obvious error.
+
+shared.PistonwareKey is the loader's own copy of the validated key and is never blanked, so
+re-publishing from it immediately before each load makes the key effectively reusable.
+Written to every table the payload might read it from, not just one. Executors do not agree
+on what a loadstring'd chunk's environment is: on most, a bare global assignment lands in
+getgenv(), but several mobile executors sandbox chunks so that the two are different tables,
+and _G is different again. Whichever one the payload looks at has to have the key in it, and
+writing all three costs nothing. Returns false when there is no key to publish. ]]
 local function republishKey()
     local key = shared.PistonwareKey
     if type(key) ~= 'string' or key == '' then return false end
@@ -8394,10 +8401,10 @@ local bedwarsSource = downloadBedwars()
 if bedwarsSource then
     local bedwarsFn = loadstring(bedwarsSource)
     if bedwarsFn then
-        -- Refuse to run the payload with no key rather than let it discover that itself: a
-        -- LuaArmor auth failure is not a soft error, it puts up a modal and KICKS the player
-        -- out of the game. Saying so here costs them their combat modules for the round instead
-        -- of their session, and names the actual problem.
+        --[[ Refuse to run the payload with no key rather than let it discover that itself: a
+        LuaArmor auth failure is not a soft error, it puts up a modal and KICKS the player
+        out of the game. Saying so here costs them their combat modules for the round instead
+        of their session, and names the actual problem. ]]
         if not republishKey() then
             warn('[pistonware] no key available to hand bedwars.lua -- skipping it rather than risk a kick. Re-run the pistonware loader.')
             pcall(function()
@@ -8410,16 +8417,16 @@ if bedwarsSource then
             warn('[pistonware] bedwars.lua errored while running: '..tostring(err))
         end
     else
-        -- What came back does not compile. Nothing is cached now, so there is no stale file to
-        -- delete and no state to repair -- the next run fetches again from scratch. Almost
-        -- certainly the host served an error page that happened to pass the checks above.
+        --[[ What came back does not compile. Nothing is cached now, so there is no stale file to
+        delete and no state to repair -- the next run fetches again from scratch. Almost
+        certainly the host served an error page that happened to pass the checks above. ]]
         warn('[pistonware] bedwars.lua did not compile -- the file host may be serving an error page')
         pcall(function()
             vape:CreateNotification('Vape', 'Combat modules could not be loaded (the file host returned something invalid). Rejoin the game to retry.', 30, 'alert')
         end)
     end
 else
-    -- Every attempt failed. Say so instead of silently loading without combat modules.
+    --[[ Every attempt failed. Say so instead of silently loading without combat modules. ]]
     warn('[pistonware] bedwars.lua could not be downloaded -- the file host may be down')
     pcall(function()
         vape:CreateNotification('Vape', 'Could not download bedwars.lua -- the file host may be down. Combat modules are unavailable; rejoin the game to retry.', 30, 'alert')

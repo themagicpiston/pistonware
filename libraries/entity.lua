@@ -316,7 +316,7 @@ entitylib.removeEntity = function(char, isLocal)
 			end
 			table.clear(entitylib.character.Connections)
 			entitylib.Events.LocalRemoved:Fire(entitylib.character)
-			--table.clear(entitylib.character)
+			--[[ table.clear(entitylib.character) ]]
 		end
 
 		return

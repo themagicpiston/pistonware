@@ -19,12 +19,12 @@ end
 
 local isDeveloper = (not PUBLIC_BUILD) and shared.PistonwareDeveloper and true or false
 
--- Developer-only boot timing. The console shows ONE line -- 'Injecting into ROBLOX...' -- from
--- the moment the key validates until main.lua starts, and the status chip reads INJECTING right
--- through main.lua on top of that. So every wait in between (Roblox loading, the GitHub tree,
--- the GUI build, the payload) looks identical from outside: 'stuck on injecting'. These marks
--- put a number on each one instead, in the executor output, for the build that is allowed to
--- care. Off entirely in the public build -- isDeveloper is false there by construction.
+--[[ Developer-only boot timing. The console shows ONE line -- 'Injecting into ROBLOX...' -- from
+the moment the key validates until main.lua starts, and the status chip reads INJECTING right
+through main.lua on top of that. So every wait in between (Roblox loading, the GitHub tree,
+the GUI build, the payload) looks identical from outside: 'stuck on injecting'. These marks
+put a number on each one instead, in the executor output, for the build that is allowed to
+care. Off entirely in the public build -- isDeveloper is false there by construction. ]]
 local phaseClock = os.clock()
 local function phase(name)
 	if not isDeveloper then return end
@@ -61,7 +61,7 @@ local GETKEY_URL  = 'https://ads.luarmor.net/get_key?for=Pistonware_Key-xnpnovpE
 local KEY_FILE    = 'pistonwarekey.json'
 local TARGET_URL  = 'https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua'
 local HELP_URL    = 'https://discord.gg/pistonware'
--- ========================================================================
+--[[ ======================================================================== ]]
 
 local Strings = {
 	enter_key       = 'Enter your key below to continue.',
@@ -105,8 +105,8 @@ local function t(key, ...)
 	return s
 end
 
--- Coarse on purpose: '3 days' is what someone needs to know, and '3 days 4 hours 12 minutes'
--- is noise in a one-line status. Rounds down, so it never promises time that is not there.
+--[[ Coarse on purpose: '3 days' is what someone needs to know, and '3 days 4 hours 12 minutes'
+is noise in a one-line status. Rounds down, so it never promises time that is not there. ]]
 local function formatDuration(seconds)
 	if seconds <= 0 then return nil end
 	local days = math.floor(seconds / 86400)
@@ -117,11 +117,11 @@ local function formatDuration(seconds)
 	return minutes..(minutes == 1 and ' minute' or ' minutes')
 end
 
--- The parenthesised detail after 'Key valid', built from the fields LuaArmor only returns on
--- KEY_VALID: the seller note, and auth_expire (a unix timestamp, with -1 or 0 meaning a
--- lifetime key). Showing what is left matters because the complaint this addresses is people
--- believing a key had died when it had days on it -- if the remaining time is on screen every
--- run, that confusion has nowhere to start.
+--[[ The parenthesised detail after 'Key valid', built from the fields LuaArmor only returns on
+KEY_VALID: the seller note, and auth_expire (a unix timestamp, with -1 or 0 meaning a
+lifetime key). Showing what is left matters because the complaint this addresses is people
+believing a key had died when it had days on it -- if the remaining time is on screen every
+run, that confusion has nowhere to start. ]]
 local function keyDetail(status)
 	local data = type(status) == 'table' and type(status.data) == 'table' and status.data or nil
 	if not data then return '' end
@@ -147,17 +147,22 @@ local function trim(s)
 	return (tostring(s):gsub('^%s*(.-)%s*$', '%1'))
 end
 
--- Empty counts as missing. The executor's real isfile reports a zero-byte file as present, so a
--- write interrupted by a cancel, a crash or a teleport leaves a truncated file that this
--- function would otherwise never fetch again. For a .lua file that means a chunk that silently
--- does nothing; for an asset it means getcustomasset producing an invalid content id, which
--- throws 'ContentId formatting failed' and kills the GUI. Both states used to survive every
--- retry, because everything that could have repaired them asked isfile and was told the file
--- was fine -- so the only remedy was reinstalling the script.
+--[[ Empty counts as missing. The executor's real isfile reports a zero-byte file as present, so a
+write interrupted by a cancel, a crash or a teleport leaves a truncated file that this
+function would otherwise never fetch again. For a .lua file that means a chunk that silently
+does nothing; for an asset it means getcustomasset producing an invalid content id, which
+throws 'ContentId formatting failed' and kills the GUI. Both states used to survive every
+retry, because everything that could have repaired them asked isfile and was told the file
+was fine -- so the only remedy was reinstalling the script. ]]
 local function hasContent(path)
 	if not isfile(path) then return false end
 	local ok, body = pcall(readfile, path)
-	return ok and type(body) == 'string' and body ~= ''
+	if not ok or type(body) ~= 'string' or body == '' then return false end
+	if path:match('%.lua$') then
+		local compileOk, chunk = pcall(loadstring, body, path)
+		return compileOk and type(chunk) == 'function'
+	end
+	return true
 end
 
 local function downloadFile(path, func)
@@ -191,16 +196,16 @@ local function downloadFile(path, func)
 	return (func or readfile)(path)
 end
 
--- Every concurrent batch in this file joins through here.
---
--- What this replaces was `done.Event:Wait()` with no timeout, which parks the boot FOREVER if
--- a worker dies before firing -- and workers could die, because the progress callback they
--- called on their way out was not wrapped. That is the 'stuck on Injecting into ROBLOX' report:
--- not a slow download, a batch that lost a worker and a join that waits for it regardless.
---
--- Fixed at both ends, because either alone still leaves a hole: the callbacks are pcall'd at
--- their call sites now, AND this gives up on the clock no matter what killed the worker. A
--- batch that loses one costs the files that worker had left, not the session.
+--[[ Every concurrent batch in this file joins through here.
+
+The old code used `done.Event:Wait()` with no timeout, which parks the boot FOREVER if
+a worker dies before firing -- and workers could die, because the progress callback they
+called on their way out was not wrapped. That is the 'stuck on Injecting into ROBLOX' report:
+not a slow download, a batch that lost a worker and a join that waits for it regardless.
+
+Fixed at both ends, because either alone still leaves a hole: the callbacks are pcall'd at
+their call sites now, AND this gives up on the clock no matter what killed the worker. A
+batch that loses one costs the files that worker had left, not the session. ]]
 local function joinBatch(isDone, seconds)
 	local deadline = os.clock() + (seconds or 90)
 	while not isDone() and os.clock() < deadline do
@@ -226,11 +231,11 @@ end
 local repoTree, repoTreeTried, repoTreeDone
 local function fetchRepoTree()
 	if repoTreeTried then
-		-- Joined, not returned. repoTreeTried is set on ENTRY, so a second caller arriving
-		-- while the first request is still in flight used to be handed nil and read that as
-		-- 'no tree' -- silently skipping whatever it wanted the tree for. Harmless while the
-		-- only concurrent caller was the update task, but the prefetch below makes a
-		-- concurrent second caller the normal case.
+		--[[ Joined, not returned. repoTreeTried is set on ENTRY, so a second caller arriving
+		while the first request is still in flight used to be handed nil and read that as
+		'no tree' -- silently skipping whatever it wanted the tree for. Harmless while the
+		only concurrent caller was the update task, but the prefetch below makes a
+		concurrent second caller the normal case. ]]
 		if not repoTreeDone then
 			joinBatch(function() return repoTreeDone end, 30)
 		end
@@ -242,8 +247,8 @@ local function fetchRepoTree()
 		local body = httpService:JSONDecode(game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/git/trees/main?recursive=1', true))
 		if type(body) == 'table' and type(body.tree) == 'table' and type(body.sha) == 'string' then
 			repoTree = body
-			-- Handed to main.lua so its asset prefetch reads this instead of spending its own
-			-- contents/ calls. It only needs the paths, and they are all in here already.
+			--[[ Handed to main.lua so its asset prefetch reads this instead of spending its own
+			contents/ calls. It only needs the paths, and they are all in here already. ]]
 			shared.PistonwareRepoTree = body
 		end
 	end)
@@ -251,9 +256,9 @@ local function fetchRepoTree()
 	return repoTree
 end
 
--- Shaped like the old contents/ response ({type = 'file', path = ...}) so the downloader below
--- did not have to change. Pinned by construction: a tree IS a snapshot, so there is no window
--- where the listing and the file contents disagree.
+--[[ Shaped like the old contents/ response ({type = 'file', path = ...}) so the downloader below
+did not have to change. Pinned by construction: a tree IS a snapshot, so there is no window
+where the listing and the file contents disagree. ]]
 local function fetchProfilesListing()
 	local tree = fetchRepoTree()
 	if not tree then return nil end
@@ -313,10 +318,11 @@ local function downloadProfilesListing(body, commit, onProgress)
 			table.insert(files, v)
 		end
 	end
-	local completed, total = 0, #files
+	local completed, failed, total = 0, 0, #files
 	for _, v in files do
 		local relPath = ({v.path:gsub(' ', '%%20')})[1]
 		task.spawn(function()
+			local succeeded = false
 			if commit then
 				pcall(function()
 					for attempt = 1, 4 do
@@ -325,6 +331,7 @@ local function downloadProfilesListing(body, commit, onProgress)
 						end)
 						if suc and res and res ~= '' and res ~= '404: Not Found' then
 							writefile('pistonware/'..relPath, mergeGuiState('pistonware/'..relPath, res))
+							succeeded = true
 							break
 						end
 						if attempt < 4 then
@@ -333,10 +340,11 @@ local function downloadProfilesListing(body, commit, onProgress)
 					end
 				end)
 			else
-				pcall(downloadFile, 'pistonware/'..relPath)
+				succeeded = pcall(downloadFile, 'pistonware/'..relPath)
 			end
-			-- Counted first and reported second, both guarded: this worker's only remaining job
-			-- is to be counted, and a throwing progress callback used to stop that happening.
+			if not succeeded then failed += 1 end
+			--[[ Counted first and reported second, both guarded: this worker's only remaining job
+			is to be counted, and a throwing progress callback used to stop that happening. ]]
 			completed += 1
 			if onProgress then
 				pcall(onProgress, completed, total)
@@ -344,13 +352,14 @@ local function downloadProfilesListing(body, commit, onProgress)
 		end)
 	end
 	joinBatch(function() return completed >= total end)
+	return completed == total and failed == 0
 end
 
--- Derived from the tree already in hand, so the sync check costs no request of its own. Only
--- has to change when a profile changes and stay identical when nothing has, which the blob shas
--- give exactly; djb2 over them keeps the stored value one short line instead of growing with
--- the profile count. The 'p1-' prefix marks the scheme, so the migration in Step 2b can tell
--- one of these from the 40-char git sha the old code wrote.
+--[[ Derived from the tree already in hand, so the sync check costs no request of its own. The
+fingerprint changes only when a profile changes and stays identical otherwise; the blob shas
+give exactly; djb2 over them keeps the stored value one short line instead of growing with
+the profile count. The 'p1-' prefix marks the scheme, so the migration in Step 2b can tell
+one of these from the 40-char git sha the old code wrote. ]]
 local function profilesFingerprint()
 	local tree = fetchRepoTree()
 	if not tree then return nil end
@@ -373,8 +382,8 @@ end
 local function updateCachedFiles(onProgress)
 	local httpService = cloneref(game:GetService('HttpService'))
 
-	-- The tree carries its own sha, so this is the whole API budget -- and it is memoised, so
-	-- the profiles listing and fingerprint below ride the same response.
+	--[[ The tree carries its own sha, so this is the whole API budget -- and it is memoised, so
+	the profiles listing and fingerprint below ride the same response. ]]
 	local tree = fetchRepoTree()
 	if not tree then return end
 	local headSha = tree.sha
@@ -402,8 +411,8 @@ local function updateCachedFiles(onProgress)
 		return readfile(localPath):sub(1, #Watermark) == Watermark
 	end
 
-	-- Only files already cached get refreshed here -- everything else keeps downloading on
-	-- demand, and is picked up by this pass on the session after it first appears.
+	--[[ Only files already cached get refreshed here -- everything else keeps downloading on
+	demand, and is picked up by this pass on the session after it first appears. ]]
 	local toUpdate = {}
 	for path, sha in remote do
 		local localPath = 'pistonware/'..path
@@ -437,7 +446,7 @@ local function updateCachedFiles(onProgress)
 					local suc, res = pcall(function()
 						return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..headSha..'/'..select(1, path:gsub(' ', '%%20')), true)
 					end)
-					-- compile check: never overwrite a working cached file with an error page
+					--[[ compile check: never overwrite a working cached file with an error page ]]
 					if suc and res and res ~= '' and res ~= '404: Not Found' and loadstring(res) ~= nil then
 						pcall(writefile, 'pistonware/'..path, Watermark..'\n'..res)
 						manifest[path] = remote[path]
@@ -448,8 +457,8 @@ local function updateCachedFiles(onProgress)
 						task.wait(attempt)
 					end
 				end
-				-- Counted first, reported second, the report guarded. See joinBatch: a throwing
-				-- progress callback here used to strand the join for the rest of the session.
+				--[[ Counted first, reported second, the report guarded. See joinBatch: a throwing
+				progress callback here used to strand the join for the rest of the session. ]]
 				completed += 1
 				if onProgress then
 					pcall(onProgress, completed, total)
@@ -500,19 +509,19 @@ local PistonFace = {
 	'::::::------:::::::------::::::------:::::::::::::'
 }
 
--- Every offset below is authored against the base window and scaled as a whole by the
--- UIScale, so the layout can't drift apart on other resolutions.
+--[[ Every offset below is authored against the base window and scaled as a whole by the
+UIScale, so the layout can't drift apart on other resolutions. ]]
 local WindowWidth = 1000
 local TitleBarHeight = 44
 local ContentPadding = 26
--- Rows are packed slightly tighter than the glyph size so the 25-row face stays a sane
--- height. Text is never clipped by its own frame in Roblox, so the 2px per row overlaps
--- harmlessly.
+--[[ Rows are packed slightly tighter than the glyph size so the 25-row face stays a sane
+height. Text is never clipped by its own frame in Roblox, so the 2px per row overlaps
+harmlessly. ]]
 local AsciiTextSize = 20
 local AsciiLineHeight = 18
 
--- The rows under the art are positioned off the art itself, so a taller or shorter face
--- pushes them (and the bottom of the window) down instead of colliding with them.
+--[[ The rows under the art are positioned off the art itself, so a taller or shorter face
+pushes them (and the bottom of the window) down instead of colliding with them. ]]
 local AsciiTop = TitleBarHeight + 16
 local StatusY = AsciiTop + #PistonFace * AsciiLineHeight + 16
 local LineY = StatusY + 32
@@ -534,9 +543,9 @@ local Palette = {
 	Ok = Color3.fromRGB(120, 225, 150)
 }
 
--- Ascii shading: the art is one colour in a real terminal, but the piston only reads as a
--- face if the solid blocks sit brighter than the dithered background, so each glyph class
--- gets its own tone.
+--[[ Ascii shading: the art is one colour in a real terminal, but the piston only reads as a
+face if the solid blocks sit brighter than the dithered background, so each glyph class
+gets its own tone. ]]
 local AsciiShades = {
 	['@'] = '#F2F2F2',
 	['#'] = '#E4E4E4',
@@ -549,16 +558,16 @@ local AsciiShades = {
 	['.'] = '#4A4A4A'
 }
 
--- Cancelling the loader has to leave nothing behind that THIS boot created, so on a fresh
--- install the whole folder is wiped. On an install that already existed before this run the
--- wipe is skipped entirely -- the folder holds the user's custom profiles, and cancelling a
--- reinject must never cost them those; only an explicit reinstall (reinstall.lua) deletes an
--- existing install. delfolder already recurses on the executors that have it; the manual walk
--- is for the ones that only ship delfile.
+--[[ Cancelling the loader has to leave nothing behind that THIS boot created, so on a fresh
+install the whole folder is wiped. On an install that already existed before this run the
+wipe is skipped entirely -- the folder holds the user's custom profiles, and cancelling a
+reinject must never cost them those; only an explicit reinstall (reinstall.lua) deletes an
+existing install. delfolder already recurses on the executors that have it; the manual walk
+is for the ones that only ship delfile. ]]
 local freshInstall = false
 local function deleteInstall()
-	-- every cancel/abort path comes through here, so a cancelled boot immediately frees the
-	-- duplicate-execution guard for the next manual run
+	--[[ every cancel/abort path comes through here, so a cancelled boot immediately frees the
+	duplicate-execution guard for the next manual run ]]
 	shared.PistonwareLoaderBoot = nil
 	--[[
 		And the reload flag, for the same reason.
@@ -618,20 +627,20 @@ local function createConsole()
 	local inputService = cloneref(game:GetService('UserInputService'))
 	local playersService = cloneref(game:GetService('Players'))
 
-	-- Whatever a previous run left standing goes first. Several paths through this file
-	-- return without destroying the console -- the unsupported-executor bail and Fail() both
-	-- leave the window up on purpose so the message can be read -- and each one leaves behind
-	-- a GUI tree, three service-level connections and the reveal thread below. Re-executing
-	-- is the natural response to all of them, so without this the leak grows once per attempt
-	-- rather than being replaced.
+	--[[ Whatever a previous run left standing goes first. Several paths through this file
+	return without destroying the console -- the unsupported-executor bail and Fail() both
+	leave the window up on purpose so the message can be read -- and each one leaves behind
+	a GUI tree, three service-level connections and the reveal thread below. Re-executing
+	is the natural response to all of them, so without this the leak grows once per attempt
+	rather than being replaced. ]]
 	pcall(function()
 		if type(shared.PistonwareLoaderTeardown) == 'function' then
 			shared.PistonwareLoaderTeardown()
 		end
 	end)
 
-	-- Connections on services and the camera, which outlive screen:Destroy() -- unlike the
-	-- button and titlebar ones, which are parented into the GUI and go with it.
+	--[[ Connections on services and the camera, which outlive screen:Destroy() -- unlike the
+	button and titlebar ones, which are parented into the GUI and go with it. ]]
 	local connections = {}
 	local function track(connection)
 		table.insert(connections, connection)
@@ -658,7 +667,7 @@ local function createConsole()
 	window.Size = UDim2.fromOffset(WindowWidth, WindowHeight)
 	window.BackgroundColor3 = Palette.Window
 	window.BorderSizePixel = 0
-	-- so minimising can roll the console up behind its own titlebar
+	--[[ so minimising can roll the console up behind its own titlebar ]]
 	window.ClipsDescendants = true
 	window.Parent = screen
 	local windowCorner = Instance.new('UICorner')
@@ -669,21 +678,21 @@ local function createConsole()
 	windowStroke.Thickness = 1
 	windowStroke.Parent = window
 
-	-- One UIScale drives the whole window, so the console keeps its proportions from a phone up
-	-- to a 4K monitor: full size at 1080p, shrunk to fit anything smaller.
+	--[[ One UIScale drives the whole window, so the console keeps its proportions from a phone up
+	to a 4K monitor: full size at 1080p, shrunk to fit anything smaller. ]]
 	local uiscale = Instance.new('UIScale')
 	uiscale.Parent = window
 	local camera = workspace.CurrentCamera
 
-	-- Window state, the way a desktop WM handles it: minimise rolls the window up into its own
-	-- titlebar (there is no taskbar to minimise *to* here, so shading is the recoverable
-	-- equivalent) and maximise fills the viewport, both toggling back on a second click.
+	--[[ Window state, the way a desktop WM handles it: minimise rolls the window up into its own
+	titlebar (there is no taskbar to minimise *to* here, so shading is the recoverable
+	equivalent) and maximise fills the viewport, both toggling back on a second click. ]]
 	local minimized, maximized = false, false
 	local restorePosition = window.Position
 
 	local function applyWindowState(animate)
 		local viewport = camera and camera.ViewportSize or Vector2.new(WindowWidth, WindowHeight)
-		-- Sizes are pre-UIScale, so divide by the scale to land on the viewport once scaled.
+		--[[ Sizes are pre-UIScale, so divide by the scale to land on the viewport once scaled. ]]
 		local width = maximized and (viewport.X / uiscale.Scale) or WindowWidth
 		local height = maximized and (viewport.Y / uiscale.Scale) or WindowHeight
 		local size = UDim2.fromOffset(width, minimized and TitleBarHeight or height)
@@ -700,7 +709,7 @@ local function createConsole()
 		if viewport.X <= 0 or viewport.Y <= 0 then return end
 		local fit = math.min(viewport.X * 0.94 / WindowWidth, viewport.Y * 0.92 / WindowHeight)
 		uiscale.Scale = math.clamp(math.min(fit, viewport.Y / 1080), 0.25, 1.4)
-		-- a maximised window has to keep tracking the viewport it is filling
+		--[[ a maximised window has to keep tracking the viewport it is filling ]]
 		applyWindowState(false)
 	end
 	applyScale()
@@ -716,7 +725,7 @@ local function createConsole()
 	local titlebarCorner = Instance.new('UICorner')
 	titlebarCorner.CornerRadius = UDim.new(0, 10)
 	titlebarCorner.Parent = titlebar
-	-- Squares off the bottom two corners the UICorner above rounded.
+	--[[ Squares off the bottom two corners the UICorner above rounded. ]]
 	local titlebarFill = Instance.new('Frame')
 	titlebarFill.Position = UDim2.new(0, 0, 1, -10)
 	titlebarFill.Size = UDim2.new(1, 0, 0, 10)
@@ -751,24 +760,24 @@ local function createConsole()
 	local closed, aborted = false, false
 	local function destroy()
 		if closed then return end
-		-- Set first: the reveal thread and every wait loop below key off it, so they stop
-		-- even if destroying the GUI throws.
+		--[[ Set first: the reveal thread and every wait loop below key off it, so they stop
+		even if destroying the GUI throws. ]]
 		closed = true
 		for _, connection in connections do
 			pcall(function() connection:Disconnect() end)
 		end
 		table.clear(connections)
 		pcall(function() screen:Destroy() end)
-		-- Only clear the handle if it is still ours; a newer console may already own it.
+		--[[ Only clear the handle if it is still ours; a newer console may already own it. ]]
 		if shared.PistonwareLoaderTeardown == destroy then
 			shared.PistonwareLoaderTeardown = nil
 		end
 	end
 
-	-- Closing the window by hand is a cancel, not a dismissal: the boot stops at the next
-	-- checkpoint, and on a first install everything the run wrote is deleted so a half-finished
-	-- install can't be left behind (and no config gets silently picked for you). On an existing
-	-- install deleteInstall refuses to wipe, so cancelling a reinject just stops the boot.
+	--[[ Closing the window by hand is a cancel, not a dismissal: the boot stops at the next
+	checkpoint, and on a first install everything the run wrote is deleted so a half-finished
+	install can't be left behind (and no config gets silently picked for you). On an existing
+	install deleteInstall refuses to wipe, so cancelling a reinject just stops the boot. ]]
 	local function cancel()
 		if aborted then return end
 		aborted = true
@@ -776,9 +785,9 @@ local function createConsole()
 		deleteInstall()
 	end
 
-	-- Chrome glyphs are drawn from thin rotated bars rather than typed: Roblox's Code font has
-	-- no chevron glyphs, and a literal 'v'/'^' reads as text sitting next to the title instead
-	-- of as window controls.
+	--[[ Chrome glyphs are drawn from thin rotated bars rather than typed: Roblox's Code font has
+	no chevron glyphs, and a literal 'v'/'^' reads as text sitting next to the title instead
+	of as window controls. ]]
 	local function drawGlyph(parent, kind)
 		local bars = {}
 		local function bar(length, x, y, rotation)
@@ -795,8 +804,8 @@ local function createConsole()
 			corner.Parent = piece
 			table.insert(bars, piece)
 		end
-		-- Arms meet at the centre of the 34x34 button: a chevron is two 10px bars at +-45
-		-- degrees, the close is the same two bars crossed.
+		--[[ Arms meet at the centre of the 34x34 button: a chevron is two 10px bars at +-45
+		degrees, the close is the same two bars crossed. ]]
 		if kind == 'minimize' then
 			bar(10, 13.5, 17, 45)
 			bar(10, 20.5, 17, -45)
@@ -846,7 +855,7 @@ local function createConsole()
 				minimized = not minimized
 				applyWindowState(true)
 			else
-				-- maximising an already rolled-up window unrolls it, as a WM would
+				--[[ maximising an already rolled-up window unrolls it, as a WM would ]]
 				maximized = not maximized
 				minimized = false
 				applyWindowState(true)
@@ -854,11 +863,11 @@ local function createConsole()
 		end)
 	end
 
-	-- Drag by the titlebar. Offsets live in screen space (the UIScale only rescales children),
-	-- so the delta can be applied straight to the window position.
+	--[[ Drag by the titlebar. Offsets live in screen space (the UIScale only rescales children),
+	so the delta can be applied straight to the window position. ]]
 	local dragging, dragStart, dragOrigin
 	titlebar.InputBegan:Connect(function(input)
-		-- a maximised window is pinned to the viewport; unmaximise it to move it
+		--[[ a maximised window is pinned to the viewport; unmaximise it to move it ]]
 		if maximized then return end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging, dragStart, dragOrigin = true, input.Position, window.Position
@@ -874,7 +883,7 @@ local function createConsole()
 		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
 			local delta = input.Position - dragStart
 			window.Position = UDim2.new(dragOrigin.X.Scale, dragOrigin.X.Offset + delta.X, dragOrigin.Y.Scale, dragOrigin.Y.Offset + delta.Y)
-			-- so unmaximising and unminimising both come back to where it was left
+			--[[ so unmaximising and unminimising both come back to where it was left ]]
 			restorePosition = window.Position
 		end
 	end))
@@ -925,8 +934,8 @@ local function createConsole()
 	line.Font = Enum.Font.Code
 	line.Parent = window
 
-	-- Answer buttons sit on the row directly under the question and are reused for every
-	-- prompt, so answering one question simply rewrites the line above them.
+	--[[ Answer buttons sit on the row directly under the question and are reused for every
+	prompt, so answering one question simply rewrites the line above them. ]]
 	local answers = Instance.new('Frame')
 	answers.BackgroundTransparency = 1
 	answers.Position = UDim2.fromOffset(ContentPadding, AnswersY)
@@ -939,10 +948,10 @@ local function createConsole()
 	answersLayout.Padding = UDim.new(0, 12)
 	answersLayout.Parent = answers
 
-	-- Explains what the hovered answer actually does. It rides in the same list layout as the
-	-- buttons (LayoutOrder puts it last, after however many there are) so it lands on their row
-	-- with the same gap between, and a hidden child takes no space -- the row closes up around
-	-- it while nothing is hovered. Ask() only clears TextButtons, so this survives each question.
+	--[[ Explains what the hovered answer actually does. It rides in the same list layout as the
+	buttons (LayoutOrder puts it last, after however many there are) so it lands on their row
+	with the same gap between, and a hidden child takes no space -- the row closes up around
+	it while nothing is hovered. Ask() only clears TextButtons, so this survives each question. ]]
 	local tooltip = Instance.new('TextLabel')
 	tooltip.Name = 'Tooltip'
 	tooltip.LayoutOrder = 999
@@ -973,7 +982,7 @@ local function createConsole()
 	footer.BackgroundTransparency = 1
 	footer.Position = UDim2.new(0, ContentPadding, 1, -16)
 	footer.Size = UDim2.new(1, -ContentPadding * 2, 0, 22)
-	-- Touch-only devices have no ctrl key, so point them at the titlebar button instead.
+	--[[ Touch-only devices have no ctrl key, so point them at the titlebar button instead. ]]
 	footer.Text = (inputService.TouchEnabled and not inputService.KeyboardEnabled) and 'Tap [x] to exit' or 'Press [CTRL+C] to exit'
 	footer.TextColor3 = Palette.Footer
 	footer.TextSize = 17
@@ -989,8 +998,8 @@ local function createConsole()
 	end))
 
 	local revealed, revealTarget = 0, 0
-	-- Set by Halt() on the paths that leave the window up for reading but have no more rows
-	-- to draw. Without it this thread outlives the boot at ~14Hz for the rest of the session.
+	--[[ Set by Halt() on the paths that leave the window up for reading but have no more rows
+	to draw. Without it this thread outlives the boot at ~14Hz for the rest of the session. ]]
 	local halted = false
 	task.spawn(function()
 		while not closed and not halted do
@@ -1004,19 +1013,19 @@ local function createConsole()
 		end
 	end)
 
-	-- One flat terminal button, shared by the answer row Ask() builds and the key entry row
-	-- AskKey() builds. Callers stack their own MouseEnter/MouseLeave handlers on top of the
-	-- accent hover wired here; Roblox runs every connection, so nothing needs passing in.
+	--[[ One flat terminal button, shared by the answer row Ask() builds and the key entry row
+	AskKey() builds. Callers stack their own MouseEnter/MouseLeave handlers on top of the
+	accent hover wired here; Roblox runs every connection, so nothing needs passing in. ]]
 	local function answerButton(text, width, order)
 		local button = Instance.new('TextButton')
-		-- keeps the buttons in the order given, ahead of the tooltip that trails them
+		--[[ keeps the buttons in the order given, ahead of the tooltip that trails them ]]
 		button.LayoutOrder = order
 		button.Size = UDim2.fromOffset(width, 34)
 		button.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
 		button.BorderSizePixel = 0
 		button.AutoButtonColor = false
-		-- Frees the touch cursor so the button is tappable on phones (where input would
-		-- otherwise be locked to the game).
+		--[[ Frees the touch cursor so the button is tappable on phones (where input would
+		otherwise be locked to the game). ]]
 		button.Modal = true
 		button.Text = text
 		button.TextColor3 = Palette.ButtonIdle
@@ -1041,9 +1050,9 @@ local function createConsole()
 		return button
 	end
 
-	-- Everything Ask()/AskKey() put on the answer row, cleared between prompts. The tooltip
-	-- label shares the frame and has to survive, hence the class test rather than a blanket
-	-- ClearAllChildren.
+	--[[ The controls that Ask() and AskKey() put on the answer row are cleared between prompts. The tooltip
+	label shares the frame and has to survive, hence the class test rather than a blanket
+	ClearAllChildren. ]]
 	local function clearAnswers()
 		for _, child in answers:GetChildren() do
 			if child:IsA('TextButton') or child:IsA('TextBox') then
@@ -1054,9 +1063,9 @@ local function createConsole()
 
 	local console = {}
 
-	-- `chevron` is the glyph in front of the status word. It points forward ('>') for every
-	-- step of the boot itself, and backward ('<') for the key gate, which is the one phase that
-	-- is holding the boot up rather than advancing it. Escaped, since the label is RichText.
+	--[[ `chevron` is the glyph in front of the status word. It points forward ('>') for every
+	step of the boot itself, and backward ('<') for the key gate, which is the one phase that
+	is holding the boot up rather than advancing it. Escaped, since the label is RichText. ]]
 	function console:SetStatus(text, color, chevron)
 		status.Text = '<font color="#9E9E9E">'..(chevron == '<' and '&lt;' or '&gt;')..'</font> <font color="'..(color or '#F07A1F')..'">'..text..'</font>'
 	end
@@ -1066,9 +1075,9 @@ local function createConsole()
 		line.TextColor3 = color or Palette.Line
 	end
 
-	-- alpha is how far through the boot we are; the face is drawn to match, one row at a time.
-	-- Clamped upwards only: a late progress report from a background step must never pull rows
-	-- back off the face (nothing here ever un-boots).
+	--[[ alpha is how far through the boot we are; the face is drawn to match, one row at a time.
+	Clamped upwards only: a late progress report from a background step must never pull rows
+	back off the face (nothing here ever un-boots). ]]
 	function console:SetProgress(alpha)
 		local count = math.clamp(math.floor(alpha * #PistonFace + 0.5), 0, #PistonFace)
 		revealTarget = math.max(revealTarget, count)
@@ -1078,9 +1087,9 @@ local function createConsole()
 		return aborted
 	end
 
-	-- Asks a question on the output line, waits for one of the buttons underneath it, then
-	-- clears the line again so the next question can take its place. `fallback` is returned if
-	-- the loader is closed or the timeout elapses -- a missed click must never hang injection.
+	--[[ Asks a question on the output line, waits for one of the buttons underneath it, then
+	clears the line again so the next question can take its place. `fallback` is returned if
+	the loader is closed or the timeout elapses -- a missed click must never hang injection. ]]
 	function console:Ask(question, buttons, timeoutSeconds, fallback)
 		if closed then return fallback end
 		self:SetLine(question)
@@ -1118,18 +1127,18 @@ local function createConsole()
 		return choice
 	end
 
-	-- Key entry, drawn into the console's own question row rather than as a second window: the
-	-- status line above it already reads '< KEY SYSTEM', so the gate looks like one more
-	-- terminal prompt instead of a modal floating over the loader.
-	--
-	-- Every handler is passed `say(message, kind)` and does its own reporting, which keeps all
-	-- LuaArmor knowledge out of the console. onSubmit returns whether the key was accepted;
-	-- anything false leaves the prompt up for another attempt. Returns the accepted key, or nil
-	-- if the window was closed (i.e. the boot was cancelled).
-	--
-	-- Deliberately has NO timeout, unlike Ask(): every boot question has a sane fallback answer,
-	-- and a missing key does not. Waiting forever is correct -- the user is off finishing
-	-- checkpoints in a browser, and the console is what they come back to.
+	--[[ Key entry, drawn into the console's own question row rather than as a second window: the
+	status line above it already reads '< KEY SYSTEM', so the gate looks like one more
+	terminal prompt instead of a modal floating over the loader.
+
+	Every handler is passed `say(message, kind)` and does its own reporting, which keeps all
+	LuaArmor knowledge out of the console. onSubmit returns whether the key was accepted;
+	anything false leaves the prompt up for another attempt. Returns the accepted key, or nil
+	if the window was closed (i.e. the boot was cancelled).
+
+	Deliberately has NO timeout, unlike Ask(): every boot question has a sane fallback answer,
+	and a missing key does not. Waiting forever is correct -- the user is off finishing
+	checkpoints in a browser, and the console is what they come back to. ]]
 	function console:AskKey(opts)
 		if closed then return nil end
 		clearAnswers()
@@ -1140,8 +1149,8 @@ local function createConsole()
 		end
 		say(opts.message, opts.messageKind)
 
-		-- The footer normally explains how to quit; while the gate is up it explains the gate,
-		-- which is the only thing the user needs from it. Restored on the way out.
+		--[[ The footer normally explains how to quit; while the gate is up it explains the gate,
+		which is the only thing the user needs from it. Restored on the way out. ]]
 		local previousFooter = footer.Text
 		if opts.footer then
 			footer.Text = opts.footer
@@ -1180,8 +1189,8 @@ local function createConsole()
 		end)
 
 		local accepted
-		-- Guards the window between clicking Submit and the check coming back: check_key is a
-		-- network round trip, and without this a second click would fire a second one.
+		--[[ Guards the window between clicking Submit and the check coming back: check_key is a
+		network round trip, and without this a second click would fire a second one. ]]
 		local busy = false
 		local function submit()
 			if busy or closed or accepted then return end
@@ -1198,8 +1207,8 @@ local function createConsole()
 			opts.onGetKey(say)
 		end)
 
-		-- Only offered when the executor can actually read the clipboard; otherwise the row
-		-- closes up around it and the user pastes with ctrl+v into the box like normal.
+		--[[ Only offered when the executor can actually read the clipboard; otherwise the row
+		closes up around it and the user pastes with ctrl+v into the box like normal. ]]
 		if opts.onPaste then
 			local paste = answerButton(opts.pasteText, 110, 3)
 			paste.MouseButton1Click:Connect(function()
@@ -1234,14 +1243,14 @@ local function createConsole()
 		return accepted
 	end
 
-	-- Draws whatever rows are still missing, and only once the face is whole flips the header
-	-- to '> DONE' and counts the window out.
+	--[[ Draws whatever rows are still missing, and only once the face is whole flips the header
+	to '> DONE' and counts the window out. ]]
 	function console:Finish(message, seconds)
 		if closed then return end
 		self:SetProgress(1)
 		local drawn = os.clock() + 2
 		repeat task.wait() until revealed >= #PistonFace or closed or os.clock() > drawn
-		-- the last row is still fading in when the counter hits the end
+		--[[ the last row is still fading in when the counter hits the end ]]
 		task.wait(0.2)
 		if closed then return end
 		self:SetStatus('DONE')
@@ -1258,8 +1267,8 @@ local function createConsole()
 		end)
 	end
 
-	-- Stops the reveal thread without taking the window down, for the paths that end the boot
-	-- but still want the message on screen. Everything already drawn stays drawn.
+	--[[ Stops the reveal thread without taking the window down, for the paths that end the boot
+	but still want the message on screen. Everything already drawn stays drawn. ]]
 	function console:Halt()
 		halted = true
 	end
@@ -1267,26 +1276,26 @@ local function createConsole()
 	function console:Fail(err)
 		if closed then return end
 		self:SetStatus('FAILED', '#E15046')
-		-- Executor errors carry absolute file paths that run off the right edge on a single
-		-- line. Nothing is going to be asked at this point, so the output line is allowed to
-		-- wrap down through the space the answer row was holding.
+		--[[ Executor errors carry absolute file paths that run off the right edge on a single
+		line. Nothing is going to be asked at this point, so the output line is allowed to
+		wrap down through the space the answer row was holding. ]]
 		line.TextWrapped = true
 		line.TextYAlignment = Enum.TextYAlignment.Top
 		line.Size = UDim2.new(1, -ContentPadding * 2, 0, AnswersY + 34 - LineY)
 		self:SetLine(err, Palette.Error)
-		-- Nothing further is drawn after a failure, so the thread has no work left.
+		--[[ Nothing further is drawn after a failure, so the thread has no work left. ]]
 		self:Halt()
 	end
 
-	-- Published so the next execution can tear this console down before building its own.
+	--[[ Published so the next execution can tear this console down before building its own. ]]
 	shared.PistonwareLoaderTeardown = destroy
 
 	return console
 end
 
--- Same surface as the console, wired to nothing. Reloads are not user-initiated -- the queued
--- teleport script, the GUI's reinject buttons -- so they run the same boot with no window over
--- the game, and every call site below stays identical instead of guarding each one.
+--[[ Same surface as the console, wired to nothing. Reloads are not user-initiated -- the queued
+teleport script, the GUI's reinject buttons -- so they run the same boot with no window over
+the game, and every call site below stays identical instead of guarding each one. ]]
 local function createHeadlessConsole()
 	local console = {}
 	function console:SetStatus() end
@@ -1296,35 +1305,35 @@ local function createHeadlessConsole()
 	function console:Fail() end
 	function console:Halt() end
 	function console:IsAborted() return false end
-	-- unattended, so a question can only answer with whatever the timeout would have picked
+	--[[ unattended, so a question can only answer with whatever the timeout would have picked ]]
 	function console:Ask(question, buttons, timeoutSeconds, fallback)
 		return fallback
 	end
-	-- Nobody is watching a headless boot, so there is no one to type a key. A reload that gets
-	-- this far has no saved key that validated, and the caller turns this nil into a clean
-	-- 'run the loader manually' failure rather than hanging on an invisible prompt.
+	--[[ Nobody is watching a headless boot, so there is no one to type a key. A reload that gets
+	this far has no saved key that validated, and the caller turns this nil into a clean
+	'run the loader manually' failure rather than hanging on an invisible prompt. ]]
 	function console:AskKey()
 		return nil
 	end
 	return console
 end
 
--- shared.vapereload marks a run that something else started rather than a manual execution.
--- Read once here: it is cleared after main.lua has had its look at it (see the bottom of this
--- file), because nothing else clears it and a stale true would hide the console from every
--- later manual execution in the session.
+--[[ shared.vapereload marks a run that something else started rather than a manual execution.
+Read once here: it is cleared after main.lua has had its look at it (see the bottom of this
+file), because nothing else clears it and a stale true would hide the console from every
+later manual execution in the session. ]]
 local isReload = shared.vapereload and true or false
 
 local console = isReload and createHeadlessConsole() or createConsole()
--- The key gate is the first thing that runs -- every run, reinjects included -- so the console
--- opens directly onto it rather than flashing '> INJECTING' for a frame first.
+--[[ The key gate is the first thing that runs -- every run, reinjects included -- so the console
+opens directly onto it rather than flashing '> INJECTING' for a frame first. ]]
 console:SetStatus('AUTHENTICATING', nil, '<')
 console:SetLine('Checking your key...')
 console:SetProgress(0.08)
 
--- Executors known not to run pistonware correctly. Checked before anything is downloaded so
--- the run stops on the console instead of failing somewhere deep in the GUI. identifyexecutor
--- is absent on some executors, hence the pcall -- an unknown name is allowed through.
+--[[ Executors known not to run pistonware correctly. Checked before anything is downloaded so
+the run stops on the console instead of failing somewhere deep in the GUI. identifyexecutor
+is absent on some executors, hence the pcall -- an unknown name is allowed through. ]]
 do
 	local unsupported = {'xeno', 'solara'}
 	local executorName = ''
@@ -1338,14 +1347,12 @@ do
 			console:SetStatus('ERROR', '#E15046')
 			console:SetLine(message, Palette.Error)
 			warn('[pistonware] '..message)
-			-- The window deliberately stays up so the message can be read, but the boot is
-			-- over -- so the reveal thread stops instead of spinning at ~14Hz for the rest of
-			-- the session. The GUI and its connections go when [x] is pressed, or when the
-			-- next execution tears this console down before building its own.
+			--[[ The window deliberately stays up so the message can be read, but the boot is
+			over -- so the reveal thread stops instead of spinning at ~14Hz for the rest of
+			the session. The GUI and its connections go when [x] is pressed, or when the
+			next execution tears this console down before building its own. ]]
 			console:Halt()
-			-- released so a later execution on a supported executor is not locked out by the
-			-- duplicate-boot guard at the top of this file, and the reload flag with it so
-			-- that later execution still gets a window (see deleteInstall)
+			--[[ Release the duplicate-boot and reload guards so the next execution gets a window. ]]
 			shared.PistonwareLoaderBoot = nil
 			shared.vapereload = nil
 			return
@@ -1367,8 +1374,8 @@ end
 do
 	local httpService = cloneref(game:GetService('HttpService'))
 
-	-- Reads are separate from writes: setclipboard is already resolved at the top of the file,
-	-- but reading needs its own lookup and is missing on more executors than writing is.
+	--[[ Reads are separate from writes: setclipboard is already resolved at the top of the file,
+	but reading needs its own lookup and is missing on more executors than writing is. ]]
 	local canPaste = (getclipboard ~= nil) or (syn ~= nil and syn.read_clipboard ~= nil)
 	local function clipboardGet()
 		local fn = getclipboard or (syn and syn.read_clipboard)
@@ -1382,9 +1389,9 @@ do
 		return (pcall(setclipboard, text))
 	end
 
-	-- pistonwarekey.json lives at the workspace root rather than under pistonware/, so that
-	-- reinstall.lua (and cancelling a first install, which wipes the whole folder) can't cost
-	-- the user a key they already paid checkpoints for.
+	--[[ pistonwarekey.json lives at the workspace root rather than under pistonware/, so that
+	reinstall.lua (and cancelling a first install, which wipes the whole folder) can't cost
+	the user a key they already paid checkpoints for. ]]
 	local hasFiles = (isfile and readfile and writefile) and true or false
 	local function readSavedKey()
 		if not hasFiles then return nil end
@@ -1411,16 +1418,17 @@ do
 		end)
 	end
 
-	-- LuaArmor's public SDK, fetched on first use and then reused. Lazy because a reinject in an
-	-- already-authenticated session never calls checkKey, and should not pay an HTTP round trip
-	-- for a library it will not touch. If it fails to come down, every check reports
-	-- UNKNOWN_ERROR and the user gets a readable console line instead of a traceback.
+	--[[ LuaArmor's public SDK, fetched on first use and then reused. Lazy because a reinject in an
+	already-authenticated session never calls checkKey, and should not pay an HTTP round trip
+	for a library it will not touch. If it fails to come down, every check reports
+	UNKNOWN_ERROR and the user gets a readable console line instead of a traceback. ]]
 	local api, apiTried
 	local function getApi()
 		if apiTried then return api end
 		apiTried = true
 		local ok, lib = pcall(function()
-			return loadstring(game:HttpGet('https://sdkapi-public.luarmor.net/library.lua'))()
+			local chunk = loadstring(game:HttpGet('https://sdkapi-public.luarmor.net/library.lua'))
+			return chunk and chunk()
 		end)
 		if ok and type(lib) == 'table' then
 			api = lib
@@ -1440,19 +1448,19 @@ do
 		return {code = 'UNKNOWN_ERROR', message = 'check_key request failed.'}
 	end
 
-	-- Publishes the validated key where the protected payload will look for it. The LuaArmor
-	-- build reads the global script_key when it runs, which is much later and in a different
-	-- chunk (main.lua -> games/6872274481.lua -> the GitLab redirect), so the key has to go into
-	-- the shared global environment rather than a local here.
-	--
-	-- Written BOTH ways deliberately, not either/or. On most executors a plain global assignment
-	-- and getgenv() land in the same table, but not on all of them -- and when they diverge the
-	-- failure is LuaArmor reporting 'No key found' for a key that was very much set, which is
-	-- indistinguishable from a wrong key and near-impossible to diagnose from the message. Two
-	-- assignments cost nothing and remove the whole failure class.
-	--
-	-- shared.PistonwareKey is the copy main.lua re-embeds into its queued teleport script:
-	-- globals do not survive a teleport, and the new server re-runs main.lua directly.
+	--[[ Publishes the validated key where the protected payload will look for it. The LuaArmor
+	build reads the global script_key when it runs, which is much later and in a different
+	chunk (main.lua -> games/6872274481.lua -> the GitLab redirect), so the key has to go into
+	the shared global environment rather than a local here.
+
+	Written BOTH ways deliberately, not either/or. On most executors a plain global assignment
+	and getgenv() land in the same table, but not on all of them -- and when they diverge the
+	failure is LuaArmor reporting 'No key found' for a key that was very much set, which is
+	indistinguishable from a wrong key and near-impossible to diagnose from the message. Two
+	assignments cost nothing and remove the whole failure class.
+
+	shared.PistonwareKey is the copy main.lua re-embeds into its queued teleport script:
+	globals do not survive a teleport, and the new server re-runs main.lua directly. ]]
 	local function authenticate(key)
 		script_key = key
 		pcall(function() getgenv().script_key = key end)
@@ -1461,15 +1469,15 @@ do
 		shared.PistonwareAuthenticated = true
 	end
 
-	-- Authentication is re-derived from a real key on EVERY run, never inherited. shared lives
-	-- for the whole executor session, so trusting a flag found in it would make
-	-- `shared.PistonwareAuthenticated = true` in front of the loadstring a one-line gate skip --
-	-- the exact copy-pasteable bypass that ends up shared around. Clearing it first means the
-	-- only way past this block is a key LuaArmor actually accepts.
-	--
-	-- The cost is one check_key per loader run, including reinjects. That is fine: reinjects are
-	-- deliberate user actions (the reinject button, a theme switch, a profile switch), not
-	-- anything on a hot path, and check_key is the call LuaArmor expects on every script start.
+	--[[ Authentication is re-derived from a real key on EVERY run, never inherited. shared lives
+	for the whole executor session, so trusting a flag found in it would make
+	`shared.PistonwareAuthenticated = true` in front of the loadstring a one-line gate skip --
+	the exact copy-pasteable bypass that ends up shared around. Clearing it first means the
+	only way past this block is a key LuaArmor actually accepts.
+
+	The cost is one check_key per loader run, including reinjects. That is fine: reinjects are
+	deliberate user actions (the reinject button, a theme switch, a profile switch), not
+	anything on a hot path, and check_key is the call LuaArmor expects on every script start. ]]
 	shared.PistonwareAuthenticated = nil
 
 	do
@@ -1481,21 +1489,21 @@ do
 			if savedKey == '' then savedKey = nil end
 		end
 
-		-- Three places a key can already be, tried in this order:
-		--
-		--   1. a script_key global set in front of the loadstring. This is the snippet
-		--      LuaArmor's own bot hands people, so it has to work -- and it is the most
-		--      explicit statement of intent there is: pasting a key means use THAT key.
-		--   2. shared.PistonwareKey, the copy a reinject carries so the user is not asked
-		--      again for a key that was validated seconds ago.
-		--   3. pistonwarekey.json.
-		--
-		-- Every one is tried until one validates, rather than committing to the first that
-		-- exists. That matters for the new source: a mistyped key pasted in front of the
-		-- loadstring should fall back to the good key on disk, not force the prompt and make
-		-- the user think their saved key had gone.
-		--
-		-- None of these are trusted. They are candidates, and LuaArmor decides.
+		--[[ Three places a key can already be, tried in this order:
+
+		  1. a script_key global set in front of the loadstring. This is the snippet
+		     LuaArmor's own bot hands people, so it has to work -- and it is the most
+		     explicit statement of intent there is: pasting a key means use THAT key.
+		  2. shared.PistonwareKey, the copy a reinject carries so the user is not asked
+		     again for a key that was validated seconds ago.
+		  3. pistonwarekey.json.
+
+		Every one is tried until one validates, rather than committing to the first that
+		exists. That matters for the new source: a mistyped key pasted in front of the
+		loadstring should fall back to the good key on disk, not force the prompt and make
+		the user think their saved key had gone.
+
+		None of these are trusted. They are candidates, and LuaArmor decides. ]]
 		local candidates, seen = {}, {}
 		local function offer(value)
 			if type(value) ~= 'string' then return end
@@ -1505,9 +1513,9 @@ do
 			table.insert(candidates, value)
 		end
 
-		-- Executors disagree about where a chunk's globals live, so a key the user set before
-		-- the loadstring can land in any of these three tables -- the same divergence that
-		-- made authenticate() write all three.
+		--[[ Executors disagree about where a chunk's globals live, so a key the user set before
+		the loadstring can land in any of these three tables -- the same divergence that
+		made authenticate() write all three. ]]
 		for _, src in {
 			function() return script_key end,
 			function() return getgenv().script_key end,
@@ -1522,32 +1530,32 @@ do
 		for _, candidate in candidates do
 			local status = checkKey(candidate)
 			local code = status.code
-			-- Only the key that came off disk is deleted on rejection: a bogus preset or
-			-- session key must not be able to destroy the good one the user has saved.
+			--[[ Only the key that came off disk is deleted on rejection: a bogus preset or
+			session key must not be able to destroy the good one the user has saved. ]]
 			local fromDisk = candidate == savedKey
 			if code == 'KEY_VALID' then
 				authenticate(candidate)
-				-- Persist whatever just worked. This is what makes LuaArmor's snippet behave
-				-- the way people expect: paste it once, the key lands in pistonwarekey.json,
-				-- and every run after that needs no key in front of the loadstring at all.
+				--[[ Persist whatever just worked. This is what makes LuaArmor's snippet behave
+				the way people expect: paste it once, the key lands in pistonwarekey.json,
+				and every run after that needs no key in front of the loadstring at all. ]]
 				if candidate ~= savedKey then saveKey(candidate) end
 				break
-			-- Only a key that CANNOT come back is deleted. Two of these four states used to
-			-- delete it and should never have:
-			--
-			--   KEY_HWID_LOCKED is not a bad key. LuaArmor's own wording is "key is valid, hwid
-			--   does not match and needs to be reset". The user resets their HWID via the bot,
-			--   comes back, and it works -- except that we had already thrown the key away, so
-			--   instead they came back to an empty prompt and had to go find the key again.
-			--   That is the bug this fixes: a key with time left on it, in the ordinary waiting
-			--   state, being treated as though it had died.
-			--
-			--   KEY_EXPIRED is renewable. The ad link renews the same key rather than issuing a
-			--   different one, so deleting it costs the user a re-paste for no gain.
-			--
-			-- KEY_INCORRECT (does not exist in the database) and KEY_BANNED (blacklisted) are
-			-- the genuinely terminal ones. Nothing the user does brings those back, so a stale
-			-- file only means a wasted request on every future run.
+			--[[ Only a key that CANNOT come back is deleted. Two of these four states used to
+			delete it and should never have:
+
+			  KEY_HWID_LOCKED is not a bad key. LuaArmor's own wording is "key is valid, hwid
+			  does not match and needs to be reset". The user resets their HWID via the bot,
+			  comes back, and it works -- except that we had already thrown the key away, so
+			  instead they came back to an empty prompt and had to go find the key again.
+			  That is the bug this fixes: a key with time left on it, in the ordinary waiting
+			  state, being treated as though it had died.
+
+			  KEY_EXPIRED is renewable. The ad link renews the same key rather than issuing a
+			  different one, so deleting it costs the user a re-paste for no gain.
+
+			KEY_INCORRECT (does not exist in the database) and KEY_BANNED (blacklisted) are
+			the genuinely terminal ones. Nothing the user does brings those back, so a stale
+			file only means a wasted request on every future run. ]]
 			elseif code == 'KEY_EXPIRED' then
 				reason = fromDisk and t('saved_expired') or t('expired')
 			elseif code == 'KEY_HWID_LOCKED' then
@@ -1559,10 +1567,10 @@ do
 				if fromDisk then deleteSavedKey() end
 				reason = fromDisk and t('saved_banned') or t('banned')
 			end
-			-- UNKNOWN_ERROR / SECURITY_ERROR / TIME_ERROR / INVALID_EXECUTOR and friends also
-			-- keep the file, for the same reason: the key is probably fine and LuaArmor (or the
-			-- network, or the executor) is not, so a bad minute must not cost the user the key
-			-- they already earned. They just get prompted this once.
+			--[[ UNKNOWN_ERROR / SECURITY_ERROR / TIME_ERROR / INVALID_EXECUTOR and friends also
+			keep the file, for the same reason: the key is probably fine and LuaArmor (or the
+			network, or the executor) is not, so a bad minute must not cost the user the key
+			they already earned. They just get prompted this once. ]]
 		end
 
 		if not shared.PistonwareAuthenticated then
@@ -1618,8 +1626,8 @@ do
 						say(t('copy_failed'), 'err')
 					end
 				end,
-				-- Left nil when the executor cannot read the clipboard, which drops the button
-				-- from the row entirely; ctrl+v into the box still works.
+				--[[ Left nil when the executor cannot read the clipboard, which drops the button
+				from the row entirely; ctrl+v into the box still works. ]]
 				onPaste = canPaste and function(say)
 					local clip = clipboardGet()
 					if clip and trim(clip) ~= '' then
@@ -1641,8 +1649,8 @@ do
 						say(t('empty_key'), 'err')
 						return false
 					end
-					-- Cheap local reject before spending a request on something that cannot be
-					-- a key (usually a half-pasted clipboard).
+					--[[ Cheap local reject before spending a request on something that cannot be
+					a key (usually a half-pasted clipboard). ]]
 					if #key < 8 then
 						say(t('bad_format'), 'err')
 						return false
@@ -1672,26 +1680,20 @@ do
 				end
 			})
 
-			-- IsAborted() as well as the nil test: closing the window while a check is still in
-			-- flight lets that check land afterwards and set `accepted`, and a cancelled boot
-			-- must not carry on just because the key turned out to be good. The key is still
-			-- saved and the session still counts as authenticated, so the next run skips the
-			-- gate -- cancelling costs the boot, not the key.
+			--[[ IsAborted() as well as the nil test: closing the window while a check is still in
+			flight lets that check land afterwards and set `accepted`, and a cancelled boot
+			must not carry on just because the key turned out to be good. The key is still
+			saved and the session still counts as authenticated, so the next run skips the
+			gate -- cancelling costs the boot, not the key. ]]
 			if not key or console:IsAborted() then
-				-- Window closed, or -- only if the console could not be built at all -- a
-				-- headless run with no valid saved key to fall back on. Nothing has been
-				-- downloaded or injected at this point, so stopping here leaves the session
-				-- exactly as the loader found it.
-				--
-				-- Keyed off canPrompt rather than isReload: a reload now gets a real prompt,
-				-- so telling someone who just closed that window to 'run the loader manually
-				-- to enter one' would be describing the thing they had in front of them.
+				--[[ The window closed, or no prompt could be shown and no saved key was available. No
+				files were downloaded or injected, so the session remains unchanged. ]]
 				local message = (not canPrompt) and t('headless') or t('cancelled')
 				if not console:IsAborted() then
 					console:Fail(message)
 				end
-				-- warn() as well as the console line: a headless reload has no window to read,
-				-- and silently doing nothing is the one outcome nobody can debug.
+				--[[ warn() as well as the console line: a headless reload has no window to read,
+				and silently doing nothing is the one outcome nobody can debug. ]]
 				warn('[pistonware] '..message)
 				deleteInstall()
 				return
@@ -1699,16 +1701,16 @@ do
 		end
 	end
 
-	-- Authenticated: hand the console back to the boot it was holding up.
+	--[[ Authenticated: hand the console back to the boot it was holding up. ]]
 	phase('key gate')
 	console:SetStatus('INJECTING')
 	console:SetLine('Injecting into ROBLOX...')
 	console:SetProgress(0.12)
 end
 
--- Decided before the folders are created, while 'did this run create the install' is still
--- observable. The key gate above yields, but it runs before any folder exists and its own
--- cancel path returns without reaching here, so freshInstall still cannot be read stale.
+--[[ Decided before the folders are created, while 'did this run create the install' is still
+observable. The key gate above yields, but it runs before any folder exists and its own
+cancel path returns without reaching here, so freshInstall still cannot be read stale. ]]
 freshInstall = not isfolder('pistonware')
 for _, folder in {'pistonware', 'pistonware/games', 'pistonware/profiles', 'pistonware/assets', 'pistonware/libraries', 'pistonware/guis'} do
 	if not isfolder(folder) then
@@ -1716,20 +1718,20 @@ for _, folder in {'pistonware', 'pistonware/games', 'pistonware/profiles', 'pist
 	end
 end
 
--- Step 1: hold here until ROBLOX itself is ready. Everything after this touches game state
--- (or hands off to main.lua, which does), so the shared.Vape* flags the injecting loadstring
--- sets have to be in place and the place has to be loaded before we move on.
--- Step 1b runs CONCURRENTLY with Step 1, not after it.
---
--- These two phases have nothing to do with each other: waiting on Roblox is pure dead time
--- (seconds of it when someone injects at the loading screen) and the update check is pure
--- network. Run in sequence, the boot paid for both. Started here, the update check happens
--- inside the wait it used to follow, and on a warm cache it is finished before Roblox is.
---
--- Nothing in updateCachedFiles touches game state, which is what made the old ordering
--- necessary in the first place -- it reads a GitHub tree and writes files into pistonware/.
--- Both folders and authentication are already behind us, so the security ordering is intact:
--- this still cannot start until a key has validated.
+--[[ Step 1: hold here until ROBLOX itself is ready. Everything after this touches game state
+(or hands off to main.lua, which does), so the shared.Vape* flags the injecting loadstring
+sets have to be in place and the place has to be loaded before we move on.
+Step 1b runs CONCURRENTLY with Step 1, not after it.
+
+These two phases have nothing to do with each other: waiting on Roblox is pure dead time
+(seconds of it when someone injects at the loading screen) and the update check is pure
+network. Run in sequence, the boot paid for both. Started here, the update check happens
+inside the wait it used to follow, and on a warm cache it is finished before Roblox is.
+
+Nothing in updateCachedFiles touches game state, which is what made the old ordering
+necessary in the first place -- it reads a GitHub tree and writes files into pistonware/.
+Both folders and authentication are already behind us, so the security ordering is intact:
+this still cannot start until a key has validated. ]]
 local updateDone = isReload or isDeveloper
 if not updateDone then
 	task.spawn(function()
@@ -1740,33 +1742,33 @@ if not updateDone then
 		updateDone = true
 	end)
 else
-	-- Skipping the update check is not the same as needing no tree. The profile-sync check in
-	-- Step 2b calls profilesFingerprint() -> fetchRepoTree() either way, and with the update
-	-- task never started that call is COLD -- a synchronous, unbounded api.github.com request
-	-- made on the boot thread, while the console still reads 'Injecting into ROBLOX...' and
-	-- nothing on screen changes for the duration. That is a stall the public build does not
-	-- have, because there the update task has already warmed the memo by the time Step 2b runs.
-	--
-	-- Warmed here instead, inside the game:IsLoaded wait below, so Step 2b reads a finished
-	-- memo. Nothing joins this: fetchRepoTree parks a late caller on its own bounded join now,
-	-- and every consumer already treats a missing tree as 'skip the check'.
-	--
-	-- Not started on a reload -- Step 2b is skipped outright there (`not isReload`), so the
-	-- request would be pure cost.
+	--[[ Skipping the update check is not the same as needing no tree. The profile-sync check in
+	Step 2b calls profilesFingerprint() -> fetchRepoTree() either way, and with the update
+	task never started that call is COLD -- a synchronous, unbounded api.github.com request
+	made on the boot thread, while the console still reads 'Injecting into ROBLOX...' and
+	nothing on screen changes for the duration. That is a stall the public build does not
+	have, because there the update task has already warmed the memo by the time Step 2b runs.
+
+	Warmed here instead, inside the game:IsLoaded wait below, so Step 2b reads a finished
+	memo. Nothing joins this: fetchRepoTree parks a late caller on its own bounded join now,
+	and every consumer already treats a missing tree as 'skip the check'.
+
+	Not started on a reload -- Step 2b is skipped outright there (`not isReload`), so the
+	request would be pure cost. ]]
 	if not isReload then
 		task.spawn(fetchRepoTree)
 	end
 end
 
--- Step 1: hold here until ROBLOX itself is ready.
+--[[ Wait for the game and LocalPlayer below. ]]
 do
 	local playersService = cloneref(game:GetService('Players'))
 	local deadline = os.clock() + 120
 	repeat task.wait() until game:IsLoaded() or console:IsAborted() or os.clock() > deadline
 	console:SetProgress(0.24)
 	repeat task.wait() until playersService.LocalPlayer or console:IsAborted() or os.clock() > deadline
-	-- A previous injection still holding shared.vape means the old GUI is mid-teardown;
-	-- main.lua uninjects it, so just let the flag settle before reading the rest of them.
+	--[[ A previous injection still holding shared.vape means the old GUI is mid-teardown;
+	main.lua uninjects it, so just let the flag settle before reading the rest of them. ]]
 	if shared.vape then
 		task.wait(0.25)
 	end
@@ -1775,8 +1777,8 @@ end
 phase('waiting for ROBLOX')
 if console:IsAborted() then deleteInstall() return end
 
--- Join the update check before anything reads a cached .lua file. Bounded for the same reason
--- every other join in this file is: a stalled update must cost the update, not the boot.
+--[[ Join the update check before anything reads a cached .lua file. Bounded for the same reason
+every other join in this file is: a stalled update must cost the update, not the boot. ]]
 if not updateDone then
 	console:SetLine('Checking for updates...')
 	joinBatch(function() return updateDone end, 60)
@@ -1786,16 +1788,16 @@ end
 phase('update check')
 console:SetProgress(0.46)
 
--- Detect the very first run (empty/near-empty profiles folder) BEFORE downloading, so we
--- know afterwards whether to show the prompts below.
+--[[ Detect the very first run (empty/near-empty profiles folder) BEFORE downloading, so we
+know afterwards whether to show the prompts below. ]]
 local firstRunProfiles = false
 pcall(function()
 	firstRunProfiles = #listfiles('pistonware/profiles') < 3
 end)
 
--- profilecheck.txt persists a prior 'No' answer, so the download prompt only asks once --
--- without it, a user who declines would get nagged again on every reinject (the profiles
--- folder stays under 3 files forever if nothing gets downloaded).
+--[[ profilecheck.txt persists a prior 'No' answer, so the download prompt only asks once --
+without it, a user who declines would get nagged again on every reinject (the profiles
+folder stays under 3 files forever if nothing gets downloaded). ]]
 local declinedDownload = false
 pcall(function()
 	if isfile('pistonware/profiles/profilecheck.txt') then
@@ -1803,7 +1805,7 @@ pcall(function()
 	end
 end)
 
--- Step 2: offer the shipped configs.
+--[[ Step 2: offer the shipped configs. ]]
 local wantsDownload = true
 if firstRunProfiles and not declinedDownload then
 	console:SetProgress(0.47)
@@ -1813,7 +1815,7 @@ if firstRunProfiles and not declinedDownload then
 			{text = 'No', key = false, tooltip = 'Starts on default settings and stops asking on future runs'}
 		}, 60, true)
 	end)
-	-- checked before the answer is acted on, so cancelling mid-question never counts as a 'No'
+	--[[ checked before the answer is acted on, so cancelling mid-question never counts as a 'No' ]]
 	if console:IsAborted() then deleteInstall() return end
 	wantsDownload = ok and res == true
 	if not wantsDownload then
@@ -1825,20 +1827,23 @@ console:SetProgress(0.53)
 local downloadedConfigs = false
 if firstRunProfiles and not declinedDownload and wantsDownload then
 	console:SetLine('Downloading configs...')
-	pcall(function()
-		local body = fetchProfilesListing()
-		if body then
-			downloadProfilesListing(body, nil, function(completed, total)
-				console:SetLine('Downloading configs ('..completed..'/'..total..')...')
-				console:SetProgress(0.53 + 0.2 * (completed / math.max(total, 1)))
+		local synced = false
+		pcall(function()
+			local body = fetchProfilesListing()
+			if body then
+				synced = downloadProfilesListing(body, nil, function(completed, total)
+					console:SetLine('Downloading configs ('..completed..'/'..total..')...')
+					console:SetProgress(0.53 + 0.2 * (completed / math.max(total, 1)))
 			end)
 		end
 	end)
-	pcall(function()
-		downloadedConfigs = #listfiles('pistonware/profiles') >= 3
-	end)
-	-- Record which commit this download reflects, so later sessions can tell whether profiles/
-	-- has changed on GitHub since (see the sync prompt below).
+		if synced then
+			pcall(function()
+				downloadedConfigs = #listfiles('pistonware/profiles') >= 3
+			end)
+		end
+	--[[ Record which commit this download reflects, so later sessions can tell whether profiles/
+	has changed on GitHub since (see the sync prompt below). ]]
 	if downloadedConfigs then
 		pcall(function()
 			local commit = profilesFingerprint()
@@ -1848,14 +1853,14 @@ if firstRunProfiles and not declinedDownload and wantsDownload then
 		end)
 	end
 end
--- Deleted again here: downloads already in flight when cancel fired can land after its wipe.
+--[[ Repeat the cleanup here: downloads already in flight when cancel fired can land after its wipe. ]]
 if console:IsAborted() then deleteInstall() return end
 
--- Step 2b: existing installs (3+ profiles). If profiles/ has changed on GitHub since the last
--- download/sync, offer to overwrite the shipped configs with the latest ones. Only the files
--- that exist in the GitHub profiles folder get redownloaded -- profiles the user made
--- themselves are left alone. Skipped on reinjects/teleports so it only ever asks once per
--- session, on the first manual execution.
+--[[ Step 2b: existing installs (3+ profiles). If profiles/ has changed on GitHub since the last
+download/sync, offer to overwrite the shipped configs with the latest ones. Only the files
+that exist in the GitHub profiles folder get redownloaded -- profiles the user made
+themselves are left alone. Skipped on reinjects/teleports so it only ever asks once per
+session, on the first manual execution. ]]
 if not firstRunProfiles and not declinedDownload and not isReload then
 	local latestCommit, cachedCommit
 	pcall(function()
@@ -1863,11 +1868,11 @@ if not firstRunProfiles and not declinedDownload and not isReload then
 		cachedCommit = isfile('pistonware/profiles/profilecommit.txt') and readfile('pistonware/profiles/profilecommit.txt'):gsub('%s', '') or nil
 	end)
 
-	-- Existing installs hold a 40-char git sha from the old scheme, which can never equal a
-	-- 'p1-' fingerprint. Adopt the new value silently rather than reading that mismatch as
-	-- "profiles changed": upgrading the loader is not a reason to ask every user in the world
-	-- to re-sync, and the prompt is the kind that gets clicked through once and distrusted
-	-- thereafter.
+	--[[ Existing installs hold a 40-char git sha from the old scheme, which can never equal a
+	'p1-' fingerprint. Adopt the new value silently rather than reading that mismatch as
+	"profiles changed": upgrading the loader is not a reason to ask every user in the world
+	to re-sync, and the prompt is the kind that gets clicked through once and distrusted
+	thereafter. ]]
 	if latestCommit and cachedCommit and #cachedCommit == 40 and cachedCommit:match('^%x+$') then
 		pcall(writefile, 'pistonware/profiles/profilecommit.txt', latestCommit)
 		cachedCommit = latestCommit
@@ -1885,24 +1890,24 @@ if not firstRunProfiles and not declinedDownload and not isReload then
 		if ok and wantsSync == true then
 			console:SetLine('Syncing configs...')
 
-			-- Read BEFORE anything is overwritten. <GameId>.gui.txt holds `Profile` -- the
-			-- config currently equipped -- and the sync rewrites that file from the repo's
-			-- copy, whose Profile is whatever happened to be equipped when it was committed
-			-- ('blatant', in the version shipping today). mergeGuiState carries the local
-			-- value across, but on any decode failure it falls back to writing the incoming
-			-- file verbatim, and that fallback is exactly how someone on 'legit' or on a
-			-- config they made themselves comes back up on 'blatant'. Re-applying the name
-			-- below makes the equipped config survive the sync whether the merge held or not.
+			--[[ Read BEFORE anything is overwritten. <GameId>.gui.txt holds `Profile` -- the
+			config currently equipped -- and the sync rewrites that file from the repo's
+			copy, whose Profile is whatever happened to be equipped when it was committed
+			('blatant', in the version shipping today). mergeGuiState carries the local
+			value across, but on any decode failure it falls back to writing the incoming
+			file verbatim, and that fallback is exactly how someone on 'legit' or on a
+			config they made themselves comes back up on 'blatant'. Re-applying the name
+			below makes the equipped config survive the sync whether the merge held or not. ]]
 			local lastProfile
 			pcall(function()
-				-- The live object first. vape.Profile updates the moment a profile is switched, so it
-				-- cannot be stale under any ordering, and this is read before the Uninject below
-				-- flushes in-memory state to disk. On a fresh execution there is no object and the
-				-- file is the only source, which is the common case here.
-				--
-				-- (The rewritten GUI dropped SetProfile, which the old one used to stamp the switch
-				-- straight into gui.txt. Nothing ever called it -- only this comment named it -- so
-				-- the behaviour here is unchanged.)
+				--[[ The live object first. vape.Profile updates the moment a profile is switched, so it
+				cannot be stale under any ordering, and this is read before the Uninject below
+				flushes in-memory state to disk. On a fresh execution there is no object and the
+				file is the only source, which is the common case here.
+
+				(The rewritten GUI dropped SetProfile, which the old one used to stamp the switch
+				straight into gui.txt. Nothing ever called it -- only this comment named it -- so
+				the behaviour here is unchanged.) ]]
 				local live = shared.vape and shared.vape.Profile
 				if type(live) == 'string' and live ~= '' then
 					lastProfile = live
@@ -1918,61 +1923,65 @@ if not firstRunProfiles and not declinedDownload and not isReload then
 			end)
 
 			pcall(function()
-				-- If a previous instance is still injected, uninject it BEFORE overwriting:
-				-- Uninject() saves the old in-memory config to disk as its first step, and
-				-- main.lua would otherwise trigger it right after us -- clobbering the freshly
-				-- synced profiles with the old settings. Same for its autosave loop.
+				--[[ If a previous instance is still injected, uninject it BEFORE overwriting:
+				Uninject() saves the old in-memory config to disk as its first step, and
+				main.lua would otherwise trigger it right after us -- clobbering the freshly
+				synced profiles with the old settings. Same for its autosave loop. ]]
 				if shared.vape then
 					pcall(function() shared.vape:Uninject() end)
 					shared.vape = nil
 				end
-				-- Listing and file contents both pinned to latestCommit so a sync run right
-				-- after a push can't grab a stale CDN copy of the branch head.
-				-- The tree this listing came from is itself a pinned snapshot, so its sha is what
-				-- the file contents are fetched at -- no separate ref needed, and no window in
-				-- which the listing and the bodies can disagree.
+				--[[ Listing and file contents both pinned to latestCommit so a sync run right
+				after a push can't grab a stale CDN copy of the branch head.
+				The tree this listing came from is itself a pinned snapshot, so its sha is what
+				the file contents are fetched at -- no separate ref needed, and no window in
+				which the listing and the bodies can disagree. ]]
 				local body = fetchProfilesListing()
 				local treeSha = repoTree and repoTree.sha
-				if body and treeSha then
-					downloadProfilesListing(body, treeSha, function(completed, total)
-						console:SetLine('Syncing configs ('..completed..'/'..total..')...')
-						console:SetProgress(0.6 + 0.13 * (completed / math.max(total, 1)))
-					end)
+			if body and treeSha then
+				local synced = downloadProfilesListing(body, treeSha, function(completed, total)
+					console:SetLine('Syncing configs ('..completed..'/'..total..')...')
+					console:SetProgress(0.6 + 0.13 * (completed / math.max(total, 1)))
+				end)
+				if synced then
 					writefile('pistonware/profiles/profilecommit.txt', latestCommit)
+				else
+					warn('[pistonware] profile sync did not complete; retrying on the next run')
 				end
+			end
 			end)
 			if console:IsAborted() then deleteInstall() return end
 
-			-- Hand the equipped config back to the load that is about to happen. This covers
-			-- a config the user made themselves and 'legit' alike -- and 'blatant' and
-			-- 'default' too, since the shipped gui.txt names one of them and a user sitting
-			-- on either would otherwise be indistinguishable from one who got reset onto it.
-			-- finishLoading in main.lua treats this as a one-shot and clears it, so it steers
-			-- only the load that follows this sync and does not leak into later reinjects.
-			-- Left nil when gui.txt was unreadable, which keeps the old behaviour of letting
-			-- whatever ends up in gui.txt decide rather than inventing a profile here.
+			--[[ Hand the equipped config back to the load that is about to happen. This covers
+			a config the user made themselves and 'legit' alike -- and 'blatant' and
+			'default' too, since the shipped gui.txt names one of them and a user sitting
+			on either would otherwise be indistinguishable from one who got reset onto it.
+			finishLoading in main.lua treats this as a one-shot and clears it, so it steers
+			only the load that follows this sync and does not leak into later reinjects.
+			Left nil when gui.txt was unreadable, which keeps the old behaviour of letting
+			whatever ends up in gui.txt decide rather than inventing a profile here. ]]
 			if lastProfile then
 				shared.VapeCustomProfile = lastProfile
 			end
 		end
-		-- On "No"/timeout the stored commit stays stale, so the prompt returns next session
-		-- until the user agrees to sync once.
+		--[[ On "No"/timeout the stored commit stays stale, so the prompt returns next session
+		until the user agrees to sync once. ]]
 	end
 end
 phase('config download/sync')
 console:SetProgress(0.73)
 
--- Step 3: after the shipped configs finish downloading, ask which one should load by default
--- and hand it to the GUI via shared.VapeCustomProfile. main.lua's finishLoading passes this
--- straight into vape:Load as the profile to load, replacing the 'default' profile. The keys
--- match the profile file name prefixes (e.g. blatant<PlaceId>.txt) so Load can find the file.
+--[[ Step 3: after the shipped configs finish downloading, ask which one should load by default
+and hand it to the GUI via shared.VapeCustomProfile. main.lua's finishLoading passes this
+straight into vape:Load as the profile to load, replacing the 'default' profile. The keys
+match the profile file name prefixes (e.g. blatant<PlaceId>.txt) so Load can find the file. ]]
 if downloadedConfigs then
-	-- No fallback: only an explicit button click may force a config. This used to
-	-- default to 'blatant' -- on a timeout (user tabbed away for 120s) or on the
-	-- headless console (which answers every Ask with the fallback instantly) that
-	-- silently stamped 'blatant' into shared.VapeCustomProfile, overriding the
-	-- profile saved in gui.txt without the user ever choosing it. With nil the
-	-- type(choice) guard below skips the override and the saved profile decides.
+	--[[ No fallback: only an explicit button click may force a config. This used to
+	default to 'blatant' -- on a timeout (user tabbed away for 120s) or on the
+	headless console (which answers every Ask with the fallback instantly) that
+	silently stamped 'blatant' into shared.VapeCustomProfile, overriding the
+	profile saved in gui.txt without the user ever choosing it. With nil the
+	type(choice) guard below skips the override and the saved profile decides. ]]
 	local ok, choice = pcall(function()
 		return console:Ask('Which config would you like to load by default?', {
 			{text = 'Blatant', key = 'blatant', tooltip = 'Makes Blatant your default config: everything on, obvious'},
@@ -1988,37 +1997,38 @@ end
 phase('config prompt')
 console:SetProgress(0.8)
 console:SetLine('Loading pistonware...')
--- Creeps the last couple of rows in while main.lua downloads and builds the GUI, so the face
--- is still one row short of finished when injection actually completes.
+--[[ Reveals the last couple of rows while main.lua downloads and builds the GUI, so the face
+is still one row short of finished when injection actually completes. ]]
 local injecting = true
 task.spawn(function()
 	local alpha = 0.8
 	while injecting and alpha < 0.93 do
 		task.wait(0.6)
-		-- injection can finish while this thread is asleep; reporting the stale alpha here
-		-- would land after Finish() has already asked for the full face.
+		--[[ injection can finish while this thread is asleep; reporting the stale alpha here
+		would land after Finish() has already asked for the full face. ]]
 		if not injecting then break end
 		alpha += 0.02
 		console:SetProgress(alpha)
 	end
 end)
 
--- pcall'd so a failure surfaces on the console line instead of leaving the window stuck on
--- 'Loading pistonware...'; warn() keeps it in the executor output too.
+--[[ pcall'd so a failure surfaces on the console line instead of leaving the window stuck on
+'Loading pistonware...'; warn() keeps it in the executor output too. ]]
 local ok, result = pcall(function()
-	return loadstring(downloadFile('pistonware/main.lua'), 'main')()
+	local chunk = loadstring(downloadFile('pistonware/main.lua'), 'main')
+	return chunk and chunk()
 end)
 injecting = false
 phase('main.lua')
--- Consumed only now: main.lua reads the flag itself while loading (it suppresses the 'Finished
--- Loading' notification on a reload). Left set it would leak into the rest of the session,
--- since main.lua never clears it and the next teleport/reinject sets it again anyway.
+--[[ Consumed only now: main.lua reads the flag itself while loading (it suppresses the 'Finished
+Loading' notification on a reload). Left set it would leak into the rest of the session,
+since main.lua never clears it and the next teleport/reinject sets it again anyway. ]]
 shared.vapereload = nil
--- Boot is over (successfully or not) -- reinjects and later manual runs may proceed.
+--[[ Boot is over (successfully or not) -- reinjects and later manual runs may proceed. ]]
 shared.PistonwareLoaderBoot = nil
 
--- Cancelled while the GUI was already building: tear that back down too, then wipe whatever
--- the run wrote after cancel's first pass.
+--[[ Cancelled while the GUI was already building: tear that back down too, then wipe whatever
+the run wrote after cancel's first pass. ]]
 if console:IsAborted() then
 	if shared.vape then
 		pcall(function() shared.vape:Uninject() end)
@@ -2033,9 +2043,9 @@ if ok then
 	return result
 end
 warn('[pistonware] '..tostring(result))
--- Copied as well as printed: the message is long, full of executor paths, and the person
--- hitting it is usually being asked to report it. Done here rather than inside console:Fail so
--- a headless reload (which has no window to read) still leaves it on the clipboard.
+--[[ Copied as well as printed: the message is long, full of executor paths, and the person
+hitting it is usually being asked to report it. Done here rather than inside console:Fail so
+a headless reload (which has no window to read) still leaves it on the clipboard. ]]
 local failure = 'Injection failed: '..tostring(result)
 local copied = pcall(function() setclipboard(failure) end)
 console:Fail(failure..(copied and '\n\n(copied to clipboard)' or ''))
