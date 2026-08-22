@@ -26,7 +26,7 @@ local function solveQuadric(c0, c1, c2)
 		return s0
 	elseif (D < 0) then
 		return
-	else -- if (D > 0)
+	else --[[ if (D > 0) ]]
 		local sqrt_D = math.sqrt(D)
 
 		s0 = sqrt_D - p
@@ -55,16 +55,16 @@ local function solveCubic(c0, c1, c2, c3)
 	D = q * q + cb_p
 
 	if isZero(D) then
-		if isZero(q) then -- one triple solution
+		if isZero(q) then --[[ one triple solution ]]
 			s0 = 0
 			num = 1
-		else -- one single and one double solution
+		else --[[ one single and one double solution ]]
 			local u = cuberoot(-q)
 			s0 = 2 * u
 			s1 = -u
 			num = 2
 		end
-	elseif (D < 0) then -- Casus irreducibilis: three real solutions
+	elseif (D < 0) then --[[ Casus irreducibilis: three real solutions ]]
 		local phi = (1 / 3) * math.acos(-q / math.sqrt(-cb_p))
 		local t = 2 * math.sqrt(-p)
 
@@ -72,7 +72,7 @@ local function solveCubic(c0, c1, c2, c3)
 		s1 = -t * math.cos(phi + math.pi / 3)
 		s2 = -t * math.cos(phi - math.pi / 3)
 		num = 3
-	else -- one real solution
+	else --[[ one real solution ]]
 		local sqrt_D = math.sqrt(D)
 		local u = cuberoot(sqrt_D - q)
 		local v = -cuberoot(sqrt_D + q)
@@ -187,10 +187,10 @@ function module.solveQuartic(c0, c1, c2, c3, c4)
 end
 
 function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, targetVelocity, playerGravity, playerHeight, playerJump, params, offset, ping)
-	-- Optional 10th/11th args (matches the signature the bedwars callers already
-	-- pass): `offset` shifts the target position, `ping` leads the target along its
-	-- velocity because the server registers the shot ~ping after we sampled the
-	-- target. Callers passing 9 args or fewer are unaffected.
+	--[[ Optional 10th/11th args (matches the signature the bedwars callers already
+	pass): `offset` shifts the target position, `ping` leads the target along its
+	velocity because the server registers the shot ~ping after we sampled the
+	target. Callers passing 9 args or fewer are unaffected. ]]
 	if offset then
 		targetPos = targetPos + offset
 	end
@@ -202,15 +202,15 @@ function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, tar
 	local h, j, k = disp.X, disp.Y, disp.Z
 	local l = -.5 * gravity
 
-	-- Target-gravity compensation. The quartic below assumes the target keeps a
-	-- constant velocity, which over-leads a target that is currently jumping or
-	-- falling. When the target has notable vertical velocity, project where it will
-	-- be after the approximate projectile travel time (accounting for its own
-	-- gravity) and, if that path lands on a surface, aim at the landing spot as a
-	-- static target. Only mutate the solve when a surface is actually found, so the
-	-- no-hit path keeps the true target velocity instead of corrupting it (the old
-	-- version subtracted 0.5*g*t from q on every path, which wrecked vertical lead
-	-- for any airborne target).
+	--[[ Target-gravity compensation. The quartic below assumes the target keeps a
+	constant velocity, which over-leads a target that is currently jumping or
+	falling. When the target has notable vertical velocity, project where it will
+	be after the approximate projectile travel time (accounting for its own
+	gravity) and, if that path lands on a surface, aim at the landing spot as a
+	static target. Only mutate the solve when a surface is actually found, so the
+	no-hit path keeps the true target velocity instead of corrupting it (the old
+	version subtracted 0.5*g*t from q on every path, which wrecked vertical lead
+	for any airborne target). ]]
 	if math.abs(q) > 0.01 and playerGravity and playerGravity > 0 and params then
 		local estTime = disp.Magnitude / projectileSpeed
 		local fall    = (q * estTime) - (0.5 * playerGravity * estTime * estTime)
@@ -236,7 +236,7 @@ function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, tar
 	)
 	if solutions then
 		local posRoots = table.create(2)
-		for _, v in solutions do --filter out the negative roots
+		for _, v in solutions do --[[filter out the negative roots ]]
 			if v > 0 then
 				table.insert(posRoots, v)
 			end

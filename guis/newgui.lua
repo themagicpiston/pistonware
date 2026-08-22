@@ -10,9 +10,9 @@ local vape = {
 	Loaded = false,
 	Libraries = {},
 	Modules = {},
-	-- Maintained on insert and remove so nothing has to WALK vape.Modules to size it.
-	-- main.lua polls this while the payload is still registering, and iterating a table another
-	-- thread is growing is the crash described on vape:Save. Reading a number is not.
+	--[[ Maintained on insert and remove so nothing has to WALK vape.Modules to size it.
+	main.lua polls this while the payload is still registering, and iterating a table another
+	thread is growing is the crash described on vape:Save. Reading a number is not. ]]
 	ModuleCount = 0,
 	--[[
 		The same set of modules as vape.Modules, kept as a plain array, and the ONLY thing
@@ -32,14 +32,10 @@ local vape = {
 	Place = game.PlaceId,
 	Profile = 'default',
 	RainbowSliders = {},
-	-- Bumped by every vape:Load. Load yields now, so a second one starting while the first is
-	-- still walking (switching profile, or the late pass for a payload that registered after the
-	-- first load) has to be able to tell the older one to stop rather than have the two of them
-	-- interleave writes into the same modules.
+	--[[ Bumped by every vape:Load. Load yields now, so a second load can stop the older one
+	while it is still walking instead of interleaving writes into the same modules. ]]
 	LoadGeneration = 0,
-	-- How many modules had been registered the last time a profile was applied. Anything past
-	-- this index in ModuleOrder arrived afterwards and has never had its saved settings put on
-	-- it -- see vape:LoadLate.
+	--[[ Modules past this index in ModuleOrder arrived after the last profile application. ]]
 	LoadedCount = 0,
 	Settings = {},
 	SettingToggleNotifications = {},
@@ -51,6 +47,10 @@ local vape = {
 
 local run = function(func)
 	func()
+end
+local function runChunk(source, name)
+	local chunk = loadstring(source, name)
+	return chunk and chunk()
 end
 local cloneref = cloneref or function(obj)
 	return obj
@@ -71,7 +71,7 @@ local httpService = cloneref(game:GetService('HttpService'))
 	assigning a property it does not have. Both happen while the GUI is being built, outside any
 	pcall, so one missing feature took the whole menu down rather than degrading.
 
-	Asked once here, and the answers are constants from then on -- these cannot change mid-session.
+	These probes run once, and their results stay constant for the session.
 ]]
 local function classExists(className)
 	local ok, obj = pcall(Instance.new, className)
@@ -95,11 +95,10 @@ local hasCornerRadii = propertyExists('UICorner', 'TopLeftRadius', UDim.new(0, 4
 local hasBorderOffset = propertyExists('UIStroke', 'BorderOffset', UDim.new(0, 1))
 
 --[[
-	TextLabel.ContentText -- the rich-text markup stripped out of Text -- is read-only, so it has
-	to be probed by READING it. Reading a property a class does not have throws exactly the same
-	way assigning one does.
+	TextLabel.ContentText strips rich-text markup from Text and is read-only, so support must be
+	probed by reading it. Reading an unsupported property throws just like assigning one.
 
-	This is the one that only bites after a profile is applied. The Text GUI reads ContentText
+	This failure occurs only after a profile is applied. The Text GUI reads ContentText
 	when it builds a module label, and it only builds labels for modules that are ENABLED -- so
 	an install with no profile draws no labels and never touches it, while the first profile that
 	switches modules on throws on the first label and takes the GUI down with it.
@@ -116,7 +115,7 @@ local hasContentText = (function()
 end)()
 
 --[[
-	The one that only fires once a profile is loaded.
+	This failure occurs only after a profile is loaded.
 
 	Sliders set their Value directly when they are built and never call SetValue, so on a fresh
 	install with no profile this code is unreachable. SetValue runs when a saved value is applied
@@ -155,17 +154,10 @@ local function contentText(obj)
 end
 
 local gameCamera = workspace.CurrentCamera
-
--- Declared here rather than further down with the rest of the forward declarations, because
--- viewportWidth below reads it. A local is only in scope for code that comes AFTER it, so
--- from down there this reference compiled against the (never-assigned) global instead: the
--- AbsoluteSize fallback could not fire, and on a client that reports no ViewportSize the
--- scale silently stayed at the floor value.
 local gui
 
--- Viewport in GUI units. The camera answers immediately; a ScreenGui's AbsoluteSize is (0, 0)
--- until it has rendered at least one frame, which on a phone is after the GUI has already been
--- built and scaled -- so reading the GUI gave the floor value on the first pass every time.
+--[[ Viewport in GUI units. The camera answers immediately; a ScreenGui's AbsoluteSize is (0, 0)
+until it renders its first frame, so use the camera before falling back to the GUI size. ]]
 local function viewportWidth()
 	local camera = gameCamera or workspace.CurrentCamera
 	local width = camera and camera.ViewportSize.X or 0
@@ -175,11 +167,11 @@ local function viewportWidth()
 	return width
 end
 
--- The old GUI's rescale, restored exactly: never below half size, never above 1:1.
---
--- The rewrite had math.max(width / 1920, 0.6) -- no upper bound at all. Phones report their
--- render resolution here, so a 2400-wide handset asked for a 1.25x menu on the smallest screen
--- in the lineup, and the window ran off the edge with no way to drag it back.
+--[[ The old GUI's rescale, restored exactly: never below half size, never above 1:1.
+
+The rewrite had math.max(width / 1920, 0.6) -- no upper bound at all. Phones report their
+render resolution here, so a 2400-wide handset asked for a 1.25x menu on the smallest screen
+in the lineup, and the window ran off the edge with no way to drag it back. ]]
 local function autoScaleValue()
 	local width = viewportWidth()
 	if width <= 0 then return 1 end
@@ -197,7 +189,6 @@ local toolblur
 local tooltip
 local TextGUI
 local scale = {Scale = 1}
--- `gui` is declared above viewportWidth, which reads it.
 
 local isfile = isfile or function(file)
 	local success, data = pcall(function()
@@ -602,18 +593,23 @@ do
 		return type(value) == 'string' and value:match('^rbx%a*://') ~= nil
 	end
 
-	-- Empty counts as missing. Every executor's real isfile reports a zero-byte file as PRESENT,
-	-- so a write cut short by a cancel, crash or teleport leaves a truncated file that cache-first
-	-- logic then skips forever.
+	--[[ Empty counts as missing. Every executor's real isfile reports a zero-byte file as PRESENT,
+	so a write cut short by a cancel, crash or teleport leaves a truncated file that cache-first
+	logic then skips forever. ]]
 	local function hasContent(path)
 		if not isfile(path) then return false end
 		local ok, body = pcall(readfile, path)
-		return ok and type(body) == 'string' and body ~= ''
+		if not ok or type(body) ~= 'string' or body == '' then return false end
+		if path:match('%.lua$') then
+			local compileOk, chunk = pcall(loadstring, body, path)
+			return compileOk and type(chunk) == 'function'
+		end
+		return true
 	end
 
-	-- Points at the pistonware repo, not VapeCompiled, and at main rather than a commit.txt this
-	-- install never writes. Retried, because a raw host under load returns an error page as the
-	-- body and caching that poisons the install silently.
+	--[[ Points at the pistonware repo, not VapeCompiled, and at main rather than a commit.txt this
+	install never writes. Retried, because a raw host under load returns an error page as the
+	body and caching that poisons the install silently. ]]
 	local function downloadFile(path)
 		if not hasContent(path) then
 			local relPath = select(1, path:gsub('pistonware/', ''))
@@ -643,8 +639,8 @@ do
 
 	local resolved = {}
 
-	-- Resolves a path the old way: the file on disk, handed to the executor's own asset
-	-- function. Blocks, and downloads the file first if it is not already there.
+	--[[ Resolves a path the old way: the file on disk, handed to the executor's own asset
+	function. Blocks, and downloads the file first if it is not already there. ]]
 	local function resolveFile(path)
 		local cached = resolved[path]
 		if cached ~= nil then return cached end
@@ -688,10 +684,10 @@ do
 		return ''
 	end
 
-	-- preferFile asks for the real file when the executor can produce one, falling back to the
-	-- uploaded id when it cannot -- no getcustomasset, a touch device, or the file not there yet.
-	-- Only worth setting where the file is the better source; everything else is faster and more
-	-- durable as an id.
+	--[[ preferFile asks for the real file when the executor can produce one, falling back to the
+	uploaded id when it cannot -- no getcustomasset, a touch device, or the file not there yet.
+	Only worth setting where the file is the better source; everything else is faster and more
+	durable as an id. ]]
 	getvapeasset = function(path, preferFile)
 		if preferFile then
 			local file = resolveFileIfCheap(path)
@@ -700,9 +696,9 @@ do
 
 		local id = vapeAssets[path]
 		if id then return id end
-		-- Already a content id. Callers outside this file pass user values through the
-		-- vape.Libraries.getcustomasset alias, and one of them hands over an rbxassetid
-		-- directly; sending that down the download path only produced an empty string.
+		--[[ Already a content id. Callers outside this file pass user values through the
+		vape.Libraries.getcustomasset alias, and one of them hands over an rbxassetid
+		directly; sending that down the download path only produced an empty string. ]]
 		if usableAsset(path) then return path end
 
 		return resolveFile(path)
@@ -800,12 +796,12 @@ vape.Libraries = {
 	tween = tween,
 	uipallet = uipallet,
 
-	-- Compatibility aliases. The rewrite renamed two libraries that the game files read by
-	-- their old names -- getcustomasset -> getvapeasset and getfontsize -> getfontbounds --
-	-- and those names appear across universal.lua, bedwars.lua and every per-place file.
-	-- Aliasing here is two lines; renaming at the call sites is hundreds of edits across
-	-- ~30,000 lines of game code for no behavioural gain, and every one of them a chance to
-	-- typo something that only fails at runtime in one module.
+	--[[ Compatibility aliases. The rewrite renamed two libraries that the game files read by
+	their old names -- getcustomasset -> getvapeasset and getfontsize -> getfontbounds --
+	and those names appear across universal.lua, bedwars.lua and every per-place file.
+	Aliasing here is two lines; renaming at the call sites is hundreds of edits across
+	~30,000 lines of game code for no behavioural gain, and every one of them a chance to
+	typo something that only fails at runtime in one module. ]]
 	getcustomasset = getvapeasset,
 	getfontsize = getfontbounds,
 }
@@ -848,7 +844,7 @@ local function addBlur(parent, notif, old)
 end
 
 --[[
-	addBlur returns one of two different things, and they are toggled differently.
+	addBlur returns either a UIShadow or an ImageLabel, and callers toggle them differently.
 
 	A UIShadow is switched with .Enabled. The blur PNG is an ImageLabel, which has no Enabled
 	property at all -- assigning one throws 'Enabled is not a valid member of ImageLabel' and
@@ -1105,7 +1101,7 @@ end
 -- caller passing it straight into another function would have handed over a stray number.
 
 --[[
-	The only native call this GUI makes, and it fires exactly when the menu opens.
+	This is the only native call this GUI makes, and it fires exactly when the menu opens.
 
 	SetRobloxGuiFocused hands the client a flag that switches on its OWN full-screen blur behind
 	the core UI. That is not a Roblox instance being drawn -- it is a GPU pass the engine runs
@@ -1113,8 +1109,8 @@ end
 	killing a client outright rather than throwing a Lua error. A Lua error prints red and the
 	game carries on; a crash on open is native, and this is the only native surface here.
 
-	Skipped on touch devices, where the cost is highest and the benefit is a cosmetic backdrop
-	nobody asked for. The toggle also defaults off there, so the setting matches the behaviour
+	Skipped on touch devices, where the cost is highest and the benefit is only a cosmetic
+	backdrop. The toggle also defaults off there, so the setting matches the behaviour
 	rather than claiming a blur that is not happening.
 
 	pcall'd on top: the method is executor- and client-version dependent, and a throw here used
@@ -1410,9 +1406,9 @@ function vape:Load(skipgui, profile)
 		self.VapeButton = button
 		self.VapeButtonImage = image
 		self.VapeButtonTransparency = button.BackgroundTransparency
-		-- Options are already loaded by this point, so honour the saved setting on the
-		-- button we just built -- the toggle's own Function ran before it existed.
-		-- Transparency rather than Visible: see HideVapeButton.
+		--[[ Options are already loaded by this point, so honour the saved setting on the
+		button we just built; the toggle's own Function ran before the button existed.
+		Transparency rather than Visible: see HideVapeButton. ]]
 		if self.HideVapeButton and self.HideVapeButton.Enabled then
 			button.BackgroundTransparency = 1
 			image.ImageTransparency = 1
@@ -1423,9 +1419,7 @@ function vape:Load(skipgui, profile)
 		end)
 	end
 
-	-- `toggleData` was an undeclared global here, so every caller was handed nil. The count
-	-- of modules the profile switched on is the only thing this function has to report, and
-	-- it is what the profile-swap notification above already uses.
+	--[[ `toggleData` was undeclared; return the module toggle count used by the notification. ]]
 	return toggleCount
 end
 
@@ -1495,7 +1489,7 @@ function vape:LoadGUI()
 	if vape.ThreadFix then
 		local holder = Instance.new('Folder')
 		holder.Parent = cloneref(game:GetService('CoreGui'))
-		-- Recent property; older clients throw on the assignment rather than ignoring it.
+		--[[ Recent property; older clients throw on the assignment rather than ignoring it. ]]
 		pcall(function() gui.OnTopOfCoreBlur = true end)
 		--[[
 			CoreGui on touch devices, gethui elsewhere.
@@ -1603,22 +1597,22 @@ function vape:LoadGUI()
 		Icon = getvapeasset('pistonware/assets/new/inventory.png'),
 		Size = UDim2.fromOffset(15, 14)
 	})
-	-- Minigames is not in the upstream rewrite, but it is not optional here: bedwars.lua alone
-	-- puts five modules in it (AutoHonor, Breaker, AutoFish, AutoHannah, AutoKaliyah) and four
-	-- other place files add more. Without the category those CreateModule calls index nil and
-	-- take their whole game script down.
-	--
-	-- Borrows the utility icon because the rewrite ships no minigames.png. Deliberately an
-	-- asset that EXISTS: a missing one would come back from getvapeasset as an unusable value
-	-- and throw 'ContentId formatting failed' when it reached .Image.
+	--[[ Minigames is not in the upstream rewrite, but it is not optional here: bedwars.lua alone
+	puts five modules in it (AutoHonor, Breaker, AutoFish, AutoHannah, AutoKaliyah) and four
+	other place files add more. Without the category those CreateModule calls index nil and
+	take their whole game script down.
+
+	Uses the utility icon because the rewrite ships no minigames.png; a missing asset would
+	return an unusable value from getvapeasset and throw 'ContentId formatting failed' when
+	assigned to .Image. ]]
 	vape:CreateCategory({
 		Name = 'Minigames',
 		Icon = getvapeasset('pistonware/assets/new/utility.png'),
 		Size = UDim2.fromOffset(15, 14)
 	})
 
-	-- games/6872274481.lua sizes two scrolling frames against the GUI's UIScale and reads it as
-	-- vape.guiscale, which the old GUI exported under that name. Same object, same field.
+	--[[ games/6872274481.lua sizes two scrolling frames against the GUI's UIScale and reads it as
+	vape.guiscale, which the old GUI exported under that name. Same object, same field. ]]
 	vape.guiscale = scale
 	vape.Categories.Main:CreateDivider({
 		Text = 'misc'
@@ -2231,14 +2225,14 @@ function vape:LoadGUI()
 			end
 	
 			shared.vapereload = true
-			-- Back through the pistonware loader, which re-runs the key gate. That is deliberate:
-			-- shared.PistonwareAuthenticated is cleared and re-derived on every run, so a reinject
-			-- revalidates rather than inheriting a flag. The developer build lives on disk under a
-			-- different name and must never be fetched from GitHub -- it has the gate disabled.
+			--[[ Back through the pistonware loader, which re-runs the key gate. That is deliberate:
+			shared.PistonwareAuthenticated is cleared and re-derived on every run, so a reinject
+			revalidates rather than inheriting a flag. The developer build lives on disk under a
+			different name and must never be fetched from GitHub -- it has the gate disabled. ]]
 			if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
-				loadstring(readfile('pistonware/loaderdev.lua'), 'loader')()
+				runChunk(readfile('pistonware/loaderdev.lua'), 'loader')
 			else
-				loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')()
+				runChunk(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')
 			end
 		end,
 		Tooltip = 'This will set your profile to the default settings of Vape'
@@ -2256,14 +2250,14 @@ function vape:LoadGUI()
 		Name = 'Reinject',
 		Function = function()
 			shared.vapereload = true
-			-- Back through the pistonware loader, which re-runs the key gate. That is deliberate:
-			-- shared.PistonwareAuthenticated is cleared and re-derived on every run, so a reinject
-			-- revalidates rather than inheriting a flag. The developer build lives on disk under a
-			-- different name and must never be fetched from GitHub -- it has the gate disabled.
+			--[[ Back through the pistonware loader, which re-runs the key gate. That is deliberate:
+			shared.PistonwareAuthenticated is cleared and re-derived on every run, so a reinject
+			revalidates rather than inheriting a flag. The developer build lives on disk under a
+			different name and must never be fetched from GitHub -- it has the gate disabled. ]]
 			if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
-				loadstring(readfile('pistonware/loaderdev.lua'), 'loader')()
+				runChunk(readfile('pistonware/loaderdev.lua'), 'loader')
 			else
-				loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')()
+				runChunk(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')
 			end
 		end,
 		Tooltip = 'Reloads vape for debugging purposes'
@@ -2272,7 +2266,7 @@ function vape:LoadGUI()
 	general:CreateButton({
 		Name = 'Reinstall',
 		Function = function()
-			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/main/reinstall.lua', true))()
+			runChunk(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/main/reinstall.lua', true), 'reinstall')
 		end,
 		Tooltip = 'Uninjects, deletes the pistonware folder and downloads everything again'
 	})
@@ -2339,8 +2333,8 @@ function vape:LoadGUI()
 		Function = function()
 			vape:BlurCheck()
 		end,
-		-- Off by default on a phone. See BlurCheck: this drives a full-screen GPU pass, and it
-		-- is the only thing the menu does on open that a client can die on rather than error on.
+		--[[ Off by default on a phone. See BlurCheck: this drives a full-screen GPU pass, and it
+		is the only thing the menu does on open that a client can die on rather than error on. ]]
 		Default = not inputService.TouchEnabled,
 		Tooltip = 'Blur the background of the GUI'
 	})
@@ -2380,9 +2374,9 @@ function vape:LoadGUI()
 		Function = function(callback)
 			ScaleSlider.Object.Visible = not callback
 			if callback then
-				-- Was commented out in the rewrite, so turning Auto rescale back on did
-				-- nothing at all until the next resize -- and on a phone there is no next
-				-- resize. The menu just stayed at whatever the manual slider left it on.
+				--[[ Was commented out in the rewrite, so turning Auto rescale back on did
+				nothing at all until the next resize -- and on a phone there is no next
+				resize. The menu just stayed at whatever the manual slider left it on. ]]
 				scale.Scale = autoScaleValue()
 			else
 				scale.Scale = ScaleSlider.Value
@@ -2409,11 +2403,11 @@ function vape:LoadGUI()
 	vape.HideVapeButton = guipane:CreateToggle({
 		Name = 'Hide Pistonware Mobile Button',
 		Function = function(callback)
-			-- Drops the transparencies rather than flipping Visible. An invisible
-			-- GuiObject stops hit-testing in Roblox, so hiding the button used to take
-			-- its tap target with it and the only way back into the GUI was the keybind
-			-- -- which mobile doesn't have. Fully transparent still receives input, so
-			-- the button keeps opening the menu from exactly where it always sat.
+			--[[ Drops the transparencies rather than flipping Visible. An invisible
+			GuiObject stops hit-testing in Roblox, so hiding the button used to take
+			its tap target with it and the only way back into the GUI was the keybind
+			-- which mobile doesn't have. Fully transparent still receives input, so
+			the button keeps opening the menu from exactly where it always sat. ]]
 			if vape.VapeButton then
 				vape.VapeButton.BackgroundTransparency = callback and 1 or (vape.VapeButtonTransparency or 0)
 				if vape.VapeButtonImage then
@@ -2442,9 +2436,9 @@ function vape:LoadGUI()
 		Suffix = 'hz'
 	})
 	
-	-- The GUI Theme dropdown that stood here is gone, not just commented out. It offered
-	-- 'old' and 'rise', both of which are discontinued -- guis/old.lua and guis/rise.lua no
-	-- longer exist in this repo, so every branch of it pointed at a file that would 404.
+	--[[ The GUI Theme dropdown that stood here is gone, not just commented out. It offered
+	'old' and 'rise', both of which are discontinued -- guis/old.lua and guis/rise.lua no
+	longer exist in this repo, so every branch of it pointed at a file that would 404. ]]
 	
 	guipane:CreateDropdown({
 		Name = 'Search bar style',
@@ -2952,11 +2946,11 @@ function vape:LoadGUI()
 						label.BorderSizePixel = 0
 						label.FontFace = FontOption.Value
 						label.Position = UDim2.fromOffset(isRight and 5 or 9, 2)
-						-- ExtraText belongs to the game script, not to this file, and it is called
-						-- here for every enabled module on every redraw. A module whose state is
-						-- not ready yet -- which is exactly the moment a profile switches a batch
-						-- of them on -- would otherwise throw and abort the whole rebuild, leaving
-						-- the Text GUI half-destroyed with its label list already cleared.
+						--[[ ExtraText belongs to the game script, not to this file, and it is called
+						here for every enabled module on every redraw. A module whose state is
+						not ready yet -- which is exactly the moment a profile switches a batch
+						of them on -- would otherwise throw and abort the whole rebuild, leaving
+						the Text GUI half-destroyed with its label list already cleared. ]]
 						local extra = ''
 						if module.ExtraText then
 							local ok, text = pcall(module.ExtraText)
@@ -3027,9 +3021,8 @@ function vape:LoadGUI()
 		
 						label.Color.Parent.Line.Visible = index ~= 1
 		
-						-- Per-corner radii are recent; older clients only have CornerRadius. This
-						-- runs on the Text GUI's redraw, so on a client without them it was not
-						-- one error -- it threw on every single refresh, forever.
+		--[[ Per-corner radii are recent; older clients only have CornerRadius. Because
+		this runs on every Text GUI redraw, unsupported clients threw on every refresh. ]]
 						if hasCornerRadii then
 							label.Color.UICorner.TopLeftRadius = isRight and UDim.new() or UDim.new(0, index == 1 and 4 or 0)
 							label.Color.UICorner.TopRightRadius = isRight and UDim.new(0, index == 1 and 4 or 0) or UDim.new()
@@ -3115,6 +3108,7 @@ function vape:LoadGUI()
 		})
 		
 		local Holder = Instance.new('Frame')
+		targetinfo.Object = Holder
 		Holder.Size = UDim2.fromOffset(240, 89)
 		Holder.BackgroundColor3 = color.Dark(uipallet.Main, 0.1)
 		Holder.BackgroundTransparency = 0.5
@@ -3451,9 +3445,9 @@ function vape:LoadGUI()
 	vape:Clean(scale:GetPropertyChangedSignal('Scale'):Connect(function()
 		scaledgui.Size = UDim2.fromScale(1 / scale.Scale, 1 / scale.Scale)
 	
-		-- GetDescendants, not QueryDescendants. The selector-query API is recent and simply is
-		-- not there on the client mobile executors ship, and this runs on every scale change --
-		-- which on a phone is every rotation. Same objects, same nudge.
+		--[[ GetDescendants, not QueryDescendants. The selector-query API is recent and
+		unavailable on the mobile clients used by these executors. This runs on every scale
+		change, which on a phone is every rotation, and nudges the same objects. ]]
 		for _, obj in scaledgui:GetDescendants() do
 			if obj:IsA('GuiObject') and obj.Visible then
 				obj.Visible = false
@@ -3829,9 +3823,9 @@ function vape:Uninject()
 
 	gui:ClearAllChildren()
 	gui:Destroy()
-	-- The ThreadFix branch of LoadGUI parents a Folder into CoreGui and nothing ever removed it,
-	-- so every inject left one behind. That matters here because a queued teleport re-injects on
-	-- each new server: a phone that hops matches all session accumulated a folder per hop.
+	--[[ The ThreadFix branch of LoadGUI parents a Folder into CoreGui, but nothing removed it,
+	so every inject left one behind. A queued teleport re-injects on each new server, so a phone
+	that hops servers accumulates one folder per hop. ]]
 	if self.holder and self.holder ~= gui then
 		pcall(function() self.holder:Destroy() end)
 	end
@@ -3893,11 +3887,11 @@ function vape:UpdateGUI(hue, sat, val, default)
 	end
 end
 
--- Every container (category, module, legit module, overlay, window) binds the whole
--- components table into ONE frame of its own, and which frame that is differs per
--- container. Recorded here so a component registered later -- vape.Components.X = f,
--- which games do for their own option types -- can be bound into the same frame
--- instead of guessing at it. Weak keys: a removed container takes its entry with it.
+--[[ Every container (category, module, legit module, overlay, window) binds the whole
+components table into its own frame, and each container uses a different frame. Recorded here
+so a component registered later -- vape.Components.X = f,
+which games do for their own option types -- can be bound into the same frame
+instead of guessing at it. Weak keys: a removed container takes its entry with it. ]]
 local componentChildren = setmetatable({}, {__mode = 'k'})
 
 local function bindComponents(component, children)
@@ -4079,11 +4073,11 @@ components = {
 		end
 		
 		--[[
-			Every module's Load calls this with data.Bind, and nothing guarantees that field
-			exists: a profile written before the module did, or a legacy one where the migration
-			produced {Keys = nil}, both arrive here as nil or as a table with no Keys. Indexing
-			the nil threw, and #nil in SetBind threw, on a module list that is walked in full --
-			so one stale entry took the entire profile load with it.
+			Every module's Load calls this with data.Bind, but that field may be missing. A profile
+			written before the module existed, or a legacy profile whose migration produced
+			{Keys = nil}, can arrive here as nil or as a table without Keys. Indexing nil or applying
+			# to nil in SetBind then aborts the full module-list load, so one stale entry takes the
+			whole profile down.
 		]]
 		function component:Load(data)
 			if type(data) ~= 'table' then
@@ -4110,8 +4104,8 @@ components = {
 		end
 		
 		function component:SetBind(keys, mouse)
-			-- Callers outside this file reach SetBind too, and a saved profile is not a trusted
-			-- shape. Everything below counts and concatenates it, so make it a table first.
+			--[[ Callers outside this file reach SetBind too, and a saved profile is not a trusted
+			shape. Everything below counts and concatenates it, so make it a table first. ]]
 			keys = type(keys) == 'table' and keys or {}
 		
 			if props and props.NoRemove and #keys <= 0 then
@@ -4196,7 +4190,7 @@ components = {
 		bind.MouseButton1Click:Connect(function()
 			if vape.Binding then
 				if vape.Binding == component then
-					-- Second click on the bind that is waiting: clear it.
+					--[[ Second click on the bind that is waiting: clear it. ]]
 					component:SetBind({}, true)
 					vape.Binding = nil
 					return
@@ -4697,8 +4691,8 @@ components = {
 		props.Function = props.Function or function() end
 		
 		function component:CreateProfile(value, data)
-			-- Names are the identity here: GetValue, ChangeValue and the profile file on disk all
-			-- key off them, so two entries with the same name are two rows fighting over one file.
+			--[[ Names are the identity here: GetValue, ChangeValue and the profile file on disk all
+			key off them, so two entries with the same name are two rows fighting over one file. ]]
 			if type(value) ~= 'string' or value == '' or self:GetValue(value) then
 				return
 			end
@@ -5582,10 +5576,7 @@ components = {
 			if enter then
 				local success, parsed = pcall(function()
 					local commas = custombox.Text:split(',')
-					-- custombox, not `valuebox` -- that was an undeclared global, so the hex
-					-- branch threw on every entry, the pcall swallowed it, and typing a hex
-					-- colour into a colour slider silently did nothing. The GUISlider copy of
-					-- this handler already reads the right box.
+					--[[ Use custombox, not undeclared valuebox; otherwise hex color input fails silently. ]]
 					return tonumber(commas[1]) and Color3.fromRGB(tonumber(commas[1]), tonumber(commas[2]), tonumber(commas[3])) or Color3.fromHex(custombox.Text)
 				end)
 		
@@ -5621,7 +5612,7 @@ components = {
 			label.FontFace = uipallet.Font
 			label.Parent = children
 			divider.BackgroundTransparency = 1
-			--divider.Position = UDim2.fromOffset(0, 26)
+			--[[ divider.Position = UDim2.fromOffset(0, 26) ]]
 			divider.Parent = label
 		end
 	end,
@@ -7220,9 +7211,9 @@ components = {
 			Index = vape.ModuleCount,
 			Name = props.Name,
 			Options = {},
-			-- Every other component in this table declares its Type; this one never did, so
-			-- vape:Remove's `component.Type == 'Module'` test could not have matched and the
-			-- resort after a removal would have been dead code.
+			--[[ Every other component in this table declares its Type; this one never did, so
+			vape:Remove's `component.Type == 'Module'` test could not have matched and the
+			resort after a removal would have been dead code. ]]
 			Type = 'Module',
 			Visible = true
 		}
@@ -7295,7 +7286,7 @@ components = {
 		editbox.Size = UDim2.fromOffset(8, 8)
 		editbox.Parent = edit
 		local editborder = Instance.new('UIStroke')
-		-- Cosmetic, and absent on older clients. Purely a 1px outset on the edit outline.
+		--[[ Cosmetic, and absent on older clients. Purely a 1px outset on the edit outline. ]]
 		if hasBorderOffset then
 			editborder.BorderOffset = UDim.new(0, 1)
 		end
@@ -8863,11 +8854,11 @@ components = {
 	TextList = function(props, children, api)
 		local component = {
 			Index = getTableSize(api.Options),
-			-- Cloned, not referenced. `props.Default` is the module's own default table, and
-			-- assigning it directly made List, ListEnabled and the default all the SAME table --
-			-- so editing the list in one module mutated the shared default, and every other
-			-- TextList built from it inherited the edit. Worse, it persisted: the corrupted
-			-- default is what got saved, so the damage survived reinjects.
+			--[[ Cloned, not referenced. `props.Default` is the module's own default table, and
+			assigning it directly made List, ListEnabled and the default all the SAME table --
+			so editing the list in one module mutated the shared default, and every other
+			TextList built from it inherited the edit. Worse, it persisted: the corrupted
+			default is what got saved, so the damage survived reinjects. ]]
 			List = props.Default and table.clone(props.Default) or {},
 			ListEnabled = props.Default and table.clone(props.Default) or {},
 			Objects = {},
@@ -9116,9 +9107,9 @@ components = {
 					props.Function()
 				end)
 		
-				-- `object` was an undeclared global here (nil); the local built above is `obj`.
-				-- table.insert with nil meant self.Objects stayed empty, so nothing could find
-				-- or clean up the entries it was supposed to be tracking.
+				--[[ `object` was an undeclared global here (nil); the local built above is `obj`.
+				table.insert with nil meant self.Objects stayed empty, so nothing could find
+				or clean up the entries it was supposed to be tracking. ]]
 				table.insert(self.Objects, obj)
 			end
 		end
@@ -9567,18 +9558,18 @@ components = {
 
 vape.Components = setmetatable(components, {
 	__newindex = function(self, index, callback)
-		-- rawset FIRST. Without it the components table never actually receives the
-		-- entry, so only containers that already existed got the method and every
-		-- container built afterwards was missing it -- which is what "attempt to call
-		-- missing method 'CreateHotbarList'" was: AutoHotbar is created further down
-		-- the same file that registers HotbarList.
+		--[[ rawset FIRST. Without it the components table never actually receives the
+		entry, so only containers that already existed got the method and every
+		container built afterwards was missing it -- which is what "attempt to call
+		missing method 'CreateHotbarList'" was: AutoHotbar is created further down
+		the same file that registers HotbarList. ]]
 		rawset(self, index, callback)
 
-		-- Every container that has already bound the table, not just modules: a
-		-- category or an overlay can hold options too. module.Children was the wrong
-		-- frame anyway -- it only exists on a module given a Size (its draggable
-		-- on-screen window) and is nil for an ordinary one, so the component either
-		-- indexed nil or drew itself into the wrong place.
+		--[[ Every container that has already bound the table, not just modules: a
+		category or an overlay can hold options too. module.Children was the wrong
+		frame anyway -- it only exists on a module given a Size (its draggable
+		on-screen window) and is nil for an ordinary one, so the component either
+		indexed nil or drew itself into the wrong place. ]]
 		for component, children in componentChildren do
 			rawset(component, 'Create'..index, function(_, props)
 				return callback(props, children, component)

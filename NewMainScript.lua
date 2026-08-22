@@ -13,27 +13,32 @@ local cloneref = cloneref or function(ref)
 	return ref
 end
 
--- isfile is not the question, for the same reason main.lua spells out at length: every
--- executor's real isfile reports a zero-byte file as PRESENT, so a write cut short by a
--- cancel, crash or teleport leaves a truncated file that cache-first logic then skips
--- forever. For a .lua file that is a chunk which silently does nothing; for an asset it is a
--- content id that throws when the GUI reads it. Treating empty as missing repairs it on the
--- next run instead of requiring a reinstall.
+--[[ As in `main.lua`, `isfile` alone is insufficient: every
+executor's real isfile reports a zero-byte file as PRESENT, so a write cut short by a
+cancel, crash or teleport leaves a truncated file that cache-first logic then skips
+forever. For a .lua file that is a chunk which silently does nothing; for an asset it is a
+content id that throws when the GUI reads it. Treating empty as missing repairs it on the
+next run instead of requiring a reinstall. ]]
 local function hasContent(path)
 	if not isfile(path) then return false end
 	local ok, body = pcall(readfile, path)
-	return ok and type(body) == 'string' and body ~= ''
+	if not ok or type(body) ~= 'string' or body == '' then return false end
+	if path:match('%.lua$') then
+		local compileOk, chunk = pcall(loadstring, body, path)
+		return compileOk and type(chunk) == 'function'
+	end
+	return true
 end
 
 local function downloadFile(path, func)
 	if not hasContent(path) then
-		-- bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
-		-- repo's ROOT even though it caches locally under games/; everything else lives in the
-		-- GitHub repo.
+		--[[ bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
+		repo's ROOT even though it caches locally under games/; everything else lives in the
+		GitHub repo. ]]
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local isBedwars = relPath == 'games/bedwars.lua'
-		-- Retried a few times: raw file hosts intermittently fail, returning an empty body that
-		-- would otherwise get cached as a corrupt/empty file.
+		--[[ The request is retried because raw file hosts can intermittently return an empty body that
+		would otherwise get cached as a corrupt/empty file. ]]
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
@@ -67,7 +72,7 @@ for _, folder in {'pistonware', 'pistonware/games', 'pistonware/profiles', 'pist
 	end
 end
 
--- catvape profile system credit to maxlasertech
+--[[ catvape profile system credit to maxlasertech ]]
 pcall(function()
 	if #listfiles('pistonware/profiles') < 3 then
 		local reqSuc, res = pcall(function()
@@ -88,9 +93,9 @@ pcall(function()
 						end)
 					end
 				end
-				-- Joined on the counter with a deadline, matching loader.lua and main.lua. The
-				-- BindableEvent this replaces had no timeout, so a worker that died before
-				-- firing parked the boot for the rest of the session.
+				--[[ Joined on the counter with a deadline, matching loader.lua and main.lua. The
+				BindableEvent this replaces had no timeout, so a worker that died before
+				firing parked the boot for the rest of the session. ]]
 				local deadline = os.clock() + 90
 				while completed < total and os.clock() < deadline do
 					task.wait(0.05)
@@ -100,4 +105,5 @@ pcall(function()
 	end
 end)
 
-return loadstring(downloadFile('pistonware/main.lua'), 'main')()
+local mainChunk = loadstring(downloadFile('pistonware/main.lua'), 'main')
+return mainChunk and mainChunk()

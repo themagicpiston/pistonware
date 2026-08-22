@@ -713,7 +713,7 @@ run(function()
 	
 	local function getAttackData()
 		if Mouse.Enabled then
-			if inputService:IsMouseButtonPressed(0) then return false end
+			if not inputService:IsMouseButtonPressed(0) then return false end
 		end
 	
 		return (not Limit.Enabled) and store.tools.sword or store.hand
@@ -800,8 +800,8 @@ run(function()
 							end
 						end
 	
-						if switched then
-							skywars.Remotes[remotes.updateActiveItem](store.hand.Name)
+			if switched then
+				skywars.Remotes[remotes.updateActiveItem]:fire(store.hand.Name)
 						end
 					end
 	
@@ -1200,13 +1200,13 @@ run(function()
 								rayCheck.FilterDescendantsInstances = {ent.Character, gameCamera}
 								rayCheck.CollisionGroup = ent.RootPart.CollisionGroup
 								local calc = prediction.SolveTrajectory(offsetpos.Position, 200, math.abs(skywars.Gravity), ent.RootPart.Position, ent.RootPart.Velocity, workspace.Gravity, ent.HipHeight, nil, rayCheck)
-								
+
 								if calc then
 									targetinfo.Targets[ent] = tick() + 1
 									FireDelays[item] = tick() + 0.5
 									skywars.Remotes[remotes.updateActiveItem]:fire(item.Name)
 									skywars.Remotes[remotes.chargeBow]:fire(CFrame.new(offsetpos.Position, calc).LookVector, 1)
-									skywars.Remotes[remotes.updateActiveItem](store.hand.Name) 
+									skywars.Remotes[remotes.updateActiveItem]:fire(store.hand.Name)
 									break
 								end
 							end
@@ -1236,7 +1236,7 @@ run(function()
 		end
 	})
 end)
-	
+
 run(function()
 	local Scaffold
 	local Expand
@@ -1344,7 +1344,7 @@ run(function()
 	
 								local block = store.blocks[currentpos]
 								if not block then
-									blockpos = checkAdjacent(currentpos) and currentpos or blockProximity(currentpos)
+									local blockpos = checkAdjacent(currentpos) and currentpos or blockProximity(currentpos)
 									if blockpos then
 										local block = skywars.ItemMeta[wool.Rewrite.Type:gsub('{TeamId}', skywars.TeamController:getPlayerTeamId(lplr) or 'White')]
 										skywars.BlockController:placeBlock(blockpos, wool.Name, block, Vector3.zero)
@@ -1780,4 +1780,3 @@ run(function()
 		Tooltip = 'Replaces the default viewmodel'
 	})
 end)
-	

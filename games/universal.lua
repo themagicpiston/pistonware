@@ -50,11 +50,9 @@ local contextService = cloneref(game:GetService('ContextActionService'))
 local coreGui = cloneref(game:GetService('CoreGui'))
 local proxService = cloneref(game:GetService('ProximityPromptService'))
 
--- identifyexecutor exists but THROWS on several mobile executors, and this runs at the top
--- level of the file -- so an unguarded call here does not degrade one feature, it kills the
--- whole game script before a single module registers. main.lua already carries a comment
--- saying exactly this about its own call; these three never got the same treatment, and this
--- is the file BedWars users load.
+--[[ identifyexecutor throws on several mobile executors. Because this runs at file scope, an
+unguarded call would terminate the whole game script before any module registers. main.lua
+already documents the same risk for its own call; this file is loaded by BedWars users. ]]
 local function executorName()
 	local ok, name = pcall(function()
 		return identifyexecutor and ({identifyexecutor()})[1] or nil
@@ -241,9 +239,15 @@ local function motorMove(target, cf)
 	task.delay(0, part.Destroy, part)
 end
 
-local hash = loadstring(downloadFile('pistonware/libraries/hash.lua'), 'hash')()
-local prediction = loadstring(downloadFile('pistonware/libraries/prediction.lua'), 'prediction')()
-entitylib = loadstring(downloadFile('pistonware/libraries/entity.lua'), 'entitylibrary')()
+local function loadModule(path, name)
+	local chunk = loadstring(downloadFile(path), name)
+	return chunk and chunk()
+end
+
+local hash = loadModule('pistonware/libraries/hash.lua', 'hash')
+local prediction = loadModule('pistonware/libraries/prediction.lua', 'prediction')
+entitylib = loadModule('pistonware/libraries/entity.lua', 'entitylibrary')
+if not hash or not prediction or not entitylib then return end
 local whitelist = {
 	alreadychecked = {},
 	customtags = {},
@@ -992,16 +996,16 @@ run(function()
 					tool = tool and tool:FindFirstChildWhichIsA('TouchTransmitter', true)
 					if tool then
 						if Mode.Value == 'TouchInterest' then
-							local entites = {}
+							local entities = {}
 							for _, v in entitylib.List do
 								if v.Targetable then
 									if not Targets.Players.Enabled and v.Player then continue end
 									if not Targets.NPCs.Enabled and v.NPC then continue end
-									table.insert(entites, v.Character)
+									table.insert(entities, v.Character)
 								end
 							end
 	
-							Overlay.FilterDescendantsInstances = entites
+							Overlay.FilterDescendantsInstances = entities
 							local parts = workspace:GetPartBoundsInBox(tool.Parent.CFrame * CFrame.new(0, 0, Value.Value / 2), tool.Parent.Size + Vector3.new(0, 0, Value.Value), Overlay)
 	
 							for _, v in parts do
@@ -2225,7 +2229,7 @@ run(function()
 				Invisible:Clean(entitylib.Events.LocalAdded:Connect(function(char)
 					local animator = char.Humanoid:WaitForChild('Animator', 1)
 					if animator and Invisible.Enabled then
-						oldroot = nil
+						oldcf = nil
 						Invisible:Toggle()
 						Invisible:Toggle()
 					end
@@ -2899,6 +2903,7 @@ end)
 	
 run(function()
 	local Speed
+	local CustomProperties
 	local Mode
 	local Options
 	local AutoJump
@@ -3292,12 +3297,15 @@ run(function()
 			if callback then
 				if not module then
 					local suc = pcall(function() module = require(lplr.PlayerScripts.PlayerModule).controls end)
-					if not suc then
-						module = {}
-					end
+					if not suc then module = nil end
 				end
 	
-				old = module.moveFunction
+				old = module and module.moveFunction
+				if type(old) ~= 'function' then
+					module = nil
+					old = nil
+					return
+				end
 				local flymod, ang, oldent = vape.Modules.Fly or {Enabled = false}
 				module.moveFunction = function(self, vec, face)
 					local wallcheck = Targets.Walls.Enabled
@@ -3441,7 +3449,7 @@ run(function()
 	local function Added(ent)
 		if not Targets.Players.Enabled and ent.Player then return end
 		if not Targets.NPCs.Enabled and ent.NPC then return end
-		if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) and (not ent.Friend) then return end
+	if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
 		if vape.ThreadFix then
 			setthreadidentity(8)
 		end
@@ -4411,12 +4419,12 @@ run(function()
 				chair.Material = Enum.Material.SmoothPlastic
 				chair.Parent = workspace
 				movingsound = Instance.new('Sound')
-				--movingsound.SoundId = downloadVapeAsset('vape/assets/ChairRolling.mp3')
+				--[[ movingsound.SoundId = downloadVapeAsset('vape/assets/ChairRolling.mp3') ]]
 				movingsound.Volume = 0.4
 				movingsound.Looped = true
 				movingsound.Parent = workspace
 				flyingsound = Instance.new('Sound')
-				--flyingsound.SoundId = downloadVapeAsset('vape/assets/ChairFlying.mp3')
+				--[[ flyingsound.SoundId = downloadVapeAsset('vape/assets/ChairFlying.mp3') ]]
 				flyingsound.Volume = 0.4
 				flyingsound.Looped = true
 				flyingsound.Parent = workspace
@@ -4536,20 +4544,20 @@ run(function()
 								if currenttween then
 									currenttween:Cancel()
 								end
-								tween = tweenService:Create(chairlegs, TweenInfo.new(0.15), {
+								currenttween = tweenService:Create(chairlegs, TweenInfo.new(0.15), {
 									Size = Vector3.zero
 								})
-								tween.Completed:Connect(function(state)
+								currenttween.Completed:Connect(function(state)
 									if state == Enum.PlaybackState.Completed then
 										chairfan.Transparency = 0
 										chairlegs.Transparency = 1
-										tween = tweenService:Create(chairfan, TweenInfo.new(0.15), {
+										currenttween = tweenService:Create(chairfan, TweenInfo.new(0.15), {
 											Size = Vector3.new(1.534, 0.328, 1.537) / Vector3.new(791.138, 168.824, 792.027)
 										})
-										tween:Play()
+										currenttween:Play()
 									end
 								end)
-								tween:Play()
+								currenttween:Play()
 							else
 								if flyingsound.IsPlaying then
 									flyingsound:Stop()
@@ -4558,20 +4566,20 @@ run(function()
 									movingsound:Play()
 								end
 								if currenttween then currenttween:Cancel() end
-								tween = tweenService:Create(chairfan, TweenInfo.new(0.15), {
+								currenttween = tweenService:Create(chairfan, TweenInfo.new(0.15), {
 									Size = Vector3.zero
 								})
-								tween.Completed:Connect(function(state)
+								currenttween.Completed:Connect(function(state)
 									if state == Enum.PlaybackState.Completed then
 										chairfan.Transparency = 1
 										chairlegs.Transparency = 0
-										tween = tweenService:Create(chairlegs, TweenInfo.new(0.15), {
+										currenttween = tweenService:Create(chairlegs, TweenInfo.new(0.15), {
 											Size = Vector3.new(1.8, 1.2, 1.8) / Vector3.new(10.432, 8.105, 9.488)
 										})
-										tween:Play()
+										currenttween:Play()
 									end
 								end)
-								tween:Play()
+								currenttween:Play()
 							end
 							oldflying = flying
 						end
@@ -4840,8 +4848,8 @@ run(function()
 					local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
 					if Sizes[ent] ~= mag then
 						nametag.Text = string.format(Strings[ent], mag)
-						local ize = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-						nametag.Size = UDim2.fromOffset(ize.X + 8, ize.Y + 7)
+						local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+						nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 						Sizes[ent] = mag
 					end
 				end
@@ -6656,10 +6664,15 @@ run(function()
 					local suc = pcall(function() 
 						module = require(lplr.PlayerScripts.PlayerModule).controls 
 					end)
-					if not suc then module = {} end
+					if not suc then module = nil end
 				end
 				
-				old = module.moveFunction
+				old = module and module.moveFunction
+				if type(old) ~= 'function' then
+					module = nil
+					old = nil
+					return
+				end
 				module.moveFunction = function(self, vec, face)
 					if entitylib.isAlive then
 						rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera}
@@ -7401,11 +7414,12 @@ run(function()
 				return
 			end
 	
+			if not data then return end
 			if data.BundleType == 'AvatarAnimations' then
 				local animate = char.Character:FindFirstChild('Animate')
 				if not animate then return end
 	
-				for _, v in desc.Items do
+				for _, v in data.Items do
 					local animtype = v.Name:split(' ')[2]:lower()
 					if animtype ~= 'animation' then
 						local suc, res = pcall(function()
@@ -8164,10 +8178,10 @@ run(function()
         Name = 'Transparency',
         Function = function(callback)
             if callback then
-                -- Reapplying does full GetChildren/GetDescendants sweeps of the
-                -- character; at 60fps that's hundreds of instance calls a frame.
-                -- 10Hz is visually identical (the game only rarely resets
-                -- transparency) and slider callbacks still apply instantly.
+                --[[ Each reapplication performs full GetChildren/GetDescendants sweeps of the
+                character; at 60fps, that means hundreds of instance calls per frame.
+                10Hz is visually identical because the game only rarely resets
+                transparency, and slider callbacks still apply instantly. ]]
                 local nextApply = 0
                 connection = runService.RenderStepped:Connect(function()
                     if os.clock() < nextApply then return end
@@ -8312,10 +8326,10 @@ run(function()
 	local MaxZoom
 	local zoomConn
 
-	-- This place's StarterPlayer value, which is also what the game's own code writes
-	-- back when it finishes a temporary camera override (the zipline handler restores a
-	-- literal 14). Read off StarterPlayer at runtime so a place update carries the
-	-- restore value with it; the literal is only the fallback.
+	--[[ StarterPlayer.CameraMaxZoomDistance is also the value the game's own code writes
+	back when it finishes a temporary camera override (the zipline handler restores a
+	literal 14). Read it at runtime so a place update supplies the restore value; the
+	literal is only the fallback. ]]
 	local FALLBACK_MAX_ZOOM = 14
 
 	local function defaultMaxZoom()
@@ -8326,28 +8340,28 @@ run(function()
 		return FALLBACK_MAX_ZOOM
 	end
 
-	-- The game does not leave this property alone, so one write on enable will not hold:
-	-- the zipline handler sets 20 and then hard-restores 14, aiming down a scope sets
-	-- 6.5 and restores whatever it captured, and assorted menu/spectate paths write
-	-- 30/40/100. Re-apply whenever it moves out from under us.
-	--
-	-- Except while the game is PINNING the camera -- aiming and ziplining both set min
-	-- and max to the same value to lock the distance to one number. Fighting those
-	-- breaks the scope and the zipline ride, and there is nothing to fix afterwards:
-	-- both end by restoring a normal min < max, which is the edge that puts our value
-	-- back.
-	--
-	-- Deferred rather than handled inline because those paths write max and min as two
-	-- separate statements. Inline we would see the half-applied state (max = 20, min
-	-- still 0), read it as a normal range, and clobber the pin before it finished
-	-- landing. By the next resumption point both writes are in.
+	--[[ The game does not leave this property alone, so one write on enable will not hold:
+	the zipline handler sets 20 and then hard-restores 14, aiming down a scope sets
+	6.5 and restores whatever it captured, and assorted menu/spectate paths write
+	30/40/100. Re-apply whenever it moves out from under us.
+
+	Except while the game is PINNING the camera -- aiming and ziplining both set min
+	and max to the same value to lock the distance to one number. Fighting those
+	breaks the scope and the zipline ride, and there is nothing to fix afterwards:
+	both end by restoring a normal min < max, which is the edge that puts our value
+	back.
+
+	Deferred rather than handled inline because those paths write max and min as two
+	separate statements. Inline we would see the half-applied state (max = 20, min
+	still 0), read it as a normal range, and clobber the pin before it finished
+	landing. By the next resumption point both writes are in. ]]
 	local pending = false
 
 	local function applyZoom()
 		pending = false
 		if not (ZoomUnlocker and ZoomUnlocker.Enabled) then return end
 		if lplr.CameraMinZoomDistance >= lplr.CameraMaxZoomDistance then return end
-		-- Guarded so our own write doesn't re-enter through the changed signal below.
+		--[[ Guarded so our own write doesn't re-enter through the changed signal below. ]]
 		if lplr.CameraMaxZoomDistance ~= MaxZoom.Value then
 			lplr.CameraMaxZoomDistance = MaxZoom.Value
 		end
@@ -8371,9 +8385,9 @@ run(function()
 					zoomConn = nil
 				end
 				pending = false
-				-- Back to the place default rather than whatever was there when the
-				-- module went on: enabling mid-scope would otherwise capture 6.5 and
-				-- restore that as if it were normal.
+				--[[ Restore the place default, not the value present when the module was
+				enabled: enabling mid-scope would otherwise capture 6.5 and restore it as
+				the normal value. ]]
 				lplr.CameraMaxZoomDistance = defaultMaxZoom()
 			end
 		end,

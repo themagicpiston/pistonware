@@ -1,17 +1,17 @@
--- The loader is the only supported entry point: it runs the LuaArmor key gate and publishes
--- script_key (which the protected bedwars.lua reads) before any of this downloads or executes.
--- main.lua is re-run directly in two places -- the queued teleport script below, and the GUI's
--- reinject buttons -- and both re-establish that state first, so reaching here without it means
--- the gate was skipped. Checked before the uninject below, so a failed check cannot tear down a
--- working instance on its way out.
+--[[ The loader is the only supported entry point: it runs the LuaArmor key gate and publishes
+script_key (which the protected bedwars.lua reads) before any of this downloads or executes.
+main.lua is re-run directly in two places -- the queued teleport script below, and the GUI's
+reinject buttons -- and both re-establish that state first, so reaching here without it means
+the gate was skipped. Checked before the uninject below, so a failed check cannot tear down a
+working instance on its way out. ]]
 if not shared.PistonwareAuthenticated then
 	warn('[pistonware] not authenticated -- run the pistonware loader and enter your key')
 	return
 end
 
--- pcall'd: after a teleport shared.vape can still point at the previous server's instance,
--- whose GUI and connections no longer exist. An error walking that corpse would abort main.lua
--- on line one and leave the queued re-injection doing nothing at all.
+--[[ pcall'd: after a teleport shared.vape can still point at the previous server's instance,
+whose GUI and connections no longer exist. An error walking that corpse would abort main.lua
+on line one and leave the queued re-injection doing nothing at all. ]]
 if shared.vape then pcall(function() shared.vape:Uninject() end) end
 
 local vape
@@ -21,6 +21,10 @@ local loadstring = function(...)
 		vape:CreateNotification('Pistonware', 'Failed to load : '..err, 30, 'alert')
 	end
 	return res
+end
+local function runChunk(source, name)
+	local chunk = loadstring(source, name)
+	return chunk and chunk()
 end
 local queue_on_teleport = queue_on_teleport or syn and syn.queue_on_teleport
 local hasQueueOnTeleport = queue_on_teleport ~= nil
@@ -36,17 +40,23 @@ local cloneref = cloneref or function(obj)
 end
 local playersService = cloneref(game:GetService('Players'))
 
--- Telemetry the developer build prints and the public build does not.
---
--- Module counts and load timings are what you want in front of you while working on the loader,
--- and noise in a paying user's console -- they are yellow, they say [pistonware], and they turn
--- up at exactly the moment the script starts working, so they read as something having gone
--- wrong. Real failures still use warn() directly and are unaffected.
---
--- Gated at runtime rather than at build time because main.lua is one file serving both builds.
--- PUBLIC_BUILD nulls shared.PistonwareDeveloper and locks it behind a metatable, so this is off
--- for everyone except the developer build by construction -- and the queued teleport script
--- carries the flag across, so it stays on for a developer through a match join.
+--[[ Phones and tablets. Kept for the teleport path and notifications; it no longer paces saves. ]]
+local isTouchDevice = false
+pcall(function()
+	isTouchDevice = cloneref(game:GetService('UserInputService')).TouchEnabled and true or false
+end)
+
+--[[ Telemetry the developer build prints and the public build does not.
+
+Module counts and load timings are what you want in front of you while working on the loader,
+and noise in a paying user's console -- they are yellow, they say [pistonware], and they turn
+up at exactly the moment the script starts working, so they read as something having gone
+wrong. Real failures still use warn() directly and are unaffected.
+
+Gated at runtime rather than at build time because main.lua is one file serving both builds.
+PUBLIC_BUILD nulls shared.PistonwareDeveloper and locks it behind a metatable, so this is off
+for everyone except the developer build by construction -- and the queued teleport script
+carries the flag across, so it stays on for a developer through a match join. ]]
 local function debugWarn(...)
 	if shared.PistonwareDeveloper then
 		warn(...)
@@ -113,31 +123,36 @@ end
 
 stage('main.lua running')
 
--- isfile is not the question. A zero-byte file reads back as PRESENT through every executor's
--- real isfile, and only the fallback above treats empty as absent -- so on executors that ship
--- one (most of them), an interrupted write leaves a truncated file that nothing ever repairs.
---
--- That is not hypothetical: cancelling, crashing or teleporting mid-download leaves a
--- half-written file, and from then on every cache-first route skips it forever. For a .lua file
--- that means a chunk that never loads. Every route that could have fixed it asked isfile and was
--- told the file was fine, which is why the only known remedy was reinstalling the whole script.
---
--- Treating empty as missing makes it repair itself on the next run instead.
+--[[ `isfile` alone is insufficient. A zero-byte file reads back as PRESENT through every executor's
+real isfile, and only the fallback above treats empty as absent -- so on executors that ship
+one (most of them), an interrupted write leaves a truncated file that nothing ever repairs.
+
+That is not hypothetical: cancelling, crashing or teleporting mid-download leaves a
+half-written file, and from then on every cache-first route skips it forever. For a .lua file
+that means a chunk that never loads. Every route that could have fixed it asked isfile and was
+told the file was fine, which is why the only known remedy was reinstalling the whole script.
+
+Treating empty as missing makes it repair itself on the next run instead. ]]
 local function hasContent(path)
 	if not isfile(path) then return false end
 	local ok, body = pcall(readfile, path)
-	return ok and type(body) == 'string' and body ~= ''
+	if not ok or type(body) ~= 'string' or body == '' then return false end
+	if path:match('%.lua$') then
+		local compileOk, chunk = pcall(loadstring, body, path)
+		return compileOk and type(chunk) == 'function'
+	end
+	return true
 end
 
 local function downloadFile(path, func)
 	if not hasContent(path) then
-		-- bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
-		-- repo's ROOT even though it caches locally under games/; everything else lives in the
-		-- GitHub repo.
+		--[[ bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
+		repo's ROOT even though it caches locally under games/; everything else lives in the
+		GitHub repo. ]]
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local isBedwars = relPath == 'games/bedwars.lua'
-		-- Retried a few times: raw file hosts intermittently fail, returning an empty body that
-		-- would otherwise get cached as a corrupt/empty file.
+		--[[ Retried a few times: raw file hosts intermittently fail, returning an empty body that
+		would otherwise get cached as a corrupt/empty file. ]]
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
@@ -146,9 +161,7 @@ local function downloadFile(path, func)
 				end
 				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
 			end)
-			-- For .lua files, a compile check too: an outage can hand back the 503/error page
-			-- as the body, and caching that would poison the install silently (cache-first
-			-- means it would never be refetched).
+			--[[ For .lua files, compile-check downloads so an outage page is not cached. ]]
 			if suc and res and res ~= '' and res ~= '404: Not Found' and (not path:find('%.lua$') or loadstring(res) ~= nil) then
 				content = res
 				break
@@ -168,35 +181,25 @@ local function downloadFile(path, func)
 	return (func or readfile)(path)
 end
 
--- The repo-folder listing and the concurrent prefetch that used to live here are gone.
---
--- Both existed for one reason: to get pistonware/assets/new onto disk before the GUI started
--- reading it. The GUI resolves its icons to uploaded rbxassetids now and never opens those
--- files, so the prefetch was downloading 105 files nothing would read, and the listing spent a
--- GitHub API call (60/hour, shared per IP, and mobile carriers put thousands of users behind
--- one) to find out what they were. The handful of paths that still have no uploaded id are
--- fetched lazily by the GUI, and only if a module that draws one is ever built.
+--[[ The repo-folder listing and concurrent prefetch are gone. Icons use uploaded IDs; remaining
+assets load lazily when a module needs them. ]]
 
--- False while a game script is still registering its modules on its own thread. A fast game
--- script sets this back to true before runGameScript even returns, so the common path never
--- observes it as false. finishLoading needs it because two of the things it starts are unsafe
--- until every module exists: saving, and the profile it applies.
+--[[ False while a game script registers modules. finishLoading uses this because saving and
+profile application must wait for the module set. ]]
 local gameScriptFinished = true
 
--- Set once the profile has been applied. Only the teleport handler reads it now, to decide
--- whether a final save on the way out would be writing something real or writing defaults over
--- a config that was never loaded.
+--[[ Set after the profile is applied; teleport saves are allowed only then. ]]
 local profileApplied = false
 
 local function finishLoading()
 	vape.Init = nil
-	-- shared.VapeCustomProfile is a ONE-SHOT hint for the load that immediately follows
-	-- (set by the loader's first-run config chooser, or by the teleport handler below).
-	-- Capture and clear it up front: getgenv()/shared persists across a reinject, so a
-	-- value left over from an earlier teleport would keep forcing that old profile and
-	-- override the config you actually switched to -- that stale value was the reinject
-	-- 'loads the wrong config' bug. Cleared here, a plain reinject always falls through to
-	-- the profile saved in gui.txt (i.e. whatever you last switched to).
+	--[[ shared.VapeCustomProfile is a ONE-SHOT hint for the load that immediately follows
+	(set by the loader's first-run config chooser, or by the teleport handler below).
+	Capture and clear it up front: getgenv()/shared persists across a reinject, so a
+	value left over from an earlier teleport would keep forcing that old profile and
+	override the config you actually switched to -- that stale value was the reinject
+	'loads the wrong config' bug. Cleared here, a plain reinject always falls through to
+	the profile saved in gui.txt (i.e. whatever you last switched to). ]]
 	local customProfile = shared.VapeCustomProfile
 	shared.VapeCustomProfile = nil
 	if customProfile == '' then customProfile = nil end
@@ -221,11 +224,11 @@ local function finishLoading()
 		the ones that arrived after the load, so it cannot revert anything changed by hand.
 	]]
 	local function applyProfile(moduleSetComplete)
-		-- A session LuaArmor refused registered no game modules at all (see the session
-		-- block at the top of bedwars.lua). Loading a profile against that empty set would
-		-- bring everything up on defaults, and the Save below would write those defaults
-		-- back -- deleting the user's real config. Withholding the modules is the intended
-		-- consequence of a refusal; deleting configs is not, so do neither here.
+		--[[ A LuaArmor session that was refused registers no game modules (see the session
+		block at the top of bedwars.lua). Loading a profile against that empty set would
+		bring everything up on defaults, and the Save below would write those defaults
+		back -- deleting the user's real config. Withholding the modules is the intended
+		consequence of a refusal; deleting configs is not, so do neither here. ]]
 		if shared.PistonwareSessionRejected then
 			warn('[pistonware] session was not authorised -- leaving profiles untouched')
 			return
@@ -281,26 +284,26 @@ local function finishLoading()
 		end
 	end
 
-	-- Waits until the game script has finished registering its modules, because the profile can
-	-- only be applied to modules that exist.
-	--
-	-- There are exactly two ways that finish is observable, and no third:
-	--   * an ordinary game script RETURNS, which sets gameScriptFinished
-	--   * BedWars pulls in a LuaArmor-protected payload which never returns (the VM keeps the
-	--     thread it was invoked on), so bedwars.lua sets shared.PistonwareBedwarsLoaded as its
-	--     final statement
-	--
-	-- An earlier version tried to infer completion by watching the module count go quiet. It
-	-- does not work, and cannot be made to: the first seconds of downloadBedwars() are pure
-	-- network, so nothing registers, and "nothing registering" is indistinguishable from
-	-- "finished". It declared victory at 4s -- before the payload had started -- and every
-	-- module that appeared afterwards was left on defaults. Guessing is worse than waiting.
-	--
-	-- The timeout is a backstop, not a mechanism. It only matters when the payload on LuaArmor
-	-- predates the completion flag; re-upload bedwars.lua and this returns the moment it lands.
-	-- Returns whether the module list is actually COMPLETE, which is not the same as whether
-	-- the wait finished. Hitting the backstop means the payload is still registering, and the
-	-- caller has to know that before it writes anything to disk.
+	--[[ Waits until the game script has finished registering its modules, because the profile can
+	only be applied to modules that exist.
+
+	There are exactly two ways that finish is observable, and no third:
+	  * an ordinary game script RETURNS, which sets gameScriptFinished
+	  * BedWars pulls in a LuaArmor-protected payload which never returns (the VM keeps the
+	    thread it was invoked on), so bedwars.lua sets shared.PistonwareBedwarsLoaded as its
+	    final statement
+
+	An earlier version tried to infer completion by watching the module count go quiet. It
+	does not work, and cannot be made to: the first seconds of downloadBedwars() are pure
+	network, so nothing registers, and "nothing registering" is indistinguishable from
+	"finished". It declared victory at 4s -- before the payload had started -- and every
+	module that appeared afterwards was left on defaults. Guessing is worse than waiting.
+
+	The timeout is a backstop, not a mechanism. It only matters when the payload on LuaArmor
+	predates the completion flag; re-upload bedwars.lua and this returns the moment it lands.
+	Returns whether the module list is actually COMPLETE, which is not the same as whether
+	the wait finished. Hitting the backstop means the payload is still registering, and the
+	caller has to know that before it writes anything to disk. ]]
 	local function waitForModules()
 		if gameScriptFinished then return true end
 		local started = os.clock()
@@ -310,7 +313,8 @@ local function finishLoading()
 			or shared.PistonwareBedwarsLoaded
 			or os.clock() - started > 120
 		local complete = (gameScriptFinished or shared.PistonwareBedwarsLoaded) and true or false
-		-- vape.ModuleCount, not a walk: on the timeout path the payload is still registering.
+		--[[ Same reason as the settle-watcher below: on the timeout path the payload is still
+		inserting, so this must not walk vape.Modules to count them. ]]
 		local count = vape.ModuleCount or 0
 		local how = shared.PistonwareBedwarsLoaded and 'payload signalled'
 			or gameScriptFinished and 'game script returned'
@@ -329,31 +333,33 @@ local function finishLoading()
 
 	local teleportedServers
 	vape:Clean(playersService.LocalPlayer.OnTeleport:Connect(function(teleportState)
-		-- A failed teleport is ignored rather than consumed. OnTeleport fires for EVERY state
-		-- and the one-shot guard below does not look at which -- so an attempt that failed used
-		-- to burn it, and the teleport that actually went somewhere afterwards queued nothing.
+		--[[ A failed teleport is ignored rather than consumed. OnTeleport fires for EVERY state
+		and the one-shot guard below does not look at which -- so an attempt that failed used
+		to burn it, and the teleport that actually went somewhere afterwards queued nothing. ]]
 		if teleportState == Enum.TeleportState.Failed then return end
 		if (not teleportedServers) and (not shared.VapeIndependent) then
 			teleportedServers = true
-			-- Re-runs main.lua, not the loader. The loader is a full boot -- duplicate-run
-			-- guard, GitHub API calls for the update check, the console window, the config
-			-- prompt -- and any one of those bailing on the new server leaves the script
-			-- uninjected. main.lua only needs the files the loader already cached, so it
-			-- comes back reliably; the loader still runs on a manual execute.
-			local teleportScript = [[
-				shared.vapereload = true
-				local cached = isfile and isfile('pistonware/main.lua') and readfile('pistonware/main.lua')
-				if cached and cached ~= '' then
-					loadstring(cached, 'main')()
-				else
-					loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/main.lua', true), 'main')()
-				end
-			]]
-			-- Globals and shared do not survive a teleport, and the new server re-runs main.lua
-			-- directly rather than the loader -- so the key gate's output has to be re-published
-			-- by hand here. Without it the guard at the top of this file would reject the
-			-- re-injection, and bedwars.lua would be handed to loadstring with no script_key.
-			-- %q so a key containing a quote or backslash still produces a valid chunk.
+			--[[ Re-runs main.lua, not the loader. The loader is a full boot -- duplicate-run
+			guard, GitHub API calls for the update check, the console window, the config
+			prompt -- and any one of those bailing on the new server leaves the script
+			uninjected. main.lua only needs the files the loader already cached, so it
+			comes back reliably; the loader still runs on a manual execute. ]]
+				local teleportScript = [[
+					shared.vapereload = true
+					local cached = isfile and isfile('pistonware/main.lua') and readfile('pistonware/main.lua')
+					if cached and cached ~= '' then
+						local chunk = loadstring(cached, 'main')
+						if chunk then chunk() end
+					else
+						local chunk = loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/main.lua', true), 'main')
+						if chunk then chunk() end
+					end
+				]]
+			--[[ Globals and shared do not survive a teleport, and the new server re-runs main.lua
+			directly rather than the loader -- so the key gate's output has to be re-published
+			by hand here. Without it the guard at the top of this file would reject the
+			re-injection, and bedwars.lua would be handed to loadstring with no script_key.
+			%q so a key containing a quote or backslash still produces a valid chunk. ]]
 			if shared.PistonwareKey then
 				local quoted = string.format('%q', shared.PistonwareKey)
 				teleportScript = 'script_key = '..quoted..'\nshared.PistonwareKey = '..quoted..'\nshared.PistonwareAuthenticated = true\n'..teleportScript
@@ -364,9 +370,8 @@ local function finishLoading()
 			if shared.VapeSmoothBoot then
 				teleportScript = 'shared.VapeSmoothBoot = true\n'..teleportScript
 			end
-			-- getgenv() and shared are both wiped by a teleport, so a flag set in the lobby would
-			-- be gone in the match -- which is the only place worth tracing, and where profile
-			-- switches actually happen.
+			--[[ getgenv() and shared are wiped by a teleport; carry tracing and the optional yield
+			budget into the match. ]]
 			if traceOn then
 				teleportScript = 'shared.PistonwareTrace = true\n'..teleportScript
 			end
@@ -377,13 +382,8 @@ local function finishLoading()
 					teleportScript = 'shared.PistonwareYieldBudget = '..budget..'\n'..teleportScript
 				end
 			end
-			-- %q, matching the key above: profile names are user-supplied (the Profiles tab lets
-			-- you name one anything), and a name containing a quote or backslash used to produce
-			-- a chunk that would not compile -- which silently costs the whole re-injection, not
-			-- just the profile.
-			-- customProfile is the fallback rather than shared.VapeCustomProfile (cleared above):
-			-- queueing before the payload has finished means vape.Profile is not set yet, and
-			-- without this the next server would be told to load 'default'.
+			--[[ customProfile is the fallback while the payload is still registering and vape.Profile
+			may not be set yet. ]]
 			teleportScript = 'shared.VapeCustomProfile = '..string.format('%q', vape.Profile or customProfile or 'default')..'\n'..teleportScript
 			--[[
 				Queue FIRST, and guard everything after it.
@@ -400,8 +400,7 @@ local function finishLoading()
 				    the script silently failed to come back on the new server. A failure to save
 				    became a failure to re-inject.
 
-				Queueing first makes the re-injection independent of everything that follows.
-				Nothing below can cost you the script any more.
+				Queueing first ensures that later save failures do not prevent re-injection.
 			]]
 			pcall(queue_on_teleport, teleportScript)
 
@@ -411,11 +410,11 @@ local function finishLoading()
 				end)
 			end
 
-			-- Best effort, and last. Same rule as everywhere else: saving before the profile has
-			-- been applied against the full module set would write one missing every module still
-			-- to appear. Queueing straight into a match is exactly when that happens, so skip the
-			-- save rather than corrupt the config -- what is on disk is already correct, there is
-			-- simply nothing new worth recording yet.
+			--[[ Best effort, and last. Same rule as everywhere else: saving before the profile has
+			been applied against the full module set would write one missing every module still
+			to appear. Queueing straight into a match is exactly when that happens, so skip the
+			save rather than corrupt the config -- what is on disk is already correct, there is
+			simply nothing new worth recording yet. ]]
 			if profileApplied then
 				pcall(function() vape:Save() end)
 			end
@@ -428,11 +427,11 @@ local function finishLoading()
 	end
 
 	if not shared.vapereload then
-		-- Cosmetic, and entirely inside a pcall, because the rewrite moved every field it reads.
-		-- 'GUI bind indicator' left Categories.Main.Options for Settings.GUI.Options, the keybind
-		-- list became GUIBind.Keys instead of a flat vape.Keybind, and vape.VapeButton no longer
-		-- exists at all. A finished-loading toast is not worth risking finishLoading over if any
-		-- of that moves again.
+		--[[ Cosmetic, and entirely inside a pcall, because the rewrite moved every field it reads.
+		'GUI bind indicator' left Categories.Main.Options for Settings.GUI.Options, the keybind
+		list became GUIBind.Keys instead of a flat vape.Keybind, and vape.VapeButton no longer
+		exists at all. A finished-loading toast is not worth risking finishLoading over if any
+		of that moves again. ]]
 		pcall(function()
 			if not vape.Categories then return end
 			local indicator = vape.Settings and vape.Settings.GUI and vape.Settings.GUI.Options['GUI bind indicator']
@@ -460,8 +459,8 @@ end
 	local GUI_FILE = 'newgui'
 	local ASSET_FOLDER = 'new'
 
-	-- Still written, so anything else reading gui.txt sees something current rather than a
-	-- stale 'rise'/'old' left over from before those were removed.
+	--[[ Still written, so anything else reading gui.txt sees something current rather than a
+	stale 'rise'/'old' left over from before those were removed. ]]
 	pcall(function() writefile('pistonware/profiles/gui.txt', GUI_FILE) end)
 
 	--[[
@@ -473,7 +472,7 @@ end
 		and the desktop GUI then read each of those files back twice per icon.
 
 		A few paths that only game modules ask for still have no uploaded id, so the GUI keeps a
-		lazy fallback for exactly those: downloaded the first time a module that draws one is
+		lazy fallback for exactly those: it downloads them the first time a module that draws one is
 		built, not here, and not for anyone who never opens it. Prefetching 105 files to serve
 		five of them was the expensive way round.
 
@@ -483,75 +482,80 @@ end
 		makefolder('pistonware/assets/'..ASSET_FOLDER)
 	end
 	stage('downloading gui')
-	vape = loadstring(downloadFile('pistonware/guis/'..GUI_FILE..'.lua'), 'gui')()
+	vape = runChunk(downloadFile('pistonware/guis/'..GUI_FILE..'.lua'), 'gui')
 	stage('gui chunk returned')
+	if not vape then return end
 	shared.vape = vape
 
 if not shared.VapeIndependent then
-	-- downloading doesn't need the game loaded; only wait here, right before touching game/character state
+	--[[ downloading doesn't need the game loaded; only wait here, right before touching game/character state ]]
 	if not game:IsLoaded() then
-		-- Deadline, matching every equivalent wait in the loader. Unbounded, a place that never
-		-- reports loaded parks this thread forever AFTER the GUI has already been built above --
-		-- so the menu opens, no game modules ever register, and nothing says why.
+		--[[ Deadline, matching every equivalent wait in the loader. Unbounded, a place that never
+		reports loaded parks this thread forever AFTER the GUI has already been built above --
+		so the menu opens, no game modules ever register, and nothing says why. ]]
 		local loadDeadline = os.clock() + 120
 		repeat task.wait() until game:IsLoaded() or os.clock() > loadDeadline
-		-- identifyexecutor is absent on some executors (common on mobile); calling it
-		-- unguarded errors here and aborts everything below, including the game script.
+		--[[ identifyexecutor is absent on some executors (common on mobile); calling it
+		unguarded errors here and aborts everything below, including the game script. ]]
 		local executorName = ''
 		pcall(function() executorName = identifyexecutor and identifyexecutor() or '' end)
 		task.wait(executorName == 'Opiumware' and 30 or 5)
 	end
-	-- pcall'd: an error thrown while universal.lua *executes* would otherwise propagate out of
-	-- main.lua entirely, skipping the game script below and finishLoading() with it.
+	--[[ pcall'd: an error thrown while universal.lua executes would otherwise propagate out of
+	main.lua entirely, skipping the game script below and finishLoading() with it. ]]
 	stage('universal.lua start')
 	pcall(function()
-		loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
+		runChunk(downloadFile('pistonware/games/universal.lua'), 'universal')
 	end)
 	stage('universal.lua done')
 
-	-- Started, never waited on. There is no deadline here by design: a deadline would only be a
-	-- guess at how long the payload needs, and whatever number it held would become the time
-	-- your profile takes to load. Nothing below depends on this having finished -- finishLoading
-	-- applies your profile to the modules that exist now, and re-applies it the moment the rest
-	-- register (see finishLoading).
-	--
-	-- This costs nothing for a normal game script: task.spawn runs the function inline until it
-	-- yields, so anything that registers its modules without yielding -- which is every game
-	-- file except BedWars -- has already set gameScriptFinished before we get past this line,
-	-- and finishLoading takes the single-pass path exactly as it always did.
-	--
-	-- BedWars is the exception. bedwars.lua is 425KB interpreted by a LuaArmor VM and takes
-	-- ~30s, and none of its modules can exist until it finishes -- that part is not fixable from
-	-- here. What it must not do is hold up the GUI, the universal modules and your config, none
-	-- of which have anything to do with it.
-	--
-	-- Varargs are packed because '...' is only valid directly in this chunk, never inside the
-	-- nested function the spawn needs.
+	--[[ Started, never waited on. There is no deadline here by design: a deadline would only be a
+	guess at how long the payload needs, and whatever number it held would become the time
+	your profile takes to load. Nothing below depends on this having finished -- finishLoading
+	applies your profile to the modules that exist now, and re-applies it the moment the rest
+	register (see finishLoading).
+
+	This costs nothing for a normal game script: task.spawn runs the function inline until it
+	yields, so anything that registers its modules without yielding -- which is every game
+	file except BedWars -- has already set gameScriptFinished before we get past this line,
+	and finishLoading takes the single-pass path exactly as it always did.
+
+	BedWars is the exception. bedwars.lua is 425KB interpreted by a LuaArmor VM and takes
+	~30s, and none of its modules can exist until it finishes -- that part is not fixable from
+	here. What it must not do is hold up the GUI, the universal modules and your config, none
+	of which have anything to do with it.
+
+	Varargs are packed because '...' is only valid directly in this chunk, never inside the
+	nested function the spawn needs. ]]
 	local gameArgs = table.pack(...)
 	local function runGameScript(source, chunkname)
-		local fn = loadstring(source, chunkname)
-		if not fn then return end
+		local fn, compileError = loadstring(source, chunkname)
+		if not fn then
+			gameScriptFinished = true
+			warn('[pistonware] '..chunkname..' did not compile: '..tostring(compileError))
+			return false
+		end
 		gameScriptFinished = false
-		-- Cleared per run, not just per session: shared survives a reinject, and a leftover true
-		-- from the previous injection would tell waitForModules the payload had already finished
-		-- before it had even started re-registering.
+		--[[ Cleared per run, not just per session: shared survives a reinject, and a leftover true
+		from the previous injection would tell waitForModules the payload had already finished
+		before it had even started re-registering. ]]
 		shared.PistonwareBedwarsLoaded = nil
-		-- Same reasoning for the refusal flag: bedwars.lua sets it from a fresh verdict every
-		-- run, but a game script that never sets it at all (the lobby) would otherwise inherit
-		-- a true left behind by a revoked BedWars session and refuse to save profiles there.
+		--[[ Same reasoning for the refusal flag: bedwars.lua sets it from a fresh verdict every
+		run, but a game script that never sets it at all (the lobby) would otherwise inherit
+		a true left behind by a revoked BedWars session and refuse to save profiles there. ]]
 		shared.PistonwareSessionRejected = nil
 
-		-- Re-publish the key immediately before the game script runs. LuaArmor blanks the global
-		-- script_key once it has authenticated, so it is single-use per session and any later
-		-- load finds nothing -- which is not a soft failure, it kicks the player.
-		--
-		-- games/6872274481.lua does this too, closer to the payload, but that file is CACHED:
-		-- anyone still holding a copy from before it gained that call would never get it. This
-		-- file is the one that is reliably current, so the safety net belongs here as well.
-		--
-		-- Written to all three tables because executors disagree on what a loadstring'd chunk's
-		-- environment is -- on several mobile executors a bare global, getgenv() and _G are
-		-- genuinely different tables, and the payload only reads one of them.
+		--[[ Re-publish the key immediately before the game script runs. LuaArmor blanks the global
+		script_key once it has authenticated, so it is single-use per session and any later
+		load finds nothing -- which is not a soft failure, it kicks the player.
+
+		games/6872274481.lua does this too, closer to the payload, but that file is CACHED:
+		anyone still holding a copy from before it gained that call would never get it. This
+		file is the one that is reliably current, so the safety net belongs here as well.
+
+		Written to all three tables because executors disagree on what a loadstring'd chunk's
+		environment is -- on several mobile executors a bare global, getgenv() and _G are
+		genuinely different tables, and the payload only reads one of them. ]]
 		if type(shared.PistonwareKey) == 'string' and shared.PistonwareKey ~= '' then
 			local key = shared.PistonwareKey
 			script_key = key
@@ -563,9 +567,9 @@ if not shared.VapeIndependent then
 		task.spawn(function()
 			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
 			gameScriptFinished = true
-			-- Only for a payload slow enough that the split-load path actually engaged; a normal
-			-- game script never trips it. Keeps the real cost of protecting bedwars.lua visible
-			-- instead of guessed at.
+			--[[ Only for a payload slow enough that the split-load path actually engaged; a normal
+			game script never trips it. Keeps the real cost of protecting bedwars.lua visible
+			instead of guessed at. ]]
 			local elapsed = os.clock() - started
 			if elapsed > 5 then
 				debugWarn(('[pistonware] %s finished in %.1fs -- its modules now have their saved settings'):format(chunkname, elapsed))
@@ -574,25 +578,28 @@ if not shared.VapeIndependent then
 				warn('[pistonware] '..chunkname..' errored: '..tostring(err))
 			end
 		end)
+		return true
 	end
 
 	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
-	-- A cached-but-empty file is treated as missing and refetched: a truncated write from an
-	-- earlier failed download reads back as "present", and loadstring('') silently does
-	-- nothing -- indistinguishable from the game script never loading at all.
-	local cached = isfile(gamePath) and readfile(gamePath) or nil
+	--[[ A cached-but-empty file is treated as missing and refetched: a truncated write from an
+	earlier failed download reads back as "present", and loadstring('') silently does
+	nothing -- indistinguishable from the game script never loading at all. ]]
+	local gameScriptStarted = false
+	local cached = hasContent(gamePath) and readfile(gamePath) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
-		runGameScript(cached, tostring(game.PlaceId))
-	elseif not shared.PistonwareDeveloper then
-		-- Single fetch (the old code requested this URL twice: once to probe, then again
-		-- inside downloadFile) and load straight from the response, so a stale/corrupt
-		-- cache file can't shadow what we just downloaded.
+		gameScriptStarted = runGameScript(cached, tostring(game.PlaceId))
+	end
+	if not gameScriptStarted and not shared.PistonwareDeveloper then
+		--[[ Single fetch (the old code requested this URL twice: once to probe, then again
+		inside downloadFile) and load straight from the response, so a stale/corrupt
+		cache file can't shadow what we just downloaded. ]]
 		local suc, res = pcall(function()
 			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/games/'..game.PlaceId..'.lua', true)
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
-			runGameScript(res, tostring(game.PlaceId))
+			gameScriptStarted = runGameScript(res, tostring(game.PlaceId))
 		end
 	end
 	finishLoading()

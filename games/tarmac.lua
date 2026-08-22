@@ -1,7 +1,7 @@
--- tarmac.lua - block icon/side asset ids, keyed by block name.
--- BedWars removed its in-game `require(replicatedStorage.TS.tarmac).blocks` table, so the
--- data it used to expose is shipped here directly. The Scaffold "Block Count" widget looks
--- up ["icon"] for each block; ["s"]/["td"]/etc. are the other faces, kept for completeness.
+--[[ tarmac.lua - block icon/side asset ids, keyed by block name.
+BedWars removed its in-game `require(replicatedStorage.TS.tarmac).blocks` table, so the
+data it used to expose is shipped here directly. The Scaffold "Block Count" widget looks
+up ["icon"] for each block; ["s"]/["td"]/etc. are the other faces, kept for completeness. ]]
 return {
 	["andesite"] = {
 		["icon"] = "rbxassetid://9072552631",
