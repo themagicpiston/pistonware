@@ -925,6 +925,13 @@ function namecallGuard.unwatch(inst, method)
     end
 end
 
+function namecallGuard.unwatchIf(inst, method, handler)
+    local entry = inst and namecallWatch[inst]
+    if not entry or entry[method] ~= handler then return false end
+    namecallGuard.unwatch(inst, method)
+    return true
+end
+
 local getnamecallmethod = getnamecallmethod
 local mt = getrawmetatable(game)
 setreadonly(mt, false)
@@ -944,9 +951,13 @@ setreadonly(mt, false)
 	first injection of this session. Later injections replace the live hook instead of stacking
 	on it, and the chain stays one deep however many times the script is reloaded.
 ]]
-local oldNamecall = shared.PistonwareOldNamecall or mt.__namecall
+local previousNamecallHook = shared.PistonwareNamecallHook
+local oldNamecall = mt.__namecall
+if previousNamecallHook and oldNamecall == previousNamecallHook and shared.PistonwareOldNamecall then
+    oldNamecall = shared.PistonwareOldNamecall
+end
 shared.PistonwareOldNamecall = oldNamecall
-mt.__namecall = function(self, ...)
+local namecallHook = function(self, ...)
     local method = getnamecallmethod()
     if method == "GetPrimaryPartCFrame" and self and self:IsA("Model") then
         local pp = self.PrimaryPart
@@ -1006,9 +1017,517 @@ mt.__namecall = function(self, ...)
     end
     return oldNamecall(self, ...)
 end
+mt.__namecall = namecallHook
+shared.PistonwareNamecallHook = namecallHook
 setreadonly(mt, true)
 
+vape:Clean(function()
+    table.clear(namecallWatch)
+    if mt.__namecall == namecallHook then
+        setreadonly(mt, false)
+        mt.__namecall = oldNamecall
+        setreadonly(mt, true)
+    end
+    if shared.PistonwareNamecallHook == namecallHook then
+        shared.PistonwareNamecallHook = nil
+    end
+    if shared.PistonwareOldNamecall == oldNamecall then
+        shared.PistonwareOldNamecall = nil
+    end
+end)
+
 local blankFunction = function(...) return ... end
+
+local fpsHooks = {}
+do
+    local scopes = {}
+
+    local function removeScope(scope)
+        for i = #scopes, 1, -1 do
+            if scopes[i] == scope then
+                table.remove(scopes, i)
+                return
+            end
+        end
+    end
+
+    local function newScope()
+        local scope = {
+            active = true,
+            connections = {},
+            watches = {},
+            patches = {},
+            properties = {},
+            finalizers = {},
+            restoreProperties = true
+        }
+
+        function scope:isActive()
+            return self.active
+        end
+
+        function scope:connect(connection)
+            if not self.active then
+                pcall(function() connection:Disconnect() end)
+                return connection
+            end
+            table.insert(self.connections, connection)
+            return connection
+        end
+
+        function scope:watch(instance, method, handler)
+            if not self.active then return false end
+            local previous = namecallWatch[instance] and namecallWatch[instance][method]
+            if not namecallGuard.watch(instance, method, handler) then return false end
+            table.insert(self.watches, {
+                instance = instance,
+                method = method,
+                handler = handler,
+                previous = previous
+            })
+            return true
+        end
+
+        function scope:patchFunction(target, key, replacement)
+            if not self.active or type(target) ~= 'table' or type(replacement) ~= 'function' then
+                return false
+            end
+            local hadOwnValue = rawget(target, key) ~= nil
+            local original = target[key]
+            if type(original) ~= 'function' then return false end
+            local ok = pcall(function()
+                target[key] = replacement
+            end)
+            if not ok then return false end
+            table.insert(self.patches, {
+                target = target,
+                key = key,
+                original = original,
+                hadOwnValue = hadOwnValue,
+                replacement = replacement
+            })
+            return true
+        end
+
+        function scope:remember(instance, property)
+            if not self.active or not instance then return false end
+            local record = self.properties[instance]
+            if not record then
+                record = {values = {}, seen = {}}
+                self.properties[instance] = record
+            end
+            if record.seen[property] then return true end
+            local ok, value = pcall(function()
+                return instance[property]
+            end)
+            if not ok then return false end
+            record.seen[property] = true
+            record.values[property] = value
+            return true
+        end
+
+        function scope:set(instance, property, value)
+            if self.restoreProperties and not self:remember(instance, property) then return false end
+            return pcall(function()
+                instance[property] = value
+            end)
+        end
+
+        function scope:onStop(callback)
+            if type(callback) == 'function' then
+                table.insert(self.finalizers, callback)
+            end
+        end
+
+        function scope:stop()
+            if not self.active then return end
+            self.active = false
+
+            for i = #self.connections, 1, -1 do
+                pcall(function() self.connections[i]:Disconnect() end)
+            end
+
+            for i = #self.watches, 1, -1 do
+                local watch = self.watches[i]
+                local entry = namecallWatch[watch.instance]
+                if entry and entry[watch.method] == watch.handler then
+                    if watch.previous ~= nil then
+                        entry[watch.method] = watch.previous
+                    else
+                        namecallGuard.unwatch(watch.instance, watch.method)
+                    end
+                end
+            end
+
+            for i = #self.patches, 1, -1 do
+                local patch = self.patches[i]
+                pcall(function()
+                    if patch.target[patch.key] == patch.replacement then
+                        patch.target[patch.key] = patch.hadOwnValue and patch.original or nil
+                    end
+                end)
+            end
+
+            for instance, record in next, self.properties do
+                for property, value in next, record.values do
+                    pcall(function()
+                        instance[property] = value
+                    end)
+                end
+                table.clear(record.values)
+                table.clear(record.seen)
+            end
+
+            for i = #self.finalizers, 1, -1 do
+                pcall(self.finalizers[i])
+            end
+
+            table.clear(self.connections)
+            table.clear(self.watches)
+            table.clear(self.patches)
+            table.clear(self.properties)
+            table.clear(self.finalizers)
+            removeScope(self)
+        end
+
+        table.insert(scopes, scope)
+        return scope
+    end
+
+    local function destroyChildren(container, active)
+        if not container then return 0 end
+        local removed = 0
+        local clock = os.clock()
+        for _, child in next, (container:GetChildren()) do
+            if active and not active() then break end
+            pcall(function()
+                child:Destroy()
+                removed += 1
+            end)
+            if os.clock() - clock > 0.004 then
+                task.wait()
+                clock = os.clock()
+            end
+        end
+        return removed
+    end
+
+    function fpsHooks.newScope()
+        return newScope()
+    end
+
+    function fpsHooks.disableClientApply(scope, client)
+        if not scope or not scope:isActive() or type(client) ~= 'table' then
+            return false
+        end
+        return scope:patchFunction(client, 'apply', function() end)
+    end
+
+    local cleanAssetScope
+    local cleanAssetResult
+
+    function fpsHooks.cleanAssets(options)
+        options = options or {}
+        if cleanAssetScope and cleanAssetScope:isActive() then
+            return cleanAssetResult
+        end
+
+        local scope = newScope()
+        local result = {
+            lobbyBoards = 0,
+            clientApply = false,
+            packetProfiler = false,
+            lockerPreview = 0
+        }
+
+        if options.clearLobbyBoards then
+            local lobby = workspace:FindFirstChild('Lobby')
+            local boards = lobby and lobby:FindFirstChild('Boards')
+            result.lobbyBoards = destroyChildren(boards, function() return scope:isActive() end)
+        end
+
+        if options.disableClientApply then
+            result.clientApply = fpsHooks.disableClientApply(scope, options.client)
+        end
+
+        if options.removePacketProfiler then
+            local playerScripts = lplr and lplr:FindFirstChild('PlayerScripts')
+            local profiler = playerScripts and playerScripts:FindFirstChild('packetprofiler')
+            local canRemove = true
+            local rankOk, rank = pcall(function()
+                return lplr:GetRankInGroup(5774246)
+            end)
+            if not rankOk or rank >= 121 then
+                canRemove = false
+            end
+            if profiler and canRemove then
+                pcall(function() profiler:Destroy() end)
+                result.packetProfiler = true
+            end
+        end
+
+        if options.removeLockerPreview then
+            local preview = workspace:FindFirstChild('LockerPreview')
+            for _, child in next, (workspace:GetChildren()) do
+                if child:IsA('Model') and child.Name:find('_LockerPreviewClone$')
+                    and (not preview or not child:IsDescendantOf(preview)) then
+                    pcall(function()
+                        child:Destroy()
+                        result.lockerPreview += 1
+                    end)
+                end
+            end
+        end
+
+        cleanAssetScope = scope
+        cleanAssetResult = result
+        return result
+    end
+
+    function fpsHooks.startNativeCore(options)
+        options = options or {}
+        local scope = newScope()
+        scope.restoreProperties = options.restoreProperties ~= false
+        local map = workspace:FindFirstChild('Map')
+        local camera = workspace.CurrentCamera or gameCamera
+        local canEnable = {
+            ParticleEmitter = true,
+            Smoke = true,
+            Fire = true,
+            Sparkles = true,
+            PostEffect = true,
+            SpotLight = true
+        }
+
+        local function shouldProcess(instance)
+            if not scope:isActive() then return false end
+            if camera and instance:IsDescendantOf(camera) then
+                local viewmodel = camera:FindFirstChild('Viewmodel')
+                if not (viewmodel and instance:IsDescendantOf(viewmodel)) then
+                    return false
+                end
+            end
+            local character = lplr.Character
+            if not options.cleanSelf and character and instance:IsDescendantOf(character) then
+                return false
+            end
+            if not options.cleanModels and not instance:FindFirstAncestorWhichIsA('Model') then
+                return false
+            end
+            return true
+        end
+
+        local function process(instance)
+            if not shouldProcess(instance) then return end
+            local blockCheck = options.simpleBlocks or not map or not instance:IsDescendantOf(map)
+
+            if instance:IsA('FaceInstance') and blockCheck then
+                scope:set(instance, 'Transparency', 1)
+                pcall(function() scope:set(instance, 'Shiny', 0) end)
+            end
+
+            if options.noImages and (instance:IsA('ImageLabel') or instance:IsA('ImageButton')) then
+                scope:set(instance, 'Image', 'rbxassetid://0')
+            end
+
+            if options.noAccessories and instance:IsA('Clothing') then
+                scope:set(instance, 'Parent', nil)
+            end
+
+            if instance:IsA('Explosion') then
+                scope:set(instance, 'BlastPressure', 1)
+                scope:set(instance, 'BlastRadius', 1)
+                scope:set(instance, 'Visible', false)
+            end
+
+            if instance:IsA('BasePart') then
+                if blockCheck then
+                    scope:set(instance, 'Material', Enum.Material.SmoothPlastic)
+                end
+                scope:set(instance, 'Reflectance', 0)
+                if options.beta then
+                    scope:set(instance, 'CastShadow', false)
+                end
+            end
+
+            if instance:IsA('MeshPart') or instance:IsA('Union') then
+                scope:set(instance, 'DoubleSided', false)
+            end
+
+            if instance:IsA('ParticleEmitter') then
+                scope:set(instance, 'Enabled', false)
+                scope:set(instance, 'Lifetime', NumberRange.new(0))
+            elseif canEnable[instance.ClassName] then
+                scope:set(instance, 'Enabled', false)
+            end
+        end
+
+        task.spawn(function()
+            local clock = os.clock()
+            for _, instance in next, (workspace:GetDescendants()) do
+                if not scope:isActive() then return end
+                pcall(process, instance)
+                if os.clock() - clock > 0.004 then
+                    task.wait()
+                    clock = os.clock()
+                end
+            end
+
+            if options.simpleBlocks and scope:isActive() then
+                for _, block in next, (collectionService:GetTagged('block')) do
+                    for _, child in next, (block:GetChildren()) do
+                        if child:IsA('Texture') then
+                            scope:set(child, 'Texture', 'rbxassetid://0')
+                            scope:set(child, 'Transparency', 1)
+                        end
+                    end
+                end
+            end
+
+            if options.connectWorkspace and scope:isActive() then
+                scope:connect(workspace.DescendantAdded:Connect(function(instance)
+                    if scope:isActive() then
+                        task.defer(function()
+                            pcall(process, instance)
+                        end)
+                    end
+                end))
+            end
+
+            local terrain = workspace:FindFirstChildWhichIsA('Terrain')
+            if terrain and scope:isActive() then
+                scope:set(terrain, 'WaterWaveSize', 0)
+                scope:set(terrain, 'WaterWaveSpeed', 0)
+                scope:set(terrain, 'WaterReflectance', 0)
+                scope:set(terrain, 'WaterTransparency', 0)
+            end
+
+            if options.simpleLighting and scope:isActive() then
+                scope:set(lightingService, 'GlobalShadows', false)
+                scope:set(lightingService, 'FogEnd', 9e9)
+            end
+
+            if options.beta and scope:isActive() then
+                local settingsObject
+                pcall(function()
+                    if typeof(settings) == 'Instance' then
+                        settingsObject = settings
+                    elseif type(settings) == 'function' then
+                        settingsObject = settings()
+                    end
+                end)
+                if settingsObject then
+                    local physics
+                    local rendering
+                    pcall(function() physics = settingsObject.Physics end)
+                    pcall(function() rendering = settingsObject.Rendering end)
+                    if physics then
+                        scope:set(physics, 'AllowSleep', true)
+                        scope:set(physics, 'UseCSGv2', true)
+                        scope:set(physics, 'PhysicsEnvironmentalThrottle', Enum.EnviromentalPhysicsThrottle.Skip4)
+                    end
+                    if rendering then
+                        scope:set(rendering, 'MeshPartDetailLevel', Enum.MeshPartDetailLevel.Level04)
+                        scope:set(rendering, 'ViewMode', Enum.ViewMode.GeometryComplexity)
+                        scope:set(rendering, 'ExportMergeByMaterial', true)
+                        scope:set(rendering, 'EagerBulkExecution', false)
+                    end
+                end
+            end
+
+        end)
+
+        return scope
+    end
+
+    function fpsHooks.startConnectionCleaner(disabledNames)
+        local scope = newScope()
+        local disabled = {}
+        local blocked = {}
+        for _, name in next, (disabledNames or {}) do
+            blocked[name:gsub('-', '_')] = true
+        end
+
+        scope:onStop(function()
+            for _, connection in next, disabled do
+                pcall(function() connection:Enable() end)
+            end
+            table.clear(disabled)
+        end)
+
+        task.spawn(function()
+            if type(getconnections) ~= 'function' then return end
+            for _, eventName in {'Heartbeat', 'Stepped', 'RenderStepped'} do
+                if not scope:isActive() then return end
+                local event = runService[eventName]
+                local ok, connections = pcall(getconnections, event)
+                if ok and connections then
+                    local checked = 0
+                    for _, connection in next, connections do
+                        if not scope:isActive() then return end
+                        local fn = connection.Function
+                        if type(fn) == 'function' then
+                            local source
+                            pcall(function() source = debug.getinfo(fn).source end)
+                            if type(source) == 'string' then
+                                source = source:gsub('-', '_')
+                                for name in next, blocked do
+                                    if source:find(name) then
+                                        pcall(function() connection:Disable() end)
+                                        table.insert(disabled, connection)
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                        checked += 1
+                        if checked % 50 == 0 then task.wait() end
+                    end
+                end
+            end
+        end)
+
+        return scope
+    end
+
+    function fpsHooks.startBlockDemesh(blockController, whitelist)
+        local scope = newScope()
+        whitelist = whitelist or {}
+        scope:onStop(function()
+            pcall(function() blockController:remesh() end)
+        end)
+        task.spawn(function()
+            local clock = os.clock()
+            for _, block in next, (collectionService:GetTagged('block')) do
+                if not scope:isActive() then return end
+                pcall(function()
+                    if block:GetAttribute('PlacedByUserId') == 0 and not whitelist[block.Name] then
+                        block:ClearAllChildren()
+                        block.Material = Enum.Material.SmoothPlastic
+                        block.Transparency = 0
+                        block.BrickColor = BrickColor.new(2)
+                        block.Color = Color3.new(0.3, 0.3, 0.3)
+                    end
+                end)
+                if os.clock() - clock > 0.004 then
+                    task.wait()
+                    clock = os.clock()
+                end
+            end
+            pcall(function() blockController:remesh() end)
+        end)
+        return scope
+    end
+
+    vape:Clean(function()
+        for i = #scopes, 1, -1 do
+            scopes[i]:stop()
+        end
+        table.clear(scopes)
+        cleanAssetScope = nil
+        cleanAssetResult = nil
+    end)
+end
 
 local RunLoops = {RenderStepTable = {}, StepTable = {}, HeartTable = {}}
 local vapeConnections = {}
@@ -8277,6 +8796,7 @@ shared.bedwars = {
     updateVelocity      = updateVelocity,
     _baseGetSpeed       = _baseGetSpeed,
     namecallGuard       = namecallGuard,
+    fpsHooks            = fpsHooks,
 }
 
 --[[ bedwars.lua is the ONLY file fetched from GitLab -- everything else comes from GitHub -- and

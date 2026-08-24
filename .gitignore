@@ -2,3 +2,6 @@
 __pycache__/
 *.py[cod]
 merge.md
+/dump/
+games/bedwars.lua
+.DS_Store
