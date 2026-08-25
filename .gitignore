@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 /dev/
+/profiles/
 games/bedwars.lua
 .DS_Store
 loaderdev.lua
