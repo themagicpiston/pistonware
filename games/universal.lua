@@ -104,9 +104,37 @@ local function calculateMoveVector(vec)
 	return vec.Unit == vec.Unit and vec.Unit or Vector3.zero
 end
 
+local friendNames, targetNames = {}, {}
+local targetStateCacheDirty = true
+
+local function rebuildTargetStateCaches()
+	table.clear(friendNames)
+	table.clear(targetNames)
+	local friends = vape.Categories.Friends
+	local targets = vape.Categories.Targets
+	if friends and friends.ListEnabled then
+		for _, name in friends.ListEnabled do
+			friendNames[name] = true
+		end
+	end
+	if targets and targets.ListEnabled then
+		for _, name in targets.ListEnabled do
+			targetNames[name] = true
+		end
+	end
+	targetStateCacheDirty = false
+end
+
+local function ensureTargetStateCaches()
+	if targetStateCacheDirty then
+		rebuildTargetStateCaches()
+	end
+end
+
 local function isFriend(plr, recolor)
+	ensureTargetStateCaches()
 	if vape.Categories.Friends.Options['Use friends'].Enabled then
-		local friend = table.find(vape.Categories.Friends.ListEnabled, plr.Name) and true
+		local friend = friendNames[plr.Name] and true
 		if recolor then
 			friend = friend and vape.Categories.Friends.Options['Recolor visuals'].Enabled
 		end
@@ -116,7 +144,8 @@ local function isFriend(plr, recolor)
 end
 
 local function isTarget(plr)
-	return table.find(vape.Categories.Targets.ListEnabled, plr.Name) and true
+	ensureTargetStateCaches()
+	return targetNames[plr.Name] and true
 end
 
 local function canClick()
@@ -354,17 +383,14 @@ run(function()
 		local hum = ent.Humanoid
 		return {
 			hum:GetPropertyChangedSignal('Health'),
-			hum:GetPropertyChangedSignal('MaxHealth'),
-			{
-				Connect = function()
-					ent.Friend = ent.Player and isFriend(ent.Player) or nil
-					ent.Target = ent.Player and isTarget(ent.Player) or nil
-					return {
-						Disconnect = function() end
-					}
-				end
-			}
+			hum:GetPropertyChangedSignal('MaxHealth')
 		}
+	end
+
+	entitylib.getEntityState = function(ent)
+		local friend = ent.Player and isFriend(ent.Player) or nil
+		local target = ent.Player and isTarget(ent.Player) or nil
+		return entitylib.targetCheck(ent), friend, target
 	end
 
 	entitylib.targetCheck = function(ent)
@@ -396,8 +422,14 @@ run(function()
 		entitylib.kill()
 		entitylib = nil
 	end)
-	vape:Clean(vape.Categories.Friends.Update.Event:Connect(function() entitylib.refresh() end))
-	vape:Clean(vape.Categories.Targets.Update.Event:Connect(function() entitylib.refresh() end))
+	vape:Clean(vape.Categories.Friends.Update.Event:Connect(function()
+		targetStateCacheDirty = true
+		entitylib.refresh()
+	end))
+	vape:Clean(vape.Categories.Targets.Update.Event:Connect(function()
+		targetStateCacheDirty = true
+		entitylib.refresh()
+	end))
 	vape:Clean(entitylib.Events.LocalAdded:Connect(updateVelocity))
 	vape:Clean(workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(function()
 		gameCamera = workspace.CurrentCamera or workspace:FindFirstChildWhichIsA('Camera')
@@ -751,9 +783,14 @@ run(function()
 
 	vape:Clean(function()
 		table.clear(whitelist.commands)
-		table.clear(whitelist.data)
-		table.clear(whitelist)
+		table.clear(whitelist.customtags)
+		table.clear(whitelist.said)
+		table.clear(whitelist.alreadychecked)
+		table.clear(whitelist.data.WhitelistedUsers)
+		whitelist.loaded = false
+		whitelist.hooked = false
 	end)
+	entitylib.refresh()
 end)
 entitylib.start()
 run(function()
@@ -2305,7 +2342,17 @@ run(function()
 	local Face
 	local Overlay = OverlapParams.new()
 	Overlay.FilterType = Enum.RaycastFilterType.Include
-	local Particles, Boxes, AttackDelay = {}, {}, tick()
+	local Particles, Boxes, AttackDelay = {}, {}, time()
+	local attacked, targetQuery, targetsBuffer, overlayFilter = {}, {}, {}, {}
+	local proximityQuery = {}
+	local attackedCapacity = 0
+	local targetScanElapsed, elapsed = 0, 0
+	local closeTargetMode = false
+	local forceTargetScan = true
+	local lastPlayers, lastNPCs, lastRange, lastLimit
+	local flatVector = Vector3.new(1, 0, 1)
+	local hitboxSize = Vector3.new(4, 4, 4)
+	local farAway = Vector3.new(9e9, 9e9, 9e9)
 	
 	local function getAttackData()
 		if Mouse.Enabled then
@@ -2320,79 +2367,156 @@ run(function()
 		Name = 'Killaura',
 		Function = function(callback)
 			if callback then
+				Killaura:Clean(entitylib.Events.EntityAdded:Connect(function()
+					forceTargetScan = true
+				end))
+				Killaura:Clean(entitylib.Events.EntityRemoved:Connect(function()
+					forceTargetScan = true
+				end))
 				repeat
 					local interest, tool = getAttackData()
-					local attacked = {}
+					local attackedCount = 0
+					local playersEnabled = Targets.Players.Enabled
+					local npcsEnabled = Targets.NPCs.Enabled
+					local swingRange = SwingRange.Value
+					local maxTargets = Max.Value
+					if playersEnabled ~= lastPlayers or npcsEnabled ~= lastNPCs or swingRange ~= lastRange or maxTargets ~= lastLimit then
+						lastPlayers, lastNPCs, lastRange, lastLimit = playersEnabled, npcsEnabled, swingRange, maxTargets
+						forceTargetScan = true
+					end
+
+					proximityQuery.Players = playersEnabled
+					proximityQuery.NPCs = npcsEnabled
+					proximityQuery.Targetable = true
+					local nearestDistanceSq = entitylib.NearestDistanceSq(proximityQuery)
+					if closeTargetMode then
+						if nearestDistanceSq >= (55 * 55) then
+							closeTargetMode = false
+							forceTargetScan = true
+						end
+					elseif nearestDistanceSq <= (45 * 45) then
+						closeTargetMode = true
+						forceTargetScan = true
+					end
+					targetScanElapsed += elapsed
+					local scanInterval = closeTargetMode and (1 / 60) or (1 / 30)
+					local scanDue = forceTargetScan or targetScanElapsed >= scanInterval or Targets.Walls.Enabled
+
 					if interest then
-						local plrs = entitylib.AllPosition({
-							Range = SwingRange.Value,
-							Wallcheck = Targets.Walls.Enabled or nil,
-							Part = 'RootPart',
-							Players = Targets.Players.Enabled,
-							NPCs = Targets.NPCs.Enabled,
-							Limit = Max.Value
-						})
-	
+						if scanDue then
+							targetScanElapsed %= scanInterval
+							forceTargetScan = false
+							targetQuery.Range = swingRange
+							targetQuery.Wallcheck = Targets.Walls.Enabled or nil
+							targetQuery.Part = 'RootPart'
+							targetQuery.Players = playersEnabled
+							targetQuery.NPCs = npcsEnabled
+							targetQuery.Limit = maxTargets
+							targetQuery.Output = targetsBuffer
+							entitylib.AllPosition(targetQuery)
+						else
+							local rangeSq = swingRange * swingRange
+							for index = #targetsBuffer, 1, -1 do
+								local target = targetsBuffer[index]
+								local root = target and target.RootPart
+								local valid = target and target.Targetable and root and entitylib.isVulnerable(target)
+								if valid then
+									local delta = root.Position - entitylib.character.RootPart.Position
+									valid = delta:Dot(delta) <= rangeSq
+								end
+								if not valid then
+									targetsBuffer[index] = targetsBuffer[#targetsBuffer]
+									targetsBuffer[#targetsBuffer] = nil
+									forceTargetScan = true
+								end
+							end
+						end
+
+						local plrs = targetsBuffer
+
 						if #plrs > 0 then
 							local selfpos = entitylib.character.RootPart.Position
-							local localfacing = entitylib.character.RootPart.CFrame.LookVector * Vector3.new(1, 0, 1)
-	
+							local localfacing = entitylib.character.RootPart.CFrame.LookVector * flatVector
+							local angleLimit = math.rad(AngleSlider.Value) / 2
+							local attackRange = AttackRange.Value
+							local now = time()
+
 							for _, v in plrs do
 								local delta = (v.RootPart.Position - selfpos)
-								local angle = math.acos(localfacing:Dot((delta * Vector3.new(1, 0, 1)).Unit))
-								if angle > (math.rad(AngleSlider.Value) / 2) then continue end
-	
-								table.insert(attacked, {
-									Entity = v,
-									Check = delta.Magnitude > AttackRange.Value and BoxSwingColor or BoxAttackColor
-								})
-								targetinfo.Targets[v] = tick() + 1
-	
-								if AttackDelay < tick() then
-									AttackDelay = tick() + (1 / CPS.GetRandomValue())
+								local angle = math.acos(localfacing:Dot((delta * flatVector).Unit))
+								if angle > angleLimit then continue end
+								local distanceSq = delta:Dot(delta)
+								local distance = math.sqrt(distanceSq)
+
+								attackedCount += 1
+								local hit = attacked[attackedCount]
+								if not hit then
+									hit = {}
+									attacked[attackedCount] = hit
+									attackedCapacity = attackedCount
+								end
+								hit.Entity = v
+								hit.Check = distance > attackRange and BoxSwingColor or BoxAttackColor
+								targetinfo.Targets[v] = now + 1
+
+								if AttackDelay < now then
+									AttackDelay = now + (1 / CPS.GetRandomValue())
 									tool:Activate()
 								end
-	
+
 								if Lunge.Enabled and tool.GripUp.X == 0 then break end
-								if delta.Magnitude > AttackRange.Value then continue end
-	
-								Overlay.FilterDescendantsInstances = {v.Character}
-								for _, part in workspace:GetPartBoundsInBox(v.RootPart.CFrame, Vector3.new(4, 4, 4), Overlay) do
+								if distance > attackRange then continue end
+
+								overlayFilter[1] = v.Character
+								overlayFilter[2] = nil
+								Overlay.FilterDescendantsInstances = overlayFilter
+								for _, part in workspace:GetPartBoundsInBox(v.RootPart.CFrame, hitboxSize, Overlay) do
 									firetouchinterest(interest.Parent, part, 1)
 									firetouchinterest(interest.Parent, part, 0)
 								end
 							end
 						end
 					end
-	
-					for i, v in Boxes do
-						v.Adornee = attacked[i] and attacked[i].Entity.RootPart or nil
-						if v.Adornee then
-							v.Color3 = Color3.fromHSV(attacked[i].Check.Hue, attacked[i].Check.Sat, attacked[i].Check.Value)
-							v.Transparency = 1 - attacked[i].Check.Opacity
-						end
+
+				for i, v in Boxes do
+					local hit = i <= attackedCount and attacked[i] or nil
+					v.Adornee = hit and hit.Entity.RootPart or nil
+					if hit then
+						v.Color3 = Color3.fromHSV(hit.Check.Hue, hit.Check.Sat, hit.Check.Value)
+						v.Transparency = 1 - hit.Check.Opacity
 					end
-	
-					for i, v in Particles do
-						v.Position = attacked[i] and attacked[i].Entity.RootPart.Position or Vector3.new(9e9, 9e9, 9e9)
-						v.Parent = attacked[i] and gameCamera or nil
-					end
-	
-					if Face.Enabled and attacked[1] then
-						local vec = attacked[1].Entity.RootPart.Position * Vector3.new(1, 0, 1)
-						entitylib.character.RootPart.CFrame = CFrame.lookAt(entitylib.character.RootPart.Position, Vector3.new(vec.X, entitylib.character.RootPart.Position.Y + 0.01, vec.Z))
-					end
-	
-					task.wait()
+				end
+
+				for i, v in Particles do
+					local hit = i <= attackedCount and attacked[i] or nil
+					v.Position = hit and hit.Entity.RootPart.Position or farAway
+					v.Parent = hit and gameCamera or nil
+				end
+
+				if Face.Enabled and attackedCount > 0 then
+					local vec = attacked[1].Entity.RootPart.Position * flatVector
+					entitylib.character.RootPart.CFrame = CFrame.lookAt(entitylib.character.RootPart.Position, Vector3.new(vec.X, entitylib.character.RootPart.Position.Y + 0.01, vec.Z))
+				end
+
+				for index = 1, attackedCapacity do
+					local hit = attacked[index]
+					hit.Entity = nil
+					hit.Check = nil
+				end
+
+				elapsed = task.wait()
 				until not Killaura.Enabled
 			else
 				for _, v in Boxes do
 					v.Adornee = nil
 				end
-	
+
 				for _, v in Particles do
 					v.Parent = nil
 				end
+				table.clear(targetsBuffer)
+				forceTargetScan = true
+				targetScanElapsed = 0
 			end
 		end,
 		Tooltip = 'Attack players around you\nwithout aiming at them.'
@@ -5353,10 +5477,13 @@ run(function()
 	local Color
 	local FillTransparency
 	local Reference = {}
+	local Candidates = {}
+	local CandidatesInitialized = false
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
-	
+
 	local function Add(v)
+		if Reference[v] then return end
 		if not table.find(List.ListEnabled, v.Name) then return end
 		if v:IsA('BasePart') or v:IsA('Model') then
 			local size = v:IsA('Model') and v:GetExtentsSize() or v.Size
@@ -5369,28 +5496,43 @@ run(function()
 			box.Color3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 			box.Parent = Folder
 			Reference[v] = box
+			end
+	end
+
+	local function addCandidate(v)
+		if not (v:IsA('BasePart') or v:IsA('Model')) then return end
+		Candidates[v] = true
+		if Search and Search.Enabled then
+			Add(v)
 		end
 	end
-	
+
+	vape:Clean(workspace.DescendantAdded:Connect(addCandidate))
+	vape:Clean(workspace.DescendantRemoving:Connect(function(v)
+		Candidates[v] = nil
+		if Reference[v] then
+			Reference[v]:Destroy()
+			Reference[v] = nil
+		end
+	end))
+
 	Search = vape.Categories.Render:CreateModule({
 		Name = 'Search',
 		Function = function(callback)
 			if callback then
-				Search:Clean(workspace.DescendantAdded:Connect(Add))
-				Search:Clean(workspace.DescendantRemoving:Connect(function(v)
-					if Reference[v] then
-						Reference[v]:Destroy()
-						Reference[v] = nil
+				if not CandidatesInitialized then
+					for _, v in workspace:GetDescendants() do
+						addCandidate(v)
 					end
-				end))
-	
-				for _, v in workspace:GetDescendants() do
+					CandidatesInitialized = true
+				end
+				for v in Candidates do
 					Add(v)
 				end
 			else
-				Folder:ClearAllChildren()
-				table.clear(Reference)
-			end
+			Folder:ClearAllChildren()
+			table.clear(Reference)
+		end
 		end,
 		Tooltip = 'Draws box around selected parts\nAdd parts in Search frame'
 	})
@@ -6719,25 +6861,35 @@ run(function()
 	local Xray
 	local List
 	local modified = {}
-	
+
 	local function modifyPart(v)
 		if v:IsA('BasePart') and not table.find(List.ListEnabled, v.Name) then
-			modified[v] = true
+			if modified[v] == nil then
+				modified[v] = v.LocalTransparencyModifier
+			end
 			v.LocalTransparencyModifier = 0.5
 		end
 	end
-	
+
 	Xray = vape.Categories.World:CreateModule({
 		Name = 'Xray',
 		Function = function(callback)
 			if callback then
 				Xray:Clean(workspace.DescendantAdded:Connect(modifyPart))
+				Xray:Clean(workspace.DescendantRemoving:Connect(function(v)
+					if modified[v] ~= nil then
+						v.LocalTransparencyModifier = modified[v]
+					end
+					modified[v] = nil
+				end))
 				for _, v in workspace:GetDescendants() do
 					modifyPart(v)
 				end
 			else
-				for i in modified do
-					i.LocalTransparencyModifier = 0
+				for i, original in modified do
+					if i.Parent then
+						i.LocalTransparencyModifier = original
+					end
 				end
 				table.clear(modified)
 			end

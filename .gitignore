@@ -1,7 +1,7 @@
 /.cache/
 __pycache__/
 *.py[cod]
-merge.md
-/dump/
+/dev/
 games/bedwars.lua
 .DS_Store
+loaderdev.lua

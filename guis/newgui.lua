@@ -32,6 +32,7 @@ local vape = {
 	Place = game.PlaceId,
 	Profile = 'default',
 	RainbowSliders = {},
+	RainbowSliderIndices = {},
 	--[[ Bumped by every vape:Load. Load yields now, so a second load can stop the older one
 	while it is still walking instead of interleaving writes into the same modules. ]]
 	LoadGeneration = 0,
@@ -48,6 +49,27 @@ local vape = {
 local run = function(func)
 	func()
 end
+
+local function addRainbowSlider(component)
+	if vape.RainbowSliderIndices[component] then return end
+	local index = #vape.RainbowSliders + 1
+	vape.RainbowSliders[index] = component
+	vape.RainbowSliderIndices[component] = index
+end
+
+local function removeRainbowSlider(component)
+	local index = vape.RainbowSliderIndices[component]
+	if not index then return end
+	local lastIndex = #vape.RainbowSliders
+	local moved = vape.RainbowSliders[lastIndex]
+	vape.RainbowSliders[index] = moved
+	vape.RainbowSliders[lastIndex] = nil
+	vape.RainbowSliderIndices[component] = nil
+	if moved and moved ~= component then
+		vape.RainbowSliderIndices[moved] = index
+	end
+end
+
 local function runChunk(source, name)
 	local chunk = loadstring(source, name)
 	return chunk and chunk()
@@ -5550,10 +5572,10 @@ components = {
 		
 		function component:Toggle()
 			self.Rainbow = not self.Rainbow
-		
+
 			if self.Rainbow then
-				table.insert(vape.RainbowSliders, self)
-		
+				addRainbowSlider(self)
+
 				ring1.ImageColor3 = Color3.fromRGB(5, 127, 100)
 				task.delay(0.1, function()
 					if not self.Rainbow then return end
@@ -5564,11 +5586,8 @@ components = {
 					end)
 				end)
 			else
-				local index = table.find(vape.RainbowSliders, self)
-				if index then
-					table.remove(vape.RainbowSliders, index)
-				end
-		
+				removeRainbowSlider(self)
+
 				ring3.ImageColor3 = color.Light(uipallet.Main, 0.37)
 				task.delay(0.1, function()
 					if self.Rainbow then return end
@@ -6589,11 +6608,11 @@ components = {
 			if rainbowthread then
 				task.cancel(rainbowthread)
 			end
-		
+
 			if self.Rainbow then
 				knob.Image = rainbowknob
-				table.insert(vape.RainbowSliders, self)
-		
+				addRainbowSlider(self)
+
 				ring1.ImageColor3 = Color3.fromRGB(5, 127, 100)
 				rainbowthread = task.delay(0.1, function()
 					ring2.ImageColor3 = Color3.fromRGB(228, 125, 43)
@@ -6605,11 +6624,8 @@ components = {
 			else
 				self:SetValue(nil, nil, nil, 4)
 				knob.Image = normalknob
-				local index = table.find(vape.RainbowSliders, self)
-				if index then
-					table.remove(vape.RainbowSliders, index)
-				end
-		
+				removeRainbowSlider(self)
+
 				ring3.ImageColor3 = color.Light(uipallet.Main, 0.37)
 				rainbowthread = task.delay(0.1, function()
 					ring2.ImageColor3 = color.Light(uipallet.Main, 0.37)

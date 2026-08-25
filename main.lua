@@ -12,7 +12,11 @@ end
 --[[ pcall'd: after a teleport shared.vape can still point at the previous server's instance,
 whose GUI and connections no longer exist. An error walking that corpse would abort main.lua
 on line one and leave the queued re-injection doing nothing at all. ]]
-if shared.vape then pcall(function() shared.vape:Uninject() end) end
+local queuedReload = shared.vapereload == true
+if shared.vape then
+	pcall(function() shared.vape:Uninject() end)
+	if queuedReload then shared.vapereload = true end
+end
 
 local vape
 local loadstring = function(...)
@@ -405,7 +409,10 @@ local function finishLoading()
 
 				Queueing first ensures that later save failures do not prevent re-injection.
 			]]
-			pcall(queue_on_teleport, teleportScript)
+			local queueOk, queueError = pcall(queue_on_teleport, teleportScript)
+			if not queueOk then
+				warn('[pistonware] queue_on_teleport failed: '..tostring(queueError))
+			end
 
 			if not hasQueueOnTeleport then
 				pcall(function()
@@ -489,6 +496,11 @@ end
 	stage('gui chunk returned')
 	if not vape then return end
 	shared.vape = vape
+	if not (vape.Categories and vape.Categories.Friends and vape.Categories.Targets) then
+		warn('[pistonware] GUI did not register the required Friends and Targets categories; guis/'..GUI_FILE..'.lua is stale or did not finish loading')
+		pcall(function() vape:Uninject() end)
+		return
+	end
 
 if not shared.VapeIndependent then
 	--[[ downloading doesn't need the game loaded; only wait here, right before touching game/character state ]]
@@ -504,12 +516,36 @@ if not shared.VapeIndependent then
 		pcall(function() executorName = identifyexecutor and identifyexecutor() or '' end)
 		task.wait(executorName == 'Opiumware' and 30 or 5)
 	end
-	--[[ pcall'd: an error thrown while universal.lua executes would otherwise propagate out of
-	main.lua entirely, skipping the game script below and finishLoading() with it. ]]
+	--[[ universal.lua owns the libraries every game payload consumes. Catch its error so the
+	real source is reported, then stop instead of loading the game payload against half-built
+	state and replacing that error with misleading nil accesses. ]]
 	stage('universal.lua start')
-	pcall(function()
+	local getIdentity = getthreadidentity or getidentity
+	local setIdentity = setthreadidentity or setidentity
+	local oldIdentity
+	if getIdentity then
+		local ok, identity = pcall(getIdentity)
+		if ok then oldIdentity = identity end
+	end
+	if setIdentity then
+		pcall(setIdentity, 8)
+	end
+	local universalOk, universalError = pcall(function()
 		runChunk(downloadFile('pistonware/games/universal.lua'), 'universal')
 	end)
+	if setIdentity and oldIdentity ~= nil then
+		pcall(setIdentity, oldIdentity)
+	end
+	if not universalOk then
+		warn('[pistonware] universal.lua failed: '..tostring(universalError))
+		pcall(function() vape:Uninject() end)
+		return
+	end
+	if not (vape.Libraries and vape.Libraries.sessioninfo and vape.Libraries.whitelist and type(vape.Libraries.whitelist.get) == 'function') then
+		warn('[pistonware] universal.lua finished without registering sessioninfo and whitelist; games/universal.lua is stale or incomplete')
+		pcall(function() vape:Uninject() end)
+		return
+	end
 
 	--[[ Started, never waited on. There is no deadline here by design: a deadline would only be a
 	guess at how long the payload needs, and whatever number it held would become the time

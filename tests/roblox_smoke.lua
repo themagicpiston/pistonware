@@ -52,6 +52,10 @@ local function makeVector3(x, y, z)
 			elseif key == 'Unit' then
 				local magnitude = self.Magnitude
 				return magnitude == 0 and makeVector3(0, 0, 0) or makeVector3(self.X / magnitude, self.Y / magnitude, self.Z / magnitude)
+			elseif key == 'Dot' then
+				return function(_, other)
+					return self.X * other.X + self.Y * other.Y + self.Z * other.Z
+				end
 			end
 		end,
 		__add = function(left, right)
@@ -188,6 +192,61 @@ resetRoblox()
 local entity = execute('libraries/entity.lua')
 expectWarnings('libraries/entity.lua', 0)
 expect(type(entity) == 'table' and entity.Running, 'entity.lua did not start with stubbed Roblox services')
+
+local function mockEntity(player, position, target)
+	return {
+		Player = player,
+		Character = {FindFirstChildWhichIsA = function() return nil end},
+		Connections = {},
+		Health = 100,
+		NPC = false,
+		Targetable = true,
+		Target = target,
+		RootPart = {Position = position}
+	}
+end
+
+local nearPlayer, farPlayer = {}, {}
+local near = mockEntity(nearPlayer, Vector3.new(2, 0, 0), false)
+local farTarget = mockEntity(farPlayer, Vector3.new(9, 0, 0), true)
+entity.List = {near, farTarget}
+entity.EntityByPlayer[nearPlayer] = near
+entity.EntityByPlayer[farPlayer] = farTarget
+entity.EntityByCharacter[near.Character] = near
+entity.EntityByCharacter[farTarget.Character] = farTarget
+entity.EntityIndex[near] = 1
+entity.EntityIndex[farTarget] = 2
+entity.isAlive = true
+entity.character = {HumanoidRootPart = {Position = Vector3.new(0, 0, 0)}, Connections = {}}
+
+local selected = entity.EntityPosition({
+	Players = true,
+	Part = 'RootPart',
+	Range = 10
+})
+expect(selected == farTarget, 'entity target priority was not preserved')
+local output = {}
+local all = entity.AllPosition({
+	Players = true,
+	Part = 'RootPart',
+	Range = 10,
+	Limit = 1,
+	Output = output
+})
+expect(all == output and #all == 1 and all[1] == farTarget, 'entity output buffer was not reused')
+local found, foundIndex = entity.getEntity(farPlayer)
+expect(found == farTarget and foundIndex == 2, 'entity O(1) player lookup failed')
+entity.removeEntity(nearPlayer)
+expect(#entity.List == 1 and entity.List[1] == farTarget and entity.EntityIndex[farTarget] == 1, 'entity swap-remove failed')
+local event = entity.Events.Smoke
+local calls = 0
+local connection = event:Connect(function() calls += 1 end)
+connection:Disconnect()
+connection:Disconnect()
+event:Fire()
+expect(calls == 0, 'entity event disconnect was not idempotent')
+event:Destroy()
+connection:Disconnect()
 entity.stop()
 expectWarnings('libraries/entity.lua after stop', 0)
 
