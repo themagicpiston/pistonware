@@ -2422,22 +2422,62 @@ run(function()
 		return worldpos
 	end
 
+	--[[ Suppressing the place-block animation has to be re-entrancy safe.
+
+	It used to save whatever sat in AnimationUtil.playAnimation, stub it, and put the saved
+	value back when the placement finished. That is only correct for one placement at a
+	time, and placements are never one at a time: blockPlacer:placeBlock ends in
+	BlockEngineRemotes.Client:Get('PlaceBlock'):CallServer(...), which yields on the round
+	trip, and Scaffold and Nuker both dispatch through task.spawn. So two overlap
+	constantly:
+
+	    A: saves the real function, installs the stub, yields in CallServer
+	    B: saves THE STUB as "the real function", installs the stub, yields
+	    A: resumes, restores the real function
+	    B: resumes, restores the stub  <- permanent
+
+	AnimationUtil.playAnimation is game-core's shared animation entry point, not a
+	block-placement detail, so from that moment the client plays no animations at all --
+	no swing, no place, no break -- until a rejoin. It bites hardest on mobile, where the
+	framerate is low enough that a CallServer spans several placement ticks.
+
+	One stored original and a depth count instead: the stub goes in when the first
+	placement starts and comes out only when the last one finishes, in whatever order they
+	happen to interleave. ]]
+	local placeAnimOriginal, placeAnimDepth = nil, 0
+
+	local function suppressPlaceAnimation()
+		if not bedwars.AnimationUtil then return false end
+		if placeAnimDepth == 0 then
+			placeAnimOriginal = bedwars.AnimationUtil.playAnimation
+			bedwars.AnimationUtil.playAnimation = function() end
+		end
+		placeAnimDepth += 1
+		return true
+	end
+
+	local function restorePlaceAnimation()
+		placeAnimDepth -= 1
+		if placeAnimDepth > 0 then return end
+		placeAnimDepth = 0
+		if placeAnimOriginal then
+			bedwars.AnimationUtil.playAnimation = placeAnimOriginal
+			placeAnimOriginal = nil
+		end
+	end
+
 	bedwars.placeBlock = function(pos, item, animate)
 		if not getItem(item) then return end
 
 		store.blockPlacer.blockType = item
-		local oldAnimation
-		if animate == false and bedwars.AnimationUtil then
-			oldAnimation = bedwars.AnimationUtil.playAnimation
-			bedwars.AnimationUtil.playAnimation = function() end
-		end
+		local suppressed = animate == false and suppressPlaceAnimation()
 
 		local ok, result = pcall(function()
 			return store.blockPlacer:placeBlock(bedwars.BlockController:getBlockPosition(pos))
 		end)
-		if oldAnimation then
-			bedwars.AnimationUtil.playAnimation = oldAnimation
-		end
+		-- Inside the pcall's shadow on purpose: an error thrown by placeBlock must still
+		-- decrement, or the depth never returns to zero and the stub stays for good.
+		if suppressed then restorePlaceAnimation() end
 		if not ok then error(result, 0) end
 		return result
 	end
