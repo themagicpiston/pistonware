@@ -1835,7 +1835,7 @@ console:SetProgress(0.08)
 the run stops on the console instead of failing somewhere deep in the GUI. identifyexecutor
 is absent on some executors, hence the pcall -- an unknown name is allowed through. ]]
 do
-	local unsupported = {'xeno', 'solara'}
+	local unsupported = {'xeno', 'solara', 'nexomia'}
 	local executorName = ''
 	pcall(function()
 		executorName = identifyexecutor and identifyexecutor() or ''
