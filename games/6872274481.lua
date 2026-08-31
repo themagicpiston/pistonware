@@ -3613,11 +3613,6 @@ run(function()
 		DefaultMin = 7,
 		DefaultMax = 7
 	})
-	AFKCheck = TriggerBot:CreateToggle({
-		Name = 'AFK check',
-		Default = true,
-		Tooltip = 'Skips players who expose an AFK attribute.'
-	})
 end)
 	
 run(function()
@@ -6786,6 +6781,19 @@ run(function()
 		return profile
 	end
 
+	--[[ The gear branches below used to `return` whenever an item wasn't a strict upgrade,
+	which is why things like a wood_bow got left sitting in the chest. Gear is tested before
+	the generic branches, so a non-upgrade didn't fall through to them either -- it scored
+	nil, and nil means "leave it". Carrying any bow at all made every bow in the map
+	invisible to the module; the same went for swords, tools and armour.
+
+	A chest stealer should take everything it can actually carry. The priority is there to
+	decide the ORDER items come out in, not whether to bother with them, so the upgrade
+	tests now only add a bonus on top of a base score. What still refuses an item is limited
+	to the three real blockers: no item meta, a block the game won't let you pick up, and a
+	stack that is already full. ]]
+	local UPGRADE_BONUS = 1000000
+
 	local function scoreChestItem(item, profile)
 		if not item or not item:IsA('Accessory') then return end
 		local itemType = item.Name
@@ -6803,42 +6811,56 @@ run(function()
 		if armor and armor.slot ~= nil then
 			local value = tonumber(armor.damageReductionMultiplier) or 0
 			local current = profile.armor[armor.slot] or 0
-			if value <= current then return end
-			return 100000 + value * 100000 + (value - current) * 1000
+			local score = 100000 + value * 10000
+			if value > current then
+				return score + UPGRADE_BONUS + (value - current) * 1000
+			end
+			return score
 		end
 
 		local sword = meta.sword
 		if sword then
 			local value = tonumber(sword.damage) or 0
-			if value <= profile.sword then return end
-			return 100000 + value * 10000 + (value - profile.sword) * 100
+			local score = 100000 + value * 10000
+			if value > profile.sword then
+				return score + UPGRADE_BONUS + (value - profile.sword) * 100
+			end
+			return score
 		end
 
 		local breakBlock = meta.breakBlock
 		if breakBlock then
+			-- bestValue is gathered outside the improvement test now: a tool that beats
+			-- nothing you carry still needs a base score that reflects how good it is.
 			local bestValue, improvement = 0, 0
 			for breakType, value in breakBlock do
 				if type(value) == 'number' then
+					bestValue = math.max(bestValue, value)
 					local current = profile.tools[breakType] or 0
 					if value > current then
-						bestValue = math.max(bestValue, value)
 						improvement = math.max(improvement, value - current)
 					end
 				end
 			end
-			if improvement <= 0 then return end
-			return 100000 + bestValue * 10000 + improvement * 100
+			local score = 100000 + bestValue * 10000
+			if improvement > 0 then
+				return score + UPGRADE_BONUS + improvement * 100
+			end
+			return score
 		end
 
 		local bowValue = getBowValue(meta)
 		if bowValue then
-			if bowValue <= profile.bow then return end
-			return 100000 + bowValue * 10000 + (bowValue - profile.bow) * 100
+			local score = 100000 + bowValue * 10000
+			if bowValue > profile.bow then
+				return score + UPGRADE_BONUS + (bowValue - profile.bow) * 100
+			end
+			return score
 		end
 
 		if meta.backpack then
-			if profile.backpack then return end
-			return 90000 + getItemPriority(itemType) * 10 + math.min(amount, 100)
+			local score = 90000 + getItemPriority(itemType) * 10 + math.min(amount, 100)
+			return profile.backpack and score or score + UPGRADE_BONUS
 		end
 
 		if meta.hotbarFillRight then
