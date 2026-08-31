@@ -186,42 +186,34 @@ function module.solveQuartic(c0, c1, c2, c3, c4)
 	return {s3, s2, s1, s0}
 end
 
-function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, targetVelocity, playerGravity, playerHeight, playerJump, params, offset, ping)
-	--[[ Optional 10th/11th args (matches the signature the bedwars callers already
-	pass): `offset` shifts the target position, `ping` leads the target along its
-	velocity because the server registers the shot ~ping after we sampled the
-	target. Callers passing 9 args or fewer are unaffected. ]]
-	if offset then
-		targetPos = targetPos + offset
-	end
+function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, targetVelocity, playerGravity, playerHeight, playerJump, params, offset, ping, airborne)
+	local aimOffset = offset or Vector3.zero
+	local rootPos = targetPos
 	if ping and ping > 0 then
-		targetPos = targetPos + targetVelocity * math.min(ping, 1)
+		rootPos = rootPos + targetVelocity * math.min(ping, 1)
 	end
+	targetPos = rootPos + aimOffset
+
 	local disp = targetPos - origin
 	local p, q, r = targetVelocity.X, targetVelocity.Y, targetVelocity.Z
 	local h, j, k = disp.X, disp.Y, disp.Z
 	local l = -.5 * gravity
 
-	--[[ Target-gravity compensation. The quartic below assumes the target keeps a
-	constant velocity, which over-leads a target that is currently jumping or
-	falling. When the target has notable vertical velocity, project where it will
-	be after the approximate projectile travel time (accounting for its own
-	gravity) and, if that path lands on a surface, aim at the landing spot as a
-	static target. Only mutate the solve when a surface is actually found, so the
-	no-hit path keeps the true target velocity instead of corrupting it (the old
-	version subtracted 0.5*g*t from q on every path, which wrecked vertical lead
-	for any airborne target). ]]
-	if math.abs(q) > 0.01 and playerGravity and playerGravity > 0 and params then
+	if airborne == nil then
+		airborne = math.abs(q) > 0.01
+	end
+	if airborne and playerGravity and playerGravity > 0 and params then
 		local estTime = disp.Magnitude / projectileSpeed
 		local fall    = (q * estTime) - (0.5 * playerGravity * estTime * estTime)
 		local horiz   = targetVelocity * estTime
+		
 		local ray = workspace:Raycast(
-			targetPos,
+			rootPos,
 			Vector3.new(horiz.X, fall - playerHeight, horiz.Z),
 			params
 		)
 		if ray then
-			targetPos = ray.Position + Vector3.new(0, playerHeight, 0)
+			targetPos = ray.Position + Vector3.new(0, playerHeight, 0) + aimOffset
 			h, j, k = targetPos.X - origin.X, targetPos.Y - origin.Y, targetPos.Z - origin.Z
 			p, q, r = 0, 0, 0
 		end
