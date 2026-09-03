@@ -132,6 +132,22 @@ local function addFile(files, seen, path)
 	table.insert(files, path)
 end
 
+--[[ Whether the boot log is echoed into the executor output, read HERE -- at the top, before
+the public build clears the flag further down -- so that setting
+
+    shared.PistonwareDeveloper = true
+
+in front of the loadstring turns the log on for the whole run. Captured once rather than read
+per line precisely because of that clear: read live, only the loader.start line above the
+lockout would ever appear.
+
+This switch grants nothing else. The lockout still nils the flag, and isDeveloper is still
+computed after it, so developer mode itself stays shut in a public build -- this decides
+visibility of the loader's own log lines and nothing more. The lines are safe to show (safeText
+redacts anything key-shaped), they are just noise: a wall of INFO during a boot that went fine
+reads to an end user like something is broken. ]]
+local logToConsole = shared.PistonwareDeveloper and true or false
+
 local Logger = {}
 Logger.__index = Logger
 
@@ -165,6 +181,19 @@ function Logger:emit(level, event, message, details)
 	if self.console then
 		pcall(function() self.console:SetLine(line) end)
 	end
+	--[[ Developer-only from here down. The log line carries a timestamp, a session id, an event
+	name and a details tail: exactly what you want while working on the loader, and pure noise
+	in somebody's executor output, where a wall of INFO lines during a boot that went fine
+	reads like something is wrong.
+
+	Gated on logToConsole, which is captured at the top of the file: the public build clears
+	shared.PistonwareDeveloper a couple of hundred lines below, so reading the flag live here
+	would light up the one loader.start line that runs before the clear and nothing after it.
+
+	Nothing is lost by hiding it: every line still went to the log files above, failures still
+	land on the loader window through Fail(), and an injection error is still copied to the
+	clipboard. ]]
+	if not logToConsole then return line end
 	if level == 'error' or level == 'warn' then
 		pcall(warn, line)
 	else
@@ -337,11 +366,23 @@ local function phase(name)
 	phaseClock = now
 end
 
-if shared.PistonwareLoaderBoot and os.clock() - shared.PistonwareLoaderBoot < 180 then
+--[[ A boot parked on the key prompt is the one exception to the duplicate guard. That prompt
+has no timeout on purpose -- the user is off finishing ad checkpoints -- so the flag below can
+legitimately stand for minutes, and every manual re-execution in that window was swallowed here
+with no window and no output. From outside that is indistinguishable from the loader refusing
+to open, which is the worst possible thing to happen to someone whose key just lapsed.
+
+A second run is allowed to take that one over instead: createConsole tears the old window down,
+the old AskKey sees `closed` and returns nil, and the boot behind it unwinds without touching
+the new one's flags (releaseBoot only clears what it still owns). ]]
+if shared.PistonwareLoaderBoot and not shared.PistonwareKeyPrompt and os.clock() - shared.PistonwareLoaderBoot < 180 then
 	logger:warn('loader.duplicate', 'loader is already running; ignoring duplicate execution')
 	return
 end
 shared.PistonwareLoaderBoot = os.clock()
+--[[ Identifies THIS boot in the session-wide shared table, so a run that has been taken over can
+tell that the flags it is about to clear now belong to somebody else. ]]
+local bootStamp = shared.PistonwareLoaderBoot
 
 local isfile = isfile or function(file)
 	local suc, res = pcall(function()
@@ -361,7 +402,12 @@ local setclipboard = setclipboard or toclipboard or (Clipboard and Clipboard.set
 local Watermark = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.'
 
 local SCRIPT_ID   = '2fb6964a070d89a7650354a0dcce302c'
-local GETKEY_URL  = 'https://ads.luarmor.net/get_key?for=Pistonware_Key-xnpnovpEljPO'
+--[[ The ad links a key can come from, one per provider. Both end at LuaArmor either way -- it
+is what issues the key; the provider only decides whose checkpoints you sit through getting
+there -- so adding another is a URL here and an entry in the links list at the gate, nothing
+else. ]]
+local LOOTLABS_URL = 'https://ads.luarmor.net/get_key?for=Pistonware_Key-xnpnovpEljPO'
+local WORKINK_URL = 'https://ads.luarmor.net/get_key?for=Pistonware_Workink-cjPVCqOPPBCJ'
 local KEY_FILE    = 'pistonwarekey.json'
 local RELEASE_FILE = 'pistonware_release.json'
 local HELP_URL    = 'https://discord.gg/pistonware'
@@ -410,15 +456,16 @@ end
 
 local Strings = {
 	enter_key       = 'Enter your key below to continue.',
-	saved_expired   = 'Your key expired - renew it, then run again. It is still saved.',
-	saved_hwid      = 'Your key is linked to another device - reset your HWID, then run again. The key itself is still good and is still saved.',
+	saved_expired   = 'Your key expired - renew it with Get Key, then paste it below. It is still saved.',
+	saved_hwid      = 'Your key is linked to another device - reset your HWID, then submit it below. The key itself is still good and is still saved.',
 	saved_incorrect = 'Saved key no longer exists - get a new one.',
 	saved_banned    = 'Saved key is blacklisted.',
 	placeholder     = 'Paste your key here',
-	get_key         = 'Get Key',
+	work_ink        = 'Work.ink',
+	loot_labs       = 'LootLabs',
 	paste           = 'Paste',
 	submit          = 'Submit',
-	footer          = 'No key? Get Key -> finish checkpoints -> paste above.',
+	footer          = 'No key? Pick a link -> finish the checkpoints -> paste the key above.',
 	empty_key       = 'Enter your key first.',
 	bad_format      = "That doesn't look like a valid key.",
 	checking        = 'Checking key...',
@@ -431,13 +478,20 @@ local Strings = {
 	incorrect       = 'Key is incorrect or has been deleted.',
 	invalid_format  = 'Invalid key format.',
 	check_failed    = 'Check failed: %s (%s)',
-	link_copied     = 'Link copied! Finish the checkpoints, then paste your key.',
+	link_copied     = '%s link copied! Finish the checkpoints, then paste your key here.',
+	link_missing    = '%s is not set up yet - use LootLabs for now.',
+	tip_work_ink    = 'Copies the Work.ink link. Open it in a browser to earn a key.',
+	tip_loot_labs   = 'Copies the LootLabs link. Open it in a browser to earn a key.',
+	tip_paste       = 'Puts whatever is on your clipboard into the box.',
+	tip_submit      = 'Checks the key in the box and starts loading.',
+	tip_help        = 'Copies the Discord invite in case you get stuck.',
 	pasted          = 'Pasted from clipboard.',
 	clipboard_empty = 'Clipboard is empty.',
 	need_help       = 'Need Help?',
 	help_copied     = 'Help link copied to your clipboard!',
 	copy_failed     = 'Failed to copy script.',
-	no_library      = 'Failed to load the LuaArmor library.',
+	no_library      = "Can't reach LuaArmor (%s). Press Submit to try again.",
+	check_error     = 'Key check failed: %s',
 	cancelled       = 'Key entry cancelled.',
 	headless        = 'No valid key saved - run the loader manually to enter one.'
 }
@@ -1052,25 +1106,39 @@ wipe is skipped entirely -- the folder holds the user's custom profiles, and can
 reinject must never cost them those; only an explicit reinstall (reinstall.lua) deletes an
 existing install. delfolder already recurses on the executors that have it; the manual walk
 is for the ones that only ship delfile. ]]
+--[[ Frees the session-wide flags this boot is holding, so the next manual run is not turned
+away by the duplicate guard.
+
+Ownership-checked, because a boot sitting on the key prompt can be taken over by a later
+execution (see the guard above). The loser unwinds through here moments after the winner has
+stamped its own boot, and clearing the winner's flags would leave the new run looking like a
+reload -- headless, with no way to ask for a key. Exactly the state this whole path exists to
+get people out of.
+
+shared.vapereload goes with them. It is normally consumed at the very bottom of this file,
+AFTER main.lua has had its look at it, but a boot that ends early never gets there and the flag
+was left standing for the rest of the session. Everything from then on read as a reload: the
+console went headless, and a headless console cannot ask for a key. That is what made a lapsed
+key unrecoverable in-game -- Reinject failed at the gate telling you to run the loader manually,
+and running it manually hit this same stale flag and said it again.
+
+This is the WHOLE of what a failed key gate does. It never calls deleteInstall: the folder holds
+the profiles the user built themselves, and wiping those because LuaArmor answered 'expired'
+would charge them everything they configured for something a renewed key fixes in ten seconds.
+The key outlives the install anyway -- pistonwarekey.json sits outside the folder for exactly
+that reason -- so the deletion would be pure loss. ]]
+local function releaseBoot()
+	if shared.PistonwareLoaderBoot ~= bootStamp then return end
+	shared.PistonwareLoaderBoot = nil
+	shared.PistonwareKeyPrompt = nil
+	shared.vapereload = nil
+end
+
 local freshInstall = false
 local function deleteInstall()
 	--[[ every cancel/abort path comes through here, so a cancelled boot immediately frees the
 	duplicate-execution guard for the next manual run ]]
-	shared.PistonwareLoaderBoot = nil
-	--[[
-		And the reload flag, for the same reason.
-
-		shared.vapereload is normally consumed at the very bottom of this file, AFTER main.lua
-		has had its look at it -- but a boot that ends here never gets there, so the flag was
-		left standing for the rest of the session. Everything from then on read as a reload:
-		the console went headless, and a headless console cannot ask for a key.
-
-		That is what made a lapsed key unrecoverable in-game. Pressing Reinject with an expired
-		key failed at the gate and printed 'run the loader manually to enter one' -- and running
-		it manually hit this same stale flag, went headless again, and printed the same line.
-		The only way out was restarting Roblox.
-	]]
-	shared.vapereload = nil
+	releaseBoot()
 	if not freshInstall then return end
 	pcall(function()
 		if delfolder then
@@ -1646,7 +1714,7 @@ local function createConsole()
 
 		local box = Instance.new('TextBox')
 		box.LayoutOrder = 1
-		box.Size = UDim2.fromOffset(340, 34)
+		box.Size = UDim2.fromOffset(320, 34)
 		box.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
 		box.BorderSizePixel = 0
 		box.ClearTextOnFocus = false
@@ -1690,15 +1758,40 @@ local function createConsole()
 			busy = false
 		end
 
-		local getKey = answerButton(opts.getKeyText, 140, 2)
-		getKey.MouseButton1Click:Connect(function()
-			opts.onGetKey(say)
-		end)
+		--[[ Hover help goes on the footer, not the inline tooltip Ask() uses. That tooltip rides
+		in the same list layout as the buttons, and this row already carries the box and five
+		of them -- one hover would push the end of the row past the window edge, which clips.
+		The footer has the full width to itself and is saved and restored around the prompt
+		anyway. ]]
+		local function hint(button, text)
+			if not text then return end
+			button.MouseEnter:Connect(function()
+				footer.Text = text
+			end)
+			button.MouseLeave:Connect(function()
+				footer.Text = opts.footer or previousFooter
+			end)
+		end
+
+		--[[ One button per key provider, in the order the caller lists them, so adding a
+		provider is an entry in that list rather than an edit in here. The widths across the
+		whole row are chosen to fit: 948px usable, 910px used with every button showing. ]]
+		local order = 1
+		for _, link in opts.links or {} do
+			order += 1
+			local button = answerButton(link.text, 105, order)
+			hint(button, link.tooltip)
+			button.MouseButton1Click:Connect(function()
+				link.onClick(say)
+			end)
+		end
 
 		--[[ Only offered when the executor can actually read the clipboard; otherwise the row
 		closes up around it and the user pastes with ctrl+v into the box like normal. ]]
 		if opts.onPaste then
-			local paste = answerButton(opts.pasteText, 110, 3)
+			order += 1
+			local paste = answerButton(opts.pasteText, 95, order)
+			hint(paste, opts.pasteTip)
 			paste.MouseButton1Click:Connect(function()
 				local text = opts.onPaste(say)
 				if text then
@@ -1707,10 +1800,14 @@ local function createConsole()
 			end)
 		end
 
-		local submitButton = answerButton(opts.submitText, 130, 4)
+		order += 1
+		local submitButton = answerButton(opts.submitText, 115, order)
+		hint(submitButton, opts.submitTip)
 		submitButton.MouseButton1Click:Connect(submit)
 
-		local help = answerButton(opts.helpText, 120, 5)
+		order += 1
+		local help = answerButton(opts.helpText, 110, order)
+		hint(help, opts.helpTip)
 		help.MouseButton1Click:Connect(function()
 			opts.onHelp(say)
 		end)
@@ -1835,7 +1932,7 @@ console:SetProgress(0.08)
 the run stops on the console instead of failing somewhere deep in the GUI. identifyexecutor
 is absent on some executors, hence the pcall -- an unknown name is allowed through. ]]
 do
-	local unsupported = {'xeno', 'solara', 'nexomia'}
+	local unsupported = {'xeno', 'solara'}
 	local executorName = ''
 	pcall(function()
 		executorName = identifyexecutor and identifyexecutor() or ''
@@ -1889,6 +1986,21 @@ do
 		return (pcall(setclipboard, text))
 	end
 
+	--[[ Both key buttons come through here, so a provider nobody has filled in yet says so
+	instead of copying an empty string, and the wording is the same whichever button was
+	pressed. ]]
+	local function copyLink(name, url, say)
+		if url == '' then
+			say(t('link_missing', name), 'err')
+			return
+		end
+		if clipboardSet(url) then
+			say(t('link_copied', name))
+		else
+			say(t('copy_failed'), 'err')
+		end
+	end
+
 	--[[ pistonwarekey.json lives at the workspace root rather than under pistonware/, so that
 	reinstall.lua (and cancelling a first install, which wipes the whole folder) can't cost
 	the user a key they already paid checkpoints for. ]]
@@ -1918,34 +2030,105 @@ do
 		end)
 	end
 
-	--[[ LuaArmor's public SDK, fetched on first use and then reused. Lazy because a reinject in an
-	already-authenticated session never calls checkKey, and should not pay an HTTP round trip
-	for a library it will not touch. If it fails to come down, every check reports
-	UNKNOWN_ERROR and the user gets a readable console line instead of a traceback. ]]
-	local api, apiTried
+	--[[ One line, capped, and run through safeText so an executor error carrying a key in a URL
+	cannot end up in the log. ]]
+	local function shortError(err, limit)
+		return safeText(err, limit or 160)
+	end
+
+	--[[ Executor errors arrive as '<chunk>:<line>: <message>', and on some executors that chunk
+	is an absolute path long enough to fill the console line on its own -- leaving the part
+	worth reading to be truncated away. Stripped for display only; the log copy keeps the
+	position, which is what anyone actually debugging it wants. ]]
+	local function errorMessage(err)
+		return shortError(select(1, tostring(err or ''):gsub('^.-:%d+: ', '')), 90)
+	end
+
+	--[[ LuaArmor's public SDK, fetched on first use and reused once it lands.
+
+	Retried the way downloadFile retries the repo, and for the same reason: this is the least
+	reliable request the loader makes. Executors routinely fail the first HttpGet of a session
+	while the game is still loading, and the CDN in front of library.lua answers with an
+	interstitial often enough to matter. One attempt turned every one of those into a flat
+	'Failed to load the LuaArmor library.'
+
+	The failure is deliberately NOT latched any more. It used to be: one flag said 'tried', and
+	after a single bad request every later call in the session returned nil without touching the
+	network again. The key prompt has no timeout, so someone could sit there submitting a
+	perfectly good key forever and never once have it checked -- the only way out was restarting
+	Roblox. A failed round now arms a short cooldown instead, which stops the candidate sweep
+	below from re-fetching for every key it tries, while any human retry (nobody clicks Submit
+	twice in five seconds) gets a genuinely fresh attempt.
+
+	apiFailure is the short label the console shows, apiDetail the full text for the log. They
+	are separate because these fail in four quite different ways and the difference is the whole
+	diagnosis: the request throwing is network, DNS or a blocked host; a body that will not
+	compile is a block page rather than the library; a chunk that throws is LuaArmor's own code
+	hitting something missing in the executor; and a chunk that returns the wrong shape means
+	the SDK changed under us. ]]
+	local api, apiCooldown, apiFailure, apiDetail
 	local function getApi()
-		if apiTried then return api end
-		apiTried = true
-		local ok, lib = pcall(function()
-			local chunk = loadstring(game:HttpGet('https://sdkapi-public.luarmor.net/library.lua'))
-			return chunk and chunk()
-		end)
-		if ok and type(lib) == 'table' then
-			api = lib
-			api.script_id = SCRIPT_ID
+		if api then return api end
+		--[[ Long enough that the three candidates below share one round of attempts instead of
+		spending nine requests on a network that is plainly down; short enough that it has
+		always expired by the time somebody presses Submit again. ]]
+		if apiCooldown and os.clock() < apiCooldown then return nil end
+
+		for attempt = 1, 3 do
+			local ok, body = pcall(function()
+				return game:HttpGet('https://sdkapi-public.luarmor.net/library.lua', true)
+			end)
+			if not ok then
+				apiFailure, apiDetail = 'network', shortError(body)
+			elseif type(body) ~= 'string' or body == '' then
+				apiFailure, apiDetail = 'no response', 'the request came back empty'
+			else
+				local chunk, compileError = loadstring(body, 'luarmor')
+				if not chunk then
+					--[[ A block page, a captcha or an ISP error page -- all of them arrive as a
+					perfectly successful request full of HTML. ]]
+					apiFailure, apiDetail = 'blocked', shortError(compileError)
+				else
+					local ranOk, lib = pcall(chunk)
+					if not ranOk then
+						apiFailure, apiDetail = 'library error', shortError(lib)
+					elseif type(lib) ~= 'table' or type(lib.check_key) ~= 'function' then
+						apiFailure, apiDetail = 'bad library', 'the SDK loaded without a check_key'
+					else
+						lib.script_id = SCRIPT_ID
+						api = lib
+						apiFailure, apiDetail = nil, nil
+						return api
+					end
+				end
+			end
+			if attempt < 3 then task.wait(attempt) end
 		end
-		return api
+
+		apiCooldown = os.clock() + 5
+		logger:warn('key.library', 'could not load the LuaArmor SDK', {reason = apiFailure, detail = apiDetail})
+		return nil
 	end
 	local function checkKey(key)
 		local lib = getApi()
 		if not lib then
-			return {code = 'UNKNOWN_ERROR', message = t('no_library')}
+			--[[ library = true marks a non-verdict: nothing was checked, so the key is neither
+			good nor bad and nothing downstream may treat it as rejected. ]]
+			return {code = 'UNKNOWN_ERROR', library = true, message = t('no_library', apiFailure or 'unknown')}
 		end
 		local ok, status = pcall(function()
 			return lib.check_key(key)
 		end)
-		if ok and type(status) == 'table' then return status end
-		return {code = 'UNKNOWN_ERROR', message = 'check_key request failed.'}
+		--[[ A table with no code is not a verdict either; taking one used to leave every branch
+		below unmatched, which read as 'checked, and nothing was wrong'. ]]
+		if ok and type(status) == 'table' and status.code then return status end
+		--[[ check_key throwing is worth repeating verbatim: it is nearly always the executor
+		missing something the SDK wants (identifyexecutor, a hwid source) rather than anything
+		to do with the key, and the message names it. ]]
+		if not ok then logger:warn('key.check', 'check_key failed', {detail = shortError(status)}) end
+		--[[ Cut shorter than the logged copy: the console line is one row and the log already has
+		the whole thing. ]]
+		return {code = 'UNKNOWN_ERROR', library = true, message = t('check_error', ok and 'no response' or errorMessage(status))}
 	end
 
 	--[[ Publishes the validated key where the protected payload will look for it. The LuaArmor
@@ -1982,6 +2165,12 @@ do
 
 	do
 		local reason
+		--[[ Kept apart from `reason` on purpose. `reason` means LuaArmor returned a verdict on
+		the key; a notice means it never got that far -- the library would not load, or
+		check_key threw -- so nothing was decided at all. Both travel to the prompt, because
+		the alternative is a bare 'Enter your key below' that says nothing about the check
+		that just failed, but only one of the two is the key's fault. ]]
+		local notice
 
 		local savedKey = readSavedKey()
 		if savedKey then
@@ -2066,6 +2255,8 @@ do
 			elseif code == 'KEY_BANNED' then
 				if fromDisk then deleteSavedKey() end
 				reason = fromDisk and t('saved_banned') or t('banned')
+			elseif status.library then
+				notice = status.message
 			end
 			--[[ UNKNOWN_ERROR / SECURITY_ERROR / TIME_ERROR / INVALID_EXECUTOR and friends also
 			keep the file, for the same reason: the key is probably fine and LuaArmor (or the
@@ -2074,10 +2265,20 @@ do
 		end
 
 		if not shared.PistonwareAuthenticated then
-			if console:IsAborted() then deleteInstall() return end
+			--[[ Nothing is torn down here, on purpose.
+
+			A key is a load-time question. Someone already injected and playing keeps
+			everything they have -- the vape stays hooked, the profile they equipped stays
+			equipped, the install and its configs stay on disk -- and the expiry stops the
+			NEXT load instead. The alternatives are both worse: polling LuaArmor on a timer
+			to catch the moment it lapses, or pulling the game out from under someone
+			mid-match, which lands at the worst possible time precisely because nobody is
+			expecting their key to run out right then.
+
+			So a rejected key costs the boot and nothing else. ]]
 
 			--[[
-				A reload gets a real window from here on, even though it started headless.
+				From here the key UI is not optional, and the loop is what makes that true.
 
 				Headless is the right default for a run something else began: the reinject
 				button, a profile reset, a config sync. None of those should throw a terminal
@@ -2090,42 +2291,69 @@ do
 				every execution afterwards went down this same headless path. An expired key
 				meant restarting Roblox.
 
-				Every route that reaches here headless is a deliberate in-game click (a
-				teleport re-runs main.lua directly and never touches this file), so there is
-				someone at the keyboard. Give them something to type into.
+				Two other ways the window used to be skipped, both closed here as well: a
+				console that had already been closed by hand returned straight out of the gate
+				(the boot was cancelled, but so was the only chance to fix the key), and a
+				single pcall(createConsole) that happened to throw -- CoreGui and gethui are
+				the one thing in this file that can fail on a hostile executor -- fell through
+				to the same dead end. So an aborted console is rebuilt rather than obeyed, and
+				a failed build is retried before giving up.
 
-				pcall'd because building the console touches CoreGui/gethui and is the one
-				thing here that can throw on a hostile executor; if it does, the boot falls
-				back to the old behaviour rather than dying on the way to the prompt.
+				Every route that reaches here is a deliberate action: a manual execution, or an
+				in-game click (a teleport re-runs main.lua directly and never touches this
+				file). Somebody is at the keyboard. Give them something to type into.
 			]]
-			local canPrompt = not isReload
-			if isReload then
+			local canPrompt = false
+			for attempt = 1, 3 do
+				--[[ The window this run already built is fine unless it is headless (a reload)
+				or the user has closed it; either way it cannot take a key. ]]
+				if attempt == 1 and not isReload and not console:IsAborted() then
+					canPrompt = true
+					break
+				end
 				local built, upgraded = pcall(createConsole)
 				if built and upgraded then
 					console = upgraded
+					logger:bindConsole(console)
 					canPrompt = true
+					break
 				end
+				logger:warn('key.console', 'could not build the key prompt console', {attempt = attempt})
+				task.wait(0.5)
 			end
 
 			console:SetStatus('KEY SYSTEM', nil, '<')
 			console:SetProgress(0.1)
 
+			--[[ Raised for the duplicate-execution guard at the top of the file: AskKey does not
+			return until the user types something or the window closes, and while it is up a
+			second execution is allowed through to build a prompt of its own instead of being
+			turned away in silence. Stamped rather than a bare true so only the boot that
+			raised it can lower it again. ]]
+			shared.PistonwareKeyPrompt = bootStamp
+
 			local key = console:AskKey({
-				message = reason or t('enter_key'),
-				messageKind = reason and 'err' or nil,
+				message = reason or notice or t('enter_key'),
+				messageKind = (reason or notice) and 'err' or nil,
 				placeholder = t('placeholder'),
 				footer = t('footer'),
-				getKeyText = t('get_key'),
 				pasteText = t('paste'),
+				pasteTip = t('tip_paste'),
 				submitText = t('submit'),
+				submitTip = t('tip_submit'),
 				helpText = t('need_help'),
-				onGetKey = function(say)
-					if clipboardSet(GETKEY_URL) then
-						say(t('link_copied'))
-					else
-						say(t('copy_failed'), 'err')
-					end
-				end,
+				helpTip = t('tip_help'),
+				--[[ The order here is the order on screen, and each entry carries its own URL
+				and its own line of hover help -- the console draws whatever it is handed and
+				knows nothing about LuaArmor. ]]
+				links = {
+					{text = t('work_ink'), tooltip = t('tip_work_ink'), onClick = function(say)
+						copyLink('Work.ink', WORKINK_URL, say)
+					end},
+					{text = t('loot_labs'), tooltip = t('tip_loot_labs'), onClick = function(say)
+						copyLink('LootLabs', LOOTLABS_URL, say)
+					end}
+				},
 				--[[ Left nil when the executor cannot read the clipboard, which drops the button
 				from the row entirely; ctrl+v into the box still works. ]]
 				onPaste = canPaste and function(say)
@@ -2173,6 +2401,10 @@ do
 						say(t('incorrect'), 'err')
 					elseif code == 'KEY_INVALID' then
 						say(t('invalid_format'), 'err')
+					elseif status.library then
+						--[[ Nothing was checked, so this is not a verdict on what they typed --
+						the message says so and asks them to press Submit again. ]]
+						say(status.message, 'err')
 					else
 						say(t('check_failed', tostring(status.message), tostring(code)), 'err')
 					end
@@ -2180,14 +2412,19 @@ do
 				end
 			})
 
+			if shared.PistonwareKeyPrompt == bootStamp then
+				shared.PistonwareKeyPrompt = nil
+			end
+
 			--[[ IsAborted() as well as the nil test: closing the window while a check is still in
 			flight lets that check land afterwards and set `accepted`, and a cancelled boot
 			must not carry on just because the key turned out to be good. The key is still
 			saved and the session still counts as authenticated, so the next run skips the
 			gate -- cancelling costs the boot, not the key. ]]
 			if not key or console:IsAborted() then
-				--[[ The window closed, or no prompt could be shown and no saved key was available. No
-				files were downloaded or injected, so the session remains unchanged. ]]
+				--[[ The window closed, or -- only if a console could not be built at all, three
+				tries deep -- there was nowhere to ask. Nothing has been downloaded or
+				injected, so the boot simply stops. ]]
 				local message = (not canPrompt) and t('headless') or t('cancelled')
 				if not console:IsAborted() then
 					console:Fail(message)
@@ -2195,7 +2432,9 @@ do
 				--[[ warn() as well as the console line: a headless reload has no window to read,
 				and silently doing nothing is the one outcome nobody can debug. ]]
 				logger:warn('loader.cancelled', message)
-				deleteInstall()
+				--[[ Flags only. No uninject, no delete: leaving the gate without a key ends
+				this boot, not the session that is already running and not the install. ]]
+				releaseBoot()
 				return
 			end
 		end
@@ -2466,7 +2705,9 @@ if not firstRunProfiles and not declinedDownload and not isReload then
 				if synced then
 					writefile('pistonware/profiles/profilecommit.txt', latestCommit)
 				else
-					warn('[pistonware] profile sync did not complete; retrying on the next run')
+					--[[ Through the logger rather than a bare warn, so it obeys the same
+					developer gate as every other line and still reaches the log file. ]]
+					logger:warn('profiles.sync', 'profile sync did not complete; retrying on the next run')
 				end
 			end
 			end)
