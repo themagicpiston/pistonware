@@ -2050,6 +2050,13 @@ run(function()
 		KillFeedController = Flamework.resolveDependency('client/controllers/game/kill-feed/kill-feed-controller@KillFeedController'),
 		Knit = Knit,
 		KnockbackUtil = require(replicatedStorage.TS.damage['knockback-util']).KnockbackUtil,
+		-- Wanted by the ported kit modules, and by nothing else in this file yet. Paths taken
+		-- from where the game's own controllers import them.
+		AudioManager = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).AudioManager,
+		BalanceFile = require(replicatedStorage.TS.balance['balance-file']).BalanceFile,
+		FrostyGunMode = require(replicatedStorage.TS.games.bedwars.kit.kits['frosty-gun']['frosty-gun-util']).FrostyGunMode,
+		SoulBrokerConstants = require(replicatedStorage.TS.games.bedwars.kit.kits['soul-broker']['soul-broker-constants']).SoulBrokerConstants,
+		TaliyahUtil = require(replicatedStorage.TS.games.bedwars.kit.kits.taliyah['taliyah-util']).TaliyahUtil,
 		MageKitUtil = require(replicatedStorage.TS.games.bedwars.kit.kits.mage['mage-kit-util']).MageKitUtil,
 		NametagController = Knit.Controllers.NametagController,
 		PartyController = Flamework.resolveDependency('@easy-games/lobby:client/controllers/party-controller@PartyController'),
@@ -6656,8 +6663,24 @@ run(function()
 	local Open
 	local Skywars
 	local Delay
+	local Steal
+	local LootRange
+	local Deposit
+	local DepositRange
+	local StolenWithin
 	local Delays = {}
+	-- Paces the deposit sweep off the same slider the loot passes use. Without it a full
+	-- inventory is thirty-odd remotes every tenth of a second.
+	local nextDeposit = 0
+	-- What Steal has taken and when. Deposit only banks what is still inside the Stolen
+	-- Within window, so your own gear is never swept up by standing near the chest.
+	local Stash = {}
+	--[[ Also consulted by the tail of scoreChestItem, where an item with no mechanical meta
+	at all lands. A kit item is exactly that shape -- the raven's whole entry is displayName,
+	sharingDisabled and an image -- so naming one here is what makes it worth taking. ]]
 	local chestItemPriority = {
+		raven = 1200,
+		recon_raven = 1150,
 		emerald = 1000,
 		diamond = 900,
 		gold = 800,
@@ -6878,6 +6901,31 @@ run(function()
 		if block then
 			return 10000 + (tonumber(block.health) or 0) * 10 + math.min(amount, 100)
 		end
+
+		--[[ Nothing mechanical in the meta at all, so every branch above fell through.
+
+		This used to end in an implicit nil, which reads as "leave it", and kit items are
+		precisely the shape that reaches here:
+
+		    [ItemType.RAVEN] = {displayName = "Raven", sharingDisabled = true, image = ...}
+
+		No sword, no block, no projectileSource, no stack size -- so ravens were being walked
+		past entirely.
+
+		An item named in chestItemPriority is deliberate and outranks everything, upgrades
+		included: a raven is worth more than a marginally better sword. Anything else still
+		gets a floor rather than nil, so an item a future update adds and this list has never
+		heard of is taken instead of ignored. ]]
+		--[[ Clear of every gear branch, which is not a small number: those scale with the
+		item's own stat before UPGRADE_BONUS is added, so a damage-55 sword upgrade already
+		reaches ~1.66m. Five million leaves room for whatever the next update's numbers look
+		like without having to revisit this. ]]
+		local KIT_ITEM_BASE = 5000000
+		local named = chestItemPriority[itemType]
+		if named then
+			return KIT_ITEM_BASE + named * 10 + math.min(amount, 100)
+		end
+		return 5000 + math.min(amount, 100)
 	end
 
 	local function getBestChestItem(items, chest, profile)
@@ -6893,9 +6941,94 @@ run(function()
 		return bestIndex
 	end
 
-	local function lootChest(chest)
+	-- `taken` collects what actually left the chest, stamped with the time. Only the Steal
+	-- path passes one -- ordinary looting has nothing to deposit afterwards.
+	--[[ Whatever the server currently has us observing, if anything.
+
+	It matters because SetObservedChest(nil) is what the client turns into a ChestClear
+	dispatch, and ChestClear is what empties the open Chest panel. Un-observing a chest the
+	player is actually looking at leaves every item still in it but nothing on screen. ]]
+	local function observedFolder()
+		local character = lplr.Character
+		local observed = character and character:FindFirstChild('ObservedChestFolder')
+		return observed and observed.Value or nil
+	end
+
+	--[[ Your own storage is not loot: in GUI Check mode the open chest is whatever you
+	opened, personal chest included, and without this the loot pass pulls straight back out
+	whatever Deposit just put in, re-stashes it, and the two trade the same items forever.
+
+	Matched by NAME, not by parentage. Every inventory-backed folder lives under
+	ReplicatedStorage.Inventories -- ordinary chests and team crates as much as your own --
+	so "is it in Inventories" refuses everything and stops the module dead. Only the three
+	folders keyed to your own username are yours. ]]
+	local function isOwnStorage(folder)
+		if not folder then return false end
+		local inventories = replicatedStorage:FindFirstChild('Inventories')
+		if not inventories or folder.Parent ~= inventories then return false end
+
+		local name = folder.Name
+		return name == lplr.Name
+			or name == lplr.Name .. '_personal'
+			or name == lplr.Name .. '_smelter'
+	end
+
+	--[[ Whose crate is it.
+
+	game-player-util's getTeamId is literally `player:GetAttribute("Team")`, and the game
+	compares block teams to player teams the same way everywhere -- player-render-controller
+	does `v:GetAttribute("Team") ~= Players.LocalPlayer:GetAttribute("Team")` -- so the
+	attribute pair is the right test.
+
+	Compared through tonumber as well as raw: an attribute stored as a string on one side
+	and a number on the other is unequal to Lua while naming the same team. ]]
+	local function sameTeam(a, b)
+		if a == nil or b == nil then return false end
+		if a == b then return true end
+		local na = tonumber(a)
+		return na ~= nil and na == tonumber(b)
+	end
+
+	--[[ A team crate carries BOTH the `team-crate` tag and the ordinary `chest` tag:
+
+	    u22[ItemType.TEAM_CRATE] = {block = {collectionServiceTags = {"chest", "team-crate"}}}
+
+	which is how our own crate was being emptied even with Steal off. The team check lived
+	only in the Steal pass; the plain chest loop iterates everything tagged `chest` inside
+	Range and never asked whose it was. Asking here covers both paths at once.
+
+	A crate with no Team attribute belongs to nobody and stays fair game. An UNKNOWN local
+	team is the opposite -- our own Team has not replicated for the first moments of a
+	round, and while it is nil every crate on the map reads as an enemy's, so the very first
+	pass would empty our own. Unknown means leave every crate alone. ]]
+	local function isFriendlyCrate(block)
+		local crateTeam = block:GetAttribute('Team')
+		if crateTeam == nil then return false end
+
+		local myTeam = lplr:GetAttribute('Team')
+		if myTeam == nil then return true end
+
+		return sameTeam(crateTeam, myTeam)
+	end
+
+	-- The GUI path is handed a folder rather than a block, and the Team attribute lives on
+	-- the block -- so the crate that owns the folder has to be found before its team can be
+	-- read. Cheap: there are only ever a handful of crates on a map.
+	local function folderIsFriendlyCrate(crates, folder)
+		if not folder then return false end
+		for _, crate in crates do
+			local value = crate:FindFirstChild('ChestFolderValue')
+			if value and value.Value == folder then
+				return isFriendlyCrate(crate)
+			end
+		end
+		return false
+	end
+
+	local function lootChest(chest, taken)
 		chest = chest and chest.Value or nil
 		if not chest or (Delays[chest] or 0) >= tick() then return end
+		if isOwnStorage(chest) then return end
 
 		local accessories = {}
 		for _, v in chest:GetChildren() do
@@ -6915,34 +7048,237 @@ run(function()
 		local inventory = bedwars.Client:GetNamespace('Inventory')
 		local setObservedChest = inventory:Get('SetObservedChest')
 		local chestGetItem = inventory:Get('ChestGetItem')
-		local observed = pcall(function()
-			setObservedChest:SendToServer(chest)
-		end)
-		if not observed then return end
 
+		-- Already the open chest (GUI Check mode passes exactly that): the server has it
+		-- observed, so opening it again is a no-op and closing it afterwards is the bug --
+		-- it blanks the panel the player is reading. Only chests we opened get closed.
+		local alreadyOpen = chest == observedFolder()
+		if not alreadyOpen then
+			local observed = pcall(function()
+				setObservedChest:SendToServer(chest)
+			end)
+			if not observed then return end
+		end
+
+		local firstItem = true
 		while #accessories > 0 do
+			-- The module can be switched off mid-chest, and a chest can be broken or
+			-- emptied by someone else while we are waiting between items.
+			if not ChestSteal.Enabled then break end
+
+			if firstItem then
+				firstItem = false
+			else
+				-- Delay paces the items too, not just the chests. Skipped before the first
+				-- one, so a chest is not held up before anything has been taken from it.
+				task.wait(Delay.Value)
+				if not (ChestSteal.Enabled and chest.Parent) then break end
+			end
+
 			local bestIndex = getBestChestItem(accessories, chest, profile)
 			if not bestIndex then break end
 			local item = table.remove(accessories, bestIndex)
+			-- Gone while we waited: taken by someone else, or the chest was emptied.
+			if item.Parent ~= chest then continue end
+
 			local amount = getChestAmount(item)
 			local success, result = pcall(function()
 				return chestGetItem:CallServer(chest, item)
 			end)
 			if success and result ~= false then
 				addProfileItem(profile, item.Name, amount)
+				if taken then
+					table.insert(taken, {Type = item.Name, Time = tick()})
+				end
 			end
 		end
 
-		pcall(function()
-			setObservedChest:SendToServer(nil)
-		end)
+		if not alreadyOpen then
+			pcall(function()
+				setObservedChest:SendToServer(nil)
+			end)
+		end
 	end
 	
+	--[[ Steal: the same looting, pointed at the enemy team's crate, plus the half that
+	makes raiding one worth doing -- emptying your inventory into your own personal chest
+	between trips so the next trip has room.
+
+	It goes through lootChest rather than grabbing everything blindly, so the priority
+	ordering and the stack-size limits apply here too: a crate raid that fills your
+	inventory with the first thing it sees is a crate raid that leaves the diamonds
+	behind. ]]
+	local function inventoryRemote(name)
+		return bedwars.Client:GetNamespace('Inventory'):Get(name)
+	end
+
+	local function personalInventory()
+		local inventories = replicatedStorage:FindFirstChild('Inventories')
+		return inventories and inventories:FindFirstChild(lplr.Name .. '_personal') or nil
+	end
+
+	--[[ Deposit banks only what Steal recently took, inside the Stolen Within window.
+
+	The window is what makes the toggle safe to leave on: an entry that has aged out is
+	dropped rather than deposited, so walking past your own chest with a sword you have
+	been carrying all game does not bank it. It also bounds the retry -- an item the
+	server never actually handed over stops being chased once it ages out. ]]
+	--[[ One worker, walking the stash until it empties.
+
+	The previous shape drained the stash into a snapshot and fired every ChestGiveItem as
+	its own spawned call, relying on failures being re-queued and picked up by some later
+	pass. That made success a matter of timing: the server routinely refuses an item that
+	is still mid-move out of the chest it was just taken from -- a `false` reply is normal,
+	not a rejection -- and between the drain and the re-queue the stash reads as empty, so
+	the pass that would have retried bails out instead.
+
+	Now nothing leaves the stash until the server has actually taken it, the sweep retries
+	in place until the window closes, and `depositing` keeps two sweeps from firing
+	overlapping calls for the same tool. It runs in one spawned thread so the sequential
+	CallServers never park the module's own loop. ]]
+	local depositing = false
+
+	local function depositAll()
+		if depositing then return end
+
+		local inventory = personalInventory()
+		if not inventory then return end
+
+		local window = StolenWithin.Value
+		local now = tick()
+		for index = #Stash, 1, -1 do
+			if now - Stash[index].Time > window then
+				table.remove(Stash, index)
+			end
+		end
+		if #Stash == 0 then return end
+
+		depositing = true
+		task.spawn(function()
+			local chestGiveItem = inventoryRemote('ChestGiveItem')
+			local index = 1
+
+			while index <= #Stash do
+				if not (ChestSteal.Enabled and Deposit.Enabled) then break end
+
+				local entry = Stash[index]
+				if tick() - entry.Time > StolenWithin.Value then
+					table.remove(Stash, index)
+					continue
+				end
+
+				local item = getItem(entry.Type)
+				local given = false
+				if item and item.tool then
+					local success, result = pcall(function()
+						return chestGiveItem:CallServer(inventory, item.tool)
+					end)
+					given = success and result ~= false
+				end
+
+				if given then
+					table.remove(Stash, index)
+					-- Back to the front: an item that would not go a moment ago often will
+					-- once another has moved, and the ones behind it are the older ones.
+					index = 1
+				else
+					-- Left in place. It is either still replicating into the inventory or
+					-- still mid-move out of the chest; both clear on their own, and the
+					-- window is what stops this going round forever.
+					index += 1
+				end
+
+				-- Same Delay as the chest side: one item per tick of it, whether it went in
+				-- or has to be tried again.
+				task.wait(Delay.Value)
+			end
+
+			depositing = false
+		end)
+	end
+
+	--[[ Found two ways, because the two sources disagree and only one of them is a
+	runtime fact.
+
+	The match server tags the block `personal-chest` -- that is the tag AutoSteal collects
+	and it demonstrably works. The lobby dump shows no such tag, only a script folder by
+	that name, and its ChestController recognises the block by NAME off the ordinary
+	`chest` tag instead. Reading the dump alone is what led to dropping the tag, and
+	dropping it is why nothing was ever found in range.
+
+	Taking both costs one extra collection and means neither being wrong sinks it. ]]
+	local PERSONAL_CHESTS = {personal_chest = true, og_personal_chest = true}
+
+	local function nearestPersonalChest(chests, personalChests, localPosition)
+		local best, bestDistance = nil, math.huge
+		for _, chest in personalChests do
+			local distance = (localPosition - chest.Position).Magnitude
+			if distance < bestDistance then best, bestDistance = chest, distance end
+		end
+		for _, chest in chests do
+			if PERSONAL_CHESTS[chest.Name] then
+				local distance = (localPosition - chest.Position).Magnitude
+				if distance < bestDistance then best, bestDistance = chest, distance end
+			end
+		end
+		return best, bestDistance
+	end
+
+	--[[ GUI Check reads the ScreenGui rather than asking the AppController.
+
+	bedwars.AppController is the app-controller module's exported CLASS, not the instance
+	Flamework hands out -- chest-controller resolves the real one as
+	Flamework.resolveDependency("@easy-games/game-core:client/controllers/app-controller@AppController")
+	-- so isAppOpen is being called on the wrong table. An error thrown there takes the
+	whole ChestSteal loop with it, which is why nothing ran at all while GUI Check was on,
+	deposit included.
+
+	The app parents a ScreenGui named ChestApp into PlayerGui while it is open, which is
+	the same fact observable without resolving anything. The old call stays as a fallback
+	for a build that does not name it that way, but pcall'd this time. ]]
+	local function chestAppOpen()
+		local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+		local app = playerGui and playerGui:FindFirstChild('ChestApp')
+		-- Left parented but disabled is not open.
+		if app then return app.Enabled ~= false end
+
+		local ok, open = pcall(function()
+			return bedwars.AppController:isAppOpen('ChestApp')
+		end)
+		return (ok and open) and true or false
+	end
+
+	local function stealPass(crates, localPosition)
+		for _, crate in crates do
+			if isFriendlyCrate(crate) then continue end
+			if (localPosition - crate.Position).Magnitude <= LootRange.Value then
+				lootChest(crate:FindFirstChild('ChestFolderValue'), Stash)
+			end
+		end
+	end
+
+	local function depositPass(chests, personalChests, localPosition)
+		-- Paced before the checks, not after, so the logging below runs at the Delay rate
+		-- rather than ten times a second.
+		if tick() < nextDeposit then return end
+		nextDeposit = tick() + Delay.Value
+
+		local chest, distance = nearestPersonalChest(chests, personalChests, localPosition)
+		if not chest or distance > DepositRange.Value then return end
+
+		depositAll()
+	end
+
 	ChestSteal = vape.Categories.World:CreateModule({
 		Name = 'ChestSteal',
 		Function = function(callback)
 			if callback then
 				local chests = collection('chest', ChestSteal)
+				-- Collected up front rather than when Steal is switched on: collection()
+				-- registers tag listeners, and doing that mid-run would miss every crate
+				-- already on the map.
+				local crates = collection('team-crate', ChestSteal)
+				local personalChests = collection('personal-chest', ChestSteal)
 				--[[ The enabled check is the exit, not just the queue type: without it, toggling the
 				module back off inside a test queue left this spinning at frame rate forever. ]]
 				repeat task.wait(0.1) until store.queueType ~= 'bedwars_test' or (not ChestSteal.Enabled)
@@ -6950,26 +7286,60 @@ run(function()
 				if (not Skywars.Enabled) or store.queueType:find('skywars') then
 					repeat
 						if entitylib.isAlive and store.matchState ~= 2 then
+							local localPosition = entitylib.character.RootPart.Position
+							-- Resolved once: both the loot branch and the deposit below ask
+							-- the same question, and with GUI Check off the answer is always
+							-- yes without touching PlayerGui at all.
+							local guiOpen = (not Open.Enabled) or chestAppOpen()
+
 							if Open.Enabled then
-								if bedwars.AppController:isAppOpen('ChestApp') then
-									lootChest(lplr.Character:FindFirstChild('ObservedChestFolder'))
-								end
-							else
-								local localPosition = entitylib.character.RootPart.Position
-								for _, v in chests do
-									if (localPosition - v.Position).Magnitude <= Range.Value then
-										lootChest(v:FindFirstChild('ChestFolderValue'))
+								if guiOpen then
+									local observed = lplr.Character and lplr.Character:FindFirstChild('ObservedChestFolder')
+									-- Opening our own crate by hand must not empty it either.
+									if not folderIsFriendlyCrate(crates, observed and observed.Value) then
+										lootChest(observed, Stash)
 									end
 								end
+							else
+								for _, v in chests do
+									-- Team crates are in here too, tagged `chest` alongside
+									-- `team-crate`, so our own has to be skipped by name of
+									-- team rather than left to the Steal pass.
+									if isFriendlyCrate(v) then continue end
+									if (localPosition - v.Position).Magnitude <= Range.Value then
+										lootChest(v:FindFirstChild('ChestFolderValue'), Stash)
+									end
+								end
+
+								-- Kept inside the range branch: taking from a crate you have
+								-- not opened is exactly what GUI Check is there to stop.
+								if Steal.Enabled then
+									stealPass(crates, localPosition)
+								end
+							end
+
+							-- Outside the branch so it runs in both modes, but still behind
+							-- GUI Check: with that on, nothing happens until a chest is
+							-- actually open. What was breaking it before was not this gate,
+							-- it was chestAppOpen throwing and killing the whole loop.
+							if Deposit.Enabled and guiOpen then
+								depositPass(chests, personalChests, localPosition)
 							end
 						end
-						task.wait(0.1)
+						-- The loop itself runs off the slider too, so nothing is left
+						-- pacing on a hardcoded number.
+						task.wait(Delay.Value)
 					until not ChestSteal.Enabled
 				end
 			else
 				--[[ Keyed by chest folder, which is destroyed with the chest -- without this
 				the table holds a reference to every chest looted this session. ]]
 				table.clear(Delays)
+				table.clear(Stash)
+				nextDeposit = 0
+				-- The sweep exits on its own once the toggles go, but the flag has to be
+				-- cleared here or a re-enable finds a deposit already in progress.
+				depositing = false
 			end
 		end,
 		Tooltip = 'Pulls items out of the chests near you.'
@@ -6981,18 +7351,90 @@ run(function()
 		Default = 18,
 		Suffix = function(val)
 			return val == 1 and 'stud' or 'studs'
-		end
+		end,
+		Tooltip = 'How far to reach for a chest.'
 	})
 	Delay = ChestSteal:CreateSlider({
 		Name = 'Delay',
-		Min = 0.2,
+		-- Floors at zero: Delay is per-ITEM now, not per-chest, so the old 0.2 minimum was
+		-- pacing something far smaller than it was chosen for. task.wait(0) still yields a
+		-- frame, so the bottom of the slider is as fast as the round trips allow and no
+		-- faster.
+		Min = 0,
 		Max = 3,
 		Default = 0.5,
 		Decimal = 10,
 		Suffix = function(val) return 's' end,
-		Tooltip = 'How long before it tries the same chest again.\nRaise it if looting dies off mid round, each pass\ncosts two remotes out of a 299/min budget.'
+		Tooltip = 'Wait between every action - item, chest and deposit.'
 	})
-	Open = ChestSteal:CreateToggle({Name = 'GUI Check'})
+	Steal = ChestSteal:CreateToggle({
+		Name = 'Steal',
+		Function = function()
+			-- Guarded: the toggle's Function fires once while the options are still being
+			-- built, before the slider below exists.
+			if LootRange and LootRange.Object then
+				LootRange.Object.Visible = Steal.Enabled
+			end
+		end,
+		Tooltip = 'Also loots enemy team crates.'
+	})
+	LootRange = ChestSteal:CreateSlider({
+		Name = 'Loot Range',
+		Min = 1,
+		Max = 18,
+		Default = 18,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end,
+		Tooltip = 'How far to reach for a crate.'
+	})
+	Deposit = ChestSteal:CreateToggle({
+		Name = 'Deposit',
+		Function = function()
+			if DepositRange and DepositRange.Object then
+				DepositRange.Object.Visible = Deposit.Enabled
+			end
+			if StolenWithin and StolenWithin.Object then
+				StolenWithin.Object.Visible = Deposit.Enabled
+			end
+		end,
+		Tooltip = 'Puts fresh loot into your personal chest.'
+	})
+	DepositRange = ChestSteal:CreateSlider({
+		Name = 'Deposit Range',
+		Min = 1,
+		Max = 18,
+		Default = 7.5,
+		Decimal = 10,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end,
+		Tooltip = 'How close to your personal chest to deposit.'
+	})
+	StolenWithin = ChestSteal:CreateSlider({
+		Name = 'Stolen Within',
+		Min = 1,
+		Max = 15,
+		-- Long enough to cover the walk back from an enemy crate, which ten seconds was
+		-- not: the stash aged out on the way home and there was nothing left to bank.
+		Default = 10,
+		Decimal = 10,
+		Suffix = function(val) return 's' end,
+		Tooltip = 'Only deposits loot taken this recently.'
+	})
+	if LootRange.Object then
+		LootRange.Object.Visible = Steal.Enabled
+	end
+	if DepositRange.Object then
+		DepositRange.Object.Visible = Deposit.Enabled
+	end
+	if StolenWithin.Object then
+		StolenWithin.Object.Visible = Deposit.Enabled
+	end
+	Open = ChestSteal:CreateToggle({
+		Name = 'GUI Check',
+		Tooltip = 'Only acts on the chest you have open.'
+	})
 	Skywars = ChestSteal:CreateToggle({
 		Name = 'Only Skywars',
 		Function = function()
@@ -7001,7 +7443,8 @@ run(function()
 				ChestSteal:Toggle()
 			end
 		end,
-		Default = true
+		Default = true,
+		Tooltip = 'Stays off outside Skywars.'
 	})
 end)
 	
