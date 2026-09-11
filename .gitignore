@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 /dev/
 games/bedwars.lua
+games/bedwarsFix.lua
+/profiles/
 .DS_Store
 loaderdev.lua
 pistonware_loader.log
@@ -10,3 +12,4 @@ pistonware_loader_telemetry.jsonl
 pistonware_release.json
 pistonware/loader.log
 pistonware/loader_telemetry.jsonl
+pistonware/errors/

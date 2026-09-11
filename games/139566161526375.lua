@@ -1,4 +1,3 @@
-if not shared.PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'THREAD', 'SIGNAL'}) then return end
 
 local run = function(func) func() end
 local cloneref = cloneref or function(obj) return obj end

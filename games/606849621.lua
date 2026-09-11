@@ -11,7 +11,6 @@ local function bufferLog(event, message, details)
 	if shared.PistonwareDeveloper == true then print('[pistonware] '..tostring(message)) end
 end
 
-if not shared.PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'SCRIPT'}) then return end
 
 local loadstring = function(...)
 	local res, err = loadstring(...)

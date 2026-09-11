@@ -274,37 +274,24 @@ do
 		return ok, result, waits, knit
 	end
 
-	for _, debugApi in {
-		false,
-		{},
-		{getupvalue = function() error('unsupported') end},
-		{getupvalue = function() return 42 end}
-	} do
-		local ok, result, _, knit = runProbe(debugApi)
-		expect(ok and result.Knit == knit, 'bootstrap failed without usable debug extraction')
-		local bow = result.BowConstantsTable
-		expect(bow.BeamGrowthMultiplier == 0.08 and bow.CameraMultiplier == 10
-			and bow.RelX == 0.8 and bow.RelY == -0.6 and bow.RelZ == 0
-			and bow.YTargetOffset == 0.05, 'bootstrap changed the approved bow fallback')
-	end
-
 	local extracted = {RelX = 1, RelY = 2, RelZ = 3}
-	local ok, result = runProbe({
+	local debugApi = {
 		getupvalue = function(callback, index)
 			expect(type(callback) == 'function' and index == 8, 'wrong bow extraction target')
 			return extracted
 		end
-	})
+	}
+	local ok, result = runProbe(debugApi)
 	expect(ok and result.BowConstantsTable == extracted, 'bootstrap discarded the live bow table')
-	local ready, _, waits = runProbe(false, 3)
+	local ready, _, waits = runProbe(debugApi, 3)
 	expect(ready and waits == 3, 'bootstrap did not wait for controllers')
-	local started, _, startupWaits = runProbe(false, nil, 3)
+	local started, _, startupWaits = runProbe(debugApi, nil, 3)
 	expect(started and startupWaits == 3,
 		'bootstrap proceeded before Knit startup completed')
-	local stalled, startupFailure = runProbe(false, nil, math.huge)
+	local stalled, startupFailure = runProbe(debugApi, nil, math.huge)
 	expect(not stalled and tostring(startupFailure):find('within 60s', 1, true),
 		'Knit startup wait did not time out')
-	local timedOut, failure, timeoutWaits = runProbe(false, math.huge)
+	local timedOut, failure, timeoutWaits = runProbe(debugApi, math.huge)
 	expect(not timedOut and tostring(failure):find('within 60s', 1, true),
 		'controller timeout did not fail initialization')
 	expect(timeoutWaits <= 602, 'controller wait exceeded its deadline')
@@ -331,16 +318,13 @@ end
 
 expectSourceContains('loader.lua', '/branches/')
 expectSourceContains('loader.lua', "release.sourceRef or release.branch")
-expectSourceContains('loader.lua', "downloadFile('pistonware/libraries/capabilities.lua')")
-expectSourceContains('loader.lua', 'namespace.capabilities = capabilities')
-expectSourceContains('loader.lua', "capabilities:require(scope or 'legacy', required)")
 expectSourceContains('loader.lua', 'namespace.buffer = buffer')
 expectSourceContains('loader.lua', "local dumpPath = 'pistonware/errors/'")
 expectSourceContains('loader.lua', 'function buffer.dump(reason)')
 expectSourceContains('loader.lua', 'function buffer.guard(stage, fatal, callback, ...)')
 expect(not sources['loader.lua']:find('pcall(print, line)', 1, true), 'loader.lua still prints logger lines directly')
 expect(not sources['loader.lua']:find('pcall(warn, line)', 1, true), 'loader.lua still warns logger lines directly')
-expect(not sources['loader.lua']:find("local unsupported = {'xeno', 'solara'}", 1, true), 'loader.lua still blocks executors by name')
+expectSourceContains('loader.lua', "local unsupported = {'xeno', 'solara'}")
 
 do
 	local startAt = assert(sources['loader.lua']:find('local function installPistonwareBuffer', 1, true))
@@ -395,206 +379,6 @@ do
 	getgenv, isfolder = originalGetgenv, originalIsfolder
 	makefolder, writefile = originalMakefolder, originalWritefile
 end
-
-do
-	local createCapabilities = compile('libraries/capabilities.lua')()
-	expect(type(createCapabilities) == 'function', 'capabilities.lua returned no factory')
-	local records = {}
-	local environment = {}
-	environment.getgenv = function() return environment end
-	environment.loadstring = loadstring
-	local capabilities = createCapabilities({
-		environment = environment,
-		buffer = {
-			print = function(event, message) records[#records + 1] = event..':'..message end,
-			warn = function(event, message) records[#records + 1] = event..':'..message end
-		}
-	})
-	expect(capabilities:verify('environment.getgenv'), 'getgenv behavior probe failed')
-	expect(capabilities:verify('code.loadstring'), 'loadstring behavior probe failed')
-	expect(capabilities.flags['environment.getgenv'] == true, 'getgenv flag was not set')
-	expect(capabilities.flags['code.loadstring'] == true, 'loadstring flag was not set')
-	local required = capabilities:require('smoke.bootstrap', {'environment.getgenv', 'code.loadstring'})
-	expect(required == true, 'verified capability requirement failed')
-	local missing = capabilities:require('smoke.missing', {'hookfunction'})
-	expect(missing == false, 'missing capability requirement passed')
-	expect(capabilities:evaluate({
-		AllOf = {
-			'environment.getgenv',
-			{AnyOf = {'hookfunction', 'code.loadstring'}}
-		}
-	}), 'nested alternative rejected a verified provider')
-	local unavailable, reasons = capabilities:evaluate({
-		AnyOf = {'hookfunction', 'restorefunction'}
-	})
-	expect(not unavailable and #reasons == 1,
-		'unavailable alternatives did not return one requirement explanation')
-	expect(not capabilities:evaluate({AnyOf = {}}),
-		'empty alternatives passed')
-	expect(capabilities:evaluate({AllOf = {}}),
-		'empty requirements failed')
-	expect(not capabilities:evaluate({AllOf = {'unknown.capability'}}),
-		'unknown capability passed')
-	expect(not capabilities:evaluate({AllOf = {}, AnyOf = {}}),
-		'ambiguous expression passed')
-	expect(not capabilities:evaluate({AllOf = {[2] = 'code.loadstring'}}),
-		'sparse requirements passed')
-	local cyclic = {}
-	cyclic.AllOf = {cyclic}
-	expect(not capabilities:evaluate(cyclic), 'cyclic requirements passed')
-	expect(capabilities:evaluate({'code.loadstring'}),
-		'evaluation retained state from a previous failure')
-	expect(capabilities:observe('input.mouse', true, 'smoke first-use observation'),
-		'first-use capability observation failed')
-	expect(capabilities.flags['input.mouse'] == true, 'observed capability flag was not set')
-	local snapshot = capabilities:snapshot()
-	expect(snapshot['environment.getgenv'].supported == true, 'snapshot lost the verified flag')
-	expect(#records >= 3, 'capability results were not routed through the buffer')
-end
-
-do
-	local createCapabilities = compile('libraries/capabilities.lua')()
-	local function fixture(options)
-		options = options or {}
-		local service, object, mt = {}, {}, {}
-		local state = {
-			readonly = options.readonly ~= false,
-			writes = 0,
-			hooks = 0
-		}
-		local original = function(_, name)
-			assert(name == 'Players', 'probe changed its arguments')
-			return service
-		end
-		local target = original
-		mt.__namecall = options.native == 'inplace'
-			and function(...) return target(...) end or original
-		local entry = mt.__namecall
-		object.GetService = function(self, ...)
-			return mt.__namecall(self, ...)
-		end
-		local api = {
-			getrawmetatable = function() return mt end,
-			newcclosure = function(callback)
-				return function(...)
-					if options.callError then error('simulated call failure') end
-					local result = callback(...)
-					if options.conflict then mt.__namecall = options.conflict end
-					return result
-				end
-			end,
-			isreadonly = function() return state.readonly end,
-			setreadonly = function(_, readonly)
-				state.writes += 1
-				if options.cleanupError and state.writes == 3 then
-					error('simulated cleanup failure')
-				end
-				state.readonly = readonly
-			end,
-			getnamecallmethod = function()
-				if options.methodError then error('simulated method failure') end
-				return options.method or 'GetService'
-			end
-		}
-		if options.native then
-			api.hookmetamethod = function(_, _, replacement)
-				state.hooks += 1
-				if options.native == 'inplace' then
-					local previous = target
-					target = replacement
-					return previous
-				end
-				local previous = mt.__namecall
-				if options.native ~= 'noop' then mt.__namecall = replacement end
-				return previous
-			end
-		end
-		if options.noMethod then api.getnamecallmethod = nil end
-		if options.noRaw then api.setreadonly = nil end
-		local environment = setmetatable({}, {__index = api})
-		local capabilities = createCapabilities({environment = environment, game = object})
-		local function restored()
-			return mt.__namecall == entry and target == original
-				and state.readonly == (options.readonly ~= false)
-		end
-		return capabilities, state, restored
-	end
-
-	for _, options in {
-		{},
-		{readonly = false},
-		{native = 'working'},
-		{native = 'inplace'},
-		{native = 'noop'}
-	} do
-		local capabilities, state, restored = fixture(options)
-		expect(capabilities:verify('namecall.getmethod'), 'namecall provider verification failed')
-		local expected = options.native and options.native ~= 'noop' and 'native' or 'raw'
-		expect(capabilities:result('namecall.getmethod').details.provider == expected,
-			'namecall chose the wrong provider')
-		expect(capabilities:evaluate({
-			AllOf = {
-				{AnyOf = {'namecall.hook.native', 'namecall.hook.raw'}},
-				'namecall.getmethod'
-			}
-		}), 'verified namecall requirements failed')
-		expect(restored(), 'namecall probe left modified state')
-		expect(capabilities:verify('namecall.getmethod') and restored(),
-			'repeated namecall verification failed')
-		if expected == 'native' then
-			expect(state.writes == 0, 'native success unnecessarily used raw writes')
-		end
-	end
-
-	for _, options in {{method = 'WrongMethod'}, {methodError = true}} do
-		local capabilities, _, restored = fixture(options)
-		expect(not capabilities:verify('namecall.getmethod'), 'bad method result passed')
-		expect(capabilities:has('namecall.hook.raw'), 'method failure erased working interception')
-		expect(capabilities:result('namecall.getmethod').status == 'failed',
-			'method mismatch was misclassified')
-		expect(restored(), 'method failure left modified state')
-	end
-
-	local missing = fixture({noMethod = true})
-	expect(not missing:verify('namecall.getmethod'), 'missing method function passed')
-	expect(missing:result('namecall.getmethod').status == 'missing',
-		'missing method function was misclassified')
-	local blocked = fixture({noRaw = true})
-	expect(not blocked:verify('namecall.getmethod'), 'missing providers passed')
-	expect(blocked:result('namecall.getmethod').status == 'blocked',
-		'untestable method function was misclassified')
-	local failed, _, restored = fixture({callError = true})
-	expect(not failed:verify('namecall.hook.raw') and restored(),
-		'call failure did not restore the original state')
-
-	for _, options in {
-		{cleanupError = true},
-		{conflict = function() return {} end}
-	} do
-		local capabilities, state = fixture(options)
-		expect(not capabilities:verify('namecall.hook.raw'), 'cleanup failure passed')
-		expect(capabilities:result('namecall.hook.raw').status == 'blocked',
-			'cleanup failure was misclassified')
-		local writes = state.writes
-		expect(not capabilities:verify('namecall.getmethod'), 'blocked session retried probing')
-		expect(state.writes == writes, 'blocked session performed more raw writes')
-	end
-end
-
-expectSourceContains('libraries/capabilities.lua', "register('debug.setstack'")
-expectSourceContains('libraries/capabilities.lua', "register('metatable.hook.table'")
-expectSourceContains('libraries/capabilities.lua', "register('metatable.hook.instance'")
-expectSourceContains('libraries/capabilities.lua', "register('namecall.getmethod'")
-expectSourceContains('libraries/capabilities.lua', "for _, method in {'Disable', 'Enable', 'Fire'}")
-expectSourceContains('libraries/capabilities.lua', "register('script.getbytecode'")
-
-expectSourceContains('games/11156779721.lua', "PistonwareRequireCapabilities({'DEBUG', 'THREAD', 'SIGNAL'})")
-expectSourceContains('games/139566161526375.lua', "PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'THREAD', 'SIGNAL'})")
-expectSourceContains('games/5938036553.lua', "PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'THREAD', 'GC'})")
-expectSourceContains('games/606849621.lua', "PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'SCRIPT'})")
-expectSourceContains('games/79695841807485.lua', "PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'THREAD', 'SIGNAL', 'SCRIPT'})")
-expectSourceContains('games/8768229691.lua', "PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'THREAD', 'SIGNAL'})")
-expectSourceContains('games/universal.lua', "'DEBUG', 'HOOKFUNCTION', 'METAMETHOD', 'THREAD', 'SIGNAL'")
 expectSourceContains('games/universal.lua', "local SpeedMethodList = {'Velocity'}")
 expectSourceContains('games/universal.lua', 'List = SpeedMethodList')
 expectSourceContains('games/universal.lua', 'if shared.PistonwareDeveloper == true then')

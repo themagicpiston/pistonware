@@ -2098,25 +2098,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		task.wait(0.1)
 	end
 
-	local BowConstantsTable
-	if debug and type(debug.getupvalue) == 'function' then
-		local suc, result = pcall(
-			debug.getupvalue,
-			Knit.Controllers.ProjectileController.enableBeam,
-			8
-		)
-		if suc and type(result) == 'table' then
-			BowConstantsTable = result
-		end
-	end
-	BowConstantsTable = BowConstantsTable or {
-		BeamGrowthMultiplier = 0.08,
-		CameraMultiplier = 10,
-		RelX = 0.8,
-		RelY = -0.6,
-		RelZ = 0,
-		YTargetOffset = 0.05
-	}
+	local BowConstantsTable = debug.getupvalue(
+		Knit.Controllers.ProjectileController.enableBeam,
+		8
+	)
 
 	local Flamework = require(replicatedStorage['rbxts_include']['node_modules']['@flamework'].core.out).Flamework
 	local InventoryUtil = require(replicatedStorage.TS.inventory['inventory-util']).InventoryUtil

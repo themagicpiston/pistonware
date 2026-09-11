@@ -1,4 +1,3 @@
-if not shared.PistonwareRequireCapabilities({'DEBUG', 'HOOKFUNCTION', 'THREAD', 'GC'}) then return end
 
 local loadstring = function(...)
 	local res, err = loadstring(...)

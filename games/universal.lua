@@ -11,10 +11,6 @@ local function bufferError(event, message, details)
 	if shared.PistonwareDeveloper == true then warn('[pistonware] '..tostring(message)) end
 end
 
-shared.PistonwareRequireCapabilities({
-	'DEBUG', 'HOOKFUNCTION', 'METAMETHOD', 'THREAD', 'SIGNAL'
-}, 'universal')
-
 local loadstring = function(...)
 	local res, err = loadstring(...)
 	if err and vape then

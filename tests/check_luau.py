@@ -40,7 +40,6 @@ SMOKE_SOURCES = (
     "games/universal.lua",
     "games/bedwars.lua",
     "guis/newgui.lua",
-    "libraries/capabilities.lua",
     "libraries/drawing.lua",
     "libraries/entity.lua",
     "libraries/hash.lua",
@@ -194,90 +193,6 @@ def source_files() -> list[Path]:
     return files
 
 
-CAPABILITY_SYMBOLS = {
-    "debug.getconstant": "debug.getconstant",
-    "debug.getconstants": "debug.getconstants",
-    "debug.getinfo": "debug.getinfo",
-    "debug.getproto": "debug.getproto",
-    "debug.getprotos": "debug.getprotos",
-    "debug.getstack": "debug.getstack",
-    "debug.getupvalue": "debug.getupvalue",
-    "debug.getupvalues": "debug.getupvalues",
-    "debug.setconstant": "debug.setconstant",
-    "debug.setstack": "debug.setstack",
-    "debug.setupvalue": "debug.setupvalue",
-    "hookfunction": "hookfunction",
-    "restorefunction": "restorefunction",
-    "islclosure": "closure.islua",
-    "iscclosure": "closure.isc",
-    "newcclosure": "closure.newc",
-    "checkcaller": "closure.checkcaller",
-    "getrawmetatable": "metatable.getraw.table",
-    "setrawmetatable": "metatable.setraw",
-    "setreadonly": "metatable.setreadonly",
-    "hookmetamethod": "metatable.hook.instance",
-    "getnamecallmethod": "namecall.getmethod",
-    "getidentity": "thread.getidentity",
-    "getthreadidentity": "thread.getidentity",
-    "setidentity": "thread.setidentity",
-    "setthreadidentity": "thread.setidentity",
-    "getconnections": "signal.getconnections",
-    "firesignal": "signal.fire",
-    "replicatesignal": "signal.replicate",
-    "getgc": "gc.get.functions",
-    "getrenv": "script.getenvironment",
-    "getscriptbytecode": "script.getbytecode",
-    "getscriptclosure": "script.getclosure",
-    "decompile": "script.decompile",
-    "isfile": "filesystem.isfile",
-    "readfile": "filesystem.readfile",
-    "writefile": "filesystem.writefile",
-    "appendfile": "filesystem.appendfile",
-    "delfile": "filesystem.delfile",
-    "isfolder": "filesystem.isfolder",
-    "makefolder": "filesystem.makefolder",
-    "listfiles": "filesystem.listfiles",
-    "delfolder": "filesystem.delfolder",
-    "cloneref": "runtime.cloneref",
-    "gethui": "runtime.gethui",
-    "getcustomasset": "runtime.getcustomasset",
-    "isnetworkowner": "runtime.networkowner",
-    "iswindowactive": "runtime.windowactive",
-    "isrbxactive": "runtime.windowactive",
-    "mouse1click": "input.mouse",
-    "mouse1press": "input.mouse",
-    "mouse1release": "input.mouse",
-    "mouse2click": "input.mouse",
-    "mousemoverel": "input.mouse",
-    "firetouchinterest": "input.touch",
-    "fireproximityprompt": "input.proximity",
-    "queue_on_teleport": "teleport.queue",
-}
-
-
-def check_capability_registry() -> None:
-    capability_path = ROOT / "libraries" / "capabilities.lua"
-    if not capability_path.is_file():
-        raise RuntimeError("capability registry does not exist: libraries/capabilities.lua")
-    registry = capability_path.read_text(encoding="utf-8")
-    production = []
-    for path in ROOT.rglob("*.lua"):
-        if ".cache" in path.parts or "docs" in path.parts or "tests" in path.parts:
-            continue
-        if path == capability_path:
-            continue
-        production.append(path.read_text(encoding="utf-8", errors="ignore"))
-    source = "\n".join(production)
-    missing = []
-    for symbol, capability in CAPABILITY_SYMBOLS.items():
-        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", source):
-            if f"'{capability}'" not in registry:
-                missing.append(f"{symbol} -> {capability}")
-    if missing:
-        raise RuntimeError("executor functions have no capability registration:\n" + "\n".join(missing))
-    print(f"Mapped {len(CAPABILITY_SYMBOLS)} executor symbols to capability flags.")
-
-
 def run_parser(compiler: Path, files: list[Path]) -> None:
     command = [str(compiler), "--only-parse", *(str(path.relative_to(ROOT)) for path in files)]
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
@@ -363,7 +278,6 @@ def main() -> int:
         tag, asset = latest_release()
         tools = install_archive(tag, asset)
         files = source_files()
-        check_capability_registry()
         run_parser(tools / binary_name("luau-compile"), files)
         run_compiler(tools / binary_name("luau-compile"), files)
         if args.executor_compiler:

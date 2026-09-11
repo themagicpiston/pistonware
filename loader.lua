@@ -2126,6 +2126,23 @@ else
 	stopExecution(console, 'console.create', consoleResult, consoleResult)
 	return
 end
+do
+	local unsupported = {'xeno', 'solara'}
+	local executorName = ''
+	pcall(function()
+		executorName = identifyexecutor and identifyexecutor() or ''
+	end)
+	local lowered = tostring(executorName):lower()
+	for _, name in unsupported do
+		if lowered:find(name, 1, true) then
+			local message = 'Unsupported executor ('..tostring(executorName)..'), please look in the #supported-executors channel for more info.'
+			console:SetStatus('ERROR', '#E15046')
+			console:SetLine(message, Palette.Error)
+			stopExecution(console, 'executor.unsupported', message, nil, message)
+			return
+		end
+	end
+end
 logger:bindConsole(console)
 logger:info('console.ready', isReload and 'headless console ready' or 'console ready', {reload = isReload})
 --[[ The key gate is the first thing that runs -- every run, reinjects included -- so the console
@@ -2721,58 +2738,6 @@ if not updateDone then
 end
 phase('update check')
 console:SetProgress(0.46)
-
-local function installCapabilities()
-	local source = downloadFile('pistonware/libraries/capabilities.lua')
-	local chunk, compileError = loadstring(source, 'capabilities')
-	if not chunk then error(compileError or 'capabilities.lua did not compile', 0) end
-	local createCapabilities = chunk()
-	if type(createCapabilities) ~= 'function' then
-		error('capabilities.lua returned no factory', 0)
-	end
-
-	local environment = type(getgenv) == 'function' and getgenv() or {}
-	shared.PistonwareUnsupportedExecutor = nil
-	local capabilities = createCapabilities({
-		environment = environment,
-		game = game,
-		Instance = Instance,
-		buffer = pistonwareBuffer,
-		onMissing = function(scope, _, message)
-			if scope == 'universal' then
-				warn('[pistonware] '..message)
-				return
-			end
-			if shared.PistonwareUnsupportedExecutor ~= nil then return end
-			shared.PistonwareUnsupportedExecutor = message
-			pcall(function()
-				game:GetService('StarterGui'):SetCore('SendNotification', {
-					Title = 'pistonware',
-					Text = message,
-					Duration = 10
-				})
-			end)
-		end
-	})
-	capabilities:run()
-
-	local namespace = environment.pistonware
-	if type(namespace) ~= 'table' then
-		namespace = {}
-		environment.pistonware = namespace
-	end
-	namespace.capabilities = capabilities
-	shared.PistonwareRequireCapabilities = function(required, scope)
-		return capabilities:require(scope or 'legacy', required)
-	end
-	return capabilities
-end
-
-local capabilitiesOk, capabilities = xpcall(installCapabilities, errorTrace)
-if not capabilitiesOk then
-	stopExecution(console, 'executor.capabilities', capabilities, capabilities)
-	return
-end
 
 --[[ Detect the very first run (empty/near-empty profiles folder) BEFORE downloading, so we
 know afterwards whether to show the prompts below. ]]
