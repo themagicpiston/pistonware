@@ -2246,7 +2246,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 
 	local BowConstantsTable = debug.getupvalue(
 		Knit.Controllers.ProjectileController.enableBeam,
-		8
+		7
 	)
 
 	local Flamework = require(replicatedStorage['rbxts_include']['node_modules']['@flamework'].core.out).Flamework
