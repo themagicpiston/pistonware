@@ -507,6 +507,9 @@ local function finishLoading()
 	end
 
 	local teleportedServers
+	-- Read by the queued hold's Requeue: sending you to the lobby before this hook exists would
+	-- leave pistonware behind, with nothing there to queue you again.
+	vape.TeleportHooked = true
 	vape:Clean(playersService.LocalPlayer.OnTeleport:Connect(function(teleportState)
 		--[[ A failed teleport is ignored rather than consumed. OnTeleport fires for EVERY state
 		and the one-shot guard below does not look at which -- so an attempt that failed used
@@ -645,27 +648,36 @@ local function finishLoading()
 			-- queueing before the payload has finished means vape.Profile is not set yet, and
 			-- without this the next server would be told to load 'default'.
 			teleportScript = 'shared.VapeCustomProfile = '..string.format('%q', vape.Profile or customProfile or 'default')..'\n'..teleportScript
-			--[[ AutoQueueDodge, FIRST in the script. Loading into a match is the game's
-			ConnectController.KnitStart sending PlayerConnect, and it runs as soon as Knit starts, long
-			before the loader or anything behind it. So the check lives here: it holds the connect,
-			judges the teams against the settings the module saved, and lets you in when they pass.
-			pistonware loads alongside it, so its notifications report what is happening and the
-			module's Load in now button can let you in early.
+			--[[ AutoQueueDodge and RegionLock, FIRST in the script. Loading into a match is the
+			game's ConnectController.KnitStart sending PlayerConnect, and it runs as soon as Knit
+			starts, long before the loader or anything behind it. So the checks live here: they hold
+			the connect, judge the match against the settings the modules saved, and let you in when
+			it passes. pistonware loads alongside, so its notifications report what is happening and
+			AutoQueueDodge's Load in now button can let you in early.
 
-			Only acts in a ranked BedWars match, and only while autoqueuedodge.txt says the module is on. ]]
+			AutoQueueDodge acts in a ranked match on the main place, while autoqueuedodge.txt says it
+			is on; RegionLock in any BedWars match, while regionlock.txt says it is on. Each is a gate
+			on the one hold, and the match loads once every gate it has is open. ]]
 			teleportScript = [==[
 local previousHold = shared.PistonwareDodgeHold
-if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previousHold.jobId == game.JobId) then
-	-- Written by the AutoQueueDodge module while it is on, deleted when it is off. No file,
-	-- or a module that is off, means this match loads exactly as it always has.
-	local settings
-	pcall(function()
-		if isfile('pistonware/autoqueuedodge.txt') then
-			settings = game:GetService('HttpService'):JSONDecode(readfile('pistonware/autoqueuedodge.txt'))
-		end
-	end)
-	if type(settings) == 'table' and settings.enabled == true then
-		local hold = {state = 'waiting', jobId = game.JobId}
+local matchPlaces = {[6872274481] = true, [8444591321] = true, [8560631822] = true}
+if matchPlaces[game.PlaceId] and not (type(previousHold) == 'table' and previousHold.jobId == game.JobId) then
+	-- A module's settings, while it is on. AutoQueueDodge deletes its file when switched off,
+	-- RegionLock marks its own off; either way, no settings means that check does not run, and
+	-- with neither this match loads exactly as it always has.
+	local function readSettings(path)
+		local data
+		pcall(function()
+			if isfile(path) then
+				data = game:GetService('HttpService'):JSONDecode(readfile(path))
+			end
+		end)
+		return type(data) == 'table' and data.enabled == true and data or nil
+	end
+	local settings = game.PlaceId == 6872274481 and readSettings('pistonware/autoqueuedodge.txt') or nil
+	local regionSettings = readSettings('pistonware/regionlock.txt')
+	if settings or regionSettings then
+		local hold = {state = 'waiting', jobId = game.JobId, gates = {}}
 		shared.PistonwareDodgeHold = hold
 
 		-- Pistonware's own notifications. pistonware keeps loading while the match is held,
@@ -675,10 +687,13 @@ if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previou
 		local staleVape = shared.vape
 		local outbox = {}
 		local flushing = false
-		local function notify(text, duration, kind)
-			-- The module's Notify toggle. Missing from settings written before it existed: on.
-			if settings.notify == false then return end
-			table.insert(outbox, {text, duration or 6, kind})
+		-- Titled with the module it is about; untitled messages are AutoQueueDodge's (or the
+		-- hold's, under whichever module placed it).
+		local function notify(text, duration, kind, title)
+			-- AutoQueueDodge's Notify toggle covers its own messages. Missing from settings written
+			-- before it existed: on.
+			if not title and settings and settings.notify == false then return end
+			table.insert(outbox, {text, duration or 6, kind, title or (settings and 'AutoQueueDodge' or 'RegionLock')})
 			if flushing then return end
 			flushing = true
 			task.spawn(function()
@@ -688,7 +703,7 @@ if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previou
 					if type(vape) == 'table' and vape ~= staleVape and type(vape.CreateNotification) == 'function' then
 						local entry = table.remove(outbox, 1)
 						pcall(function()
-							vape:CreateNotification('AutoQueueDodge', entry[1], entry[2], entry[3])
+							vape:CreateNotification(entry[4], entry[1], entry[2], entry[3])
 						end)
 					else
 						task.wait(0.25)
@@ -725,9 +740,9 @@ if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previou
 					return
 				end
 
-				-- Ranked only. The teleport data names the queue, and every ranked queue's meta
-				-- carries a rankCategory. Anything else, or a queue that cannot be read, loads
-				-- normally without being held at all.
+				-- AutoQueueDodge: ranked only. The teleport data names the queue, and every ranked
+				-- queue's meta carries a rankCategory. Anything else, or a queue that cannot be
+				-- read, is not judged on its teams at all.
 				local queueMeta = require(replicated.TS.game['queue-meta']).QueueMeta
 				local teleportData
 				pcall(function()
@@ -735,28 +750,348 @@ if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previou
 				end)
 				local queueType = type(teleportData) == 'table' and type(teleportData.match) == 'table' and teleportData.match.queueType
 				local meta = queueType and queueMeta[queueType]
-				if not (meta and (meta.rankCategory ~= nil or tostring(queueType):find('ranked', 1, true))) then
+				local dodging = settings ~= nil
+					and meta ~= nil
+					and (meta.rankCategory ~= nil or tostring(queueType):find('ranked', 1, true) ~= nil)
+					and type(meta.teams) == 'table'
+				if not (dodging or regionSettings) then
 					hold.state = 'skipped'
 					return
 				end
-				if type(meta.teams) ~= 'table' then
-					hold.state = 'failed'
-					return
+
+				hold.controller = controller
+				hold.gates.dodge = dodging or nil
+				hold.gates.region = regionSettings and true or nil
+
+				--[[ Two ways to hold, one per check.
+
+				AutoQueueDodge keeps KnitStart from running at all: the teams are judged before this
+				client does anything toward joining.
+
+				RegionLock cannot. The region only comes back once this client has started up, and
+				that start-up waits on the connect: other controllers (TeamController among them)
+				block in waitForConnected, and the game's own FetchServerRegion call comes after them.
+				So KnitStart runs and the client connects on its side, and only the two messages that
+				tell the SERVER -- PlayerConnect and PlayerReady -- are kept back, to go out in that
+				order once every gate is open. The server never hears from you, so you are no more in
+				the match than AutoQueueDodge leaves you. ]]
+				local original = controller.KnitStart
+				local client = require(replicated:WaitForChild('TS'):WaitForChild('remotes')).default.Client
+				local ownWaitFor = rawget(client, 'WaitFor')
+				local captured = {}
+				-- The game's KnitStart, run once whichever comes first: AutoQueueDodge letting it
+				-- go, or Knit calling it after that already happened. Restoring it and running it
+				-- as well sent everything twice when a match passed before Knit got to it.
+				local knitRan = false
+				local function runKnitStart()
+					if knitRan then return end
+					knitRan = true
+					pcall(original, controller)
+				end
+				if dodging then
+					controller.KnitStart = function()
+						if hold.state ~= 'held' or not hold.gates.dodge then
+							runKnitStart()
+						end
+					end
+				end
+				if regionSettings then
+					local baseWaitFor = client.WaitFor
+					client.WaitFor = function(self, name, ...)
+						local promise = baseWaitFor(self, name, ...)
+						if name ~= 'PlayerConnect' and name ~= 'PlayerReady' then return promise end
+						return promise:andThen(function(remote)
+							return setmetatable({
+								SendToServer = function(_, ...)
+									if hold.state == 'held' then
+										table.insert(captured, {Name = name, Remote = remote, Args = table.pack(...)})
+									else
+										remote:SendToServer(...)
+									end
+								end
+							}, {__index = remote})
+						end)
+					end
 				end
 
-				local original = controller.KnitStart
-				controller.KnitStart = function() end
-				hold.controller = controller
-				hold.release = function()
+				-- The lobby package's remotes, which a match server has too (Play Again queues
+				-- through them), and this client's queue state from the game's store.
+				local LOBBY_EVENTS = 'events-@easy-games/lobby:shared/event/lobby-events@getEvents.Events'
+				local function lobbyRemote(name)
+					local events = replicated:FindFirstChild(LOBBY_EVENTS)
+					return events and events:FindFirstChild(name)
+				end
+				local function queueState()
+					local state
+					pcall(function()
+						state = require(scripts.TS.ui.store).ClientStore:getState().Party.queueState
+					end)
+					return type(state) == 'number' and state or nil
+				end
+
+				-- Once AutoQueueDodge is done with it, KnitStart runs (still under RegionLock's hold,
+				-- if that is up). The region can only come back from here on.
+				local function startKnit()
+					if hold.knitStarted then return end
+					hold.knitStarted = os.clock()
+					if dodging then
+						task.spawn(runKnitStart)
+					end
+				end
+
+				hold.release = function(gate)
 					if hold.state ~= 'held' then return false end
+					-- A check that passes opens its own gate and the match waits on the rest. No
+					-- gate named (Load in now, a boot that died, an error in here) opens them all.
+					if gate then
+						hold.gates[gate] = nil
+					else
+						table.clear(hold.gates)
+					end
+					if not hold.gates.dodge then
+						startKnit()
+					end
+					if next(hold.gates) then return false end
 					hold.state = 'released'
-					controller.KnitStart = original
-					task.spawn(function() pcall(original, controller) end)
+					if regionSettings then
+						client.WaitFor = ownWaitFor
+					end
+					-- What KnitStart already tried to send goes now, the connect first.
+					table.sort(captured, function(a, b)
+						return (a.Name == 'PlayerConnect' and 0 or 1) < (b.Name == 'PlayerConnect' and 0 or 1)
+					end)
+					for _, send in captured do
+						pcall(function()
+							send.Remote:SendToServer(table.unpack(send.Args, 1, send.Args.n))
+						end)
+					end
+					table.clear(captured)
+					-- Let in after all, with a Requeue already sent: out of that queue again.
+					if hold.requeued then
+						local remote = lobbyRemote('leaveQueue')
+						if remote then pcall(function() remote:FireServer() end) end
+					end
 					return true
 				end
 				hold.state = 'held'
+				if not dodging then
+					-- Knit calls the untouched KnitStart itself.
+					hold.knitStarted = os.clock()
+				end
+
+				--[[ Requeue: this mode again, from right here. The lobby's joinQueue remote works in
+				a match server too, and you stay held on this one until the new match takes you.
+				Only once pistonware is up here -- its teleport hook is what comes along to that
+				match -- and never from a party: queueing is the leader's, and would pull everyone
+				else out of this match with you. Let in meanwhile, it is not sent (or is taken
+				back, above). ]]
+				local function requeue(title, why)
+					if hold.requeueing then return end
+					hold.requeueing = true
+					local party = type(teleportData) == 'table' and teleportData.party
+					local size = type(party) == 'table' and tonumber(party.partySize) or 1
+					if size > 1 then
+						notify('You are in a party of '..size..', so it will not queue again on its own. Leave to requeue.', 10, 'warning', title)
+						return
+					end
+					notify('Requeueing: '..why..'.', 6, nil, title)
+					task.spawn(function()
+						local deadline = os.clock() + 45
+						while os.clock() < deadline do
+							local vape = shared.vape
+							if type(vape) == 'table' and vape ~= staleVape and vape.TeleportHooked then break end
+							task.wait(0.25)
+						end
+						for _ = 1, 3 do
+							if hold.state ~= 'held' then return end
+							local state = queueState()
+							if state and state ~= 0 then
+								hold.requeued = true
+								return
+							end
+							local remote = lobbyRemote('joinQueue')
+							if not remote then break end
+							pcall(function()
+								remote:FireServer({queueType = queueType})
+							end)
+							hold.requeued = true
+							-- No queue state to read: sent once, and left at that.
+							if state == nil then return end
+							local waitUntil = os.clock() + 5
+							repeat
+								task.wait(0.25)
+							until (queueState() or 0) ~= 0 or os.clock() > waitUntil or hold.state ~= 'held'
+							if (queueState() or 0) ~= 0 or hold.state ~= 'held' then return end
+						end
+						notify('Could not queue again from here. Leave to requeue.', 8, 'warning', title)
+					end)
+				end
 
 				local remotes = require(replicated:WaitForChild('TS'):WaitForChild('remotes')).default
+
+				--[[ RegionLock: loads only on a server in one of the regions the module lists.
+				BedWars hosts NA, EU and SEA. The lobby files you under one by account country
+				(its Continents table: AU, NZ and the rest of Oceania go to SEA) and matches you
+				there, but a slow queue can still hand you another region's server. The game asks
+				the server's region itself at start-up -- RegionController calls FetchServerRegion
+				and keeps the answer as Game.serverRegion -- whether or not you have connected. ]]
+				if regionSettings then
+					local REGION_ALIASES = {
+						AU = 'SEA', AUS = 'SEA', AUSTRALIA = 'SEA', NZ = 'SEA', NEWZEALAND = 'SEA',
+						OCE = 'SEA', OCEANIA = 'SEA', AS = 'SEA', ASIA = 'SEA', SG = 'SEA', SGP = 'SEA',
+						US = 'NA', USA = 'NA', AMERICA = 'NA', NORTHAMERICA = 'NA',
+						EUROPE = 'EU', GB = 'EU', UK = 'EU',
+						-- Datacenter cities and countries, in case a label names the place instead.
+						SINGAPORE = 'SEA', SYDNEY = 'SEA', TOKYO = 'SEA', JAPAN = 'SEA', HONGKONG = 'SEA',
+						MUMBAI = 'SEA', INDIA = 'SEA', AUCKLAND = 'SEA',
+						FRANKFURT = 'EU', GERMANY = 'EU', AMSTERDAM = 'EU', NETHERLANDS = 'EU', LONDON = 'EU',
+						PARIS = 'EU', FRANCE = 'EU', WARSAW = 'EU', POLAND = 'EU',
+						VIRGINIA = 'NA', ASHBURN = 'NA', DALLAS = 'NA', TEXAS = 'NA', CHICAGO = 'NA',
+						MIAMI = 'NA', SEATTLE = 'NA', LOSANGELES = 'NA', NEWYORK = 'NA', SANJOSE = 'NA',
+						ATLANTA = 'NA', CANADA = 'NA'
+					}
+					local HOSTED = {NA = true, EU = true, SEA = true}
+					local continents
+					pcall(function()
+						continents = require(replicated.rbxts_include.node_modules['@easy-games'].lobby.out.server.services['device-info'].data.continents).Continents
+					end)
+
+					local function canonical(value)
+						value = tostring(value):gsub('%s+', ''):upper()
+						return REGION_ALIASES[value] or value
+					end
+
+					-- NA, EU or SEA for a region label, or nil: the label itself, its leading word
+					-- ('NA-East', 'US-Virginia'), or that word as a country code.
+					local function regionCode(label)
+						local whole = canonical(label)
+						if HOSTED[whole] then return whole end
+						local head = canonical(tostring(label):match('^%s*(%a+)') or '')
+						if HOSTED[head] then return head end
+						local continent = continents and continents[head]
+						return HOSTED[continent] and continent or nil
+					end
+
+					-- No regions listed accepts anything.
+					local function allowed(label, list)
+						if type(list) ~= 'table' or #list == 0 then return true end
+						local whole, code = canonical(label), regionCode(label)
+						for _, entry in list do
+							entry = canonical(entry)
+							if entry ~= '' and (entry == code or whole:sub(1, #entry) == entry) then
+								return true
+							end
+						end
+						return false
+					end
+
+					-- What the game's RegionController got back (Game.serverRegion), or nil.
+					local function storedRegion()
+						local region
+						pcall(function()
+							region = require(scripts.TS.ui.store).ClientStore:getState().Game.serverRegion
+						end)
+						return type(region) == 'string' and region ~= '' and region or nil
+					end
+
+					-- Asked in its own thread, the same call RegionController makes: a reply that
+					-- takes its time must not stall the settings reads or the Timeout.
+					-- askError keeps the last thing that went wrong, for the Timeout's message.
+					local asking, nextAsk, askError = false, 0, nil
+					local function askRegion()
+						if asking or os.clock() < nextAsk then return end
+						asking = true
+						task.spawn(function()
+							local ok, region = pcall(function()
+								return remotes.Client:Get('FetchServerRegion'):CallServer()
+							end)
+							if not ok then
+								askError = tostring(region)
+								-- The same RemoteFunction, invoked directly.
+								ok, region = pcall(function()
+									return replicated.rbxts_include.node_modules['@rbxts'].net.out._NetManaged.FetchServerRegion:InvokeServer()
+								end)
+								if not ok then askError = tostring(region) end
+							end
+							asking = false
+							nextAsk = os.clock() + 2
+							if ok and type(region) == 'string' and region ~= '' then
+								if not hold.serverRegion then hold.serverRegion = region end
+							elseif ok then
+								askError = 'the server answered '..tostring(region)
+							end
+						end)
+					end
+
+					local function regionCheck()
+						local told
+						while hold.state == 'held' and hold.gates.region do
+							-- Read every pass: switching RegionLock off or listing this region from
+							-- inside the held match takes effect here.
+							local current = readSettings('pistonware/regionlock.txt')
+							if not current then
+								hold.region = nil
+								if hold.release('region') then
+									notify('Switched off, loading in.', 5, nil, 'RegionLock')
+								end
+								return
+							end
+							-- Nothing to ask until KnitStart runs (AutoQueueDodge may still be judging
+							-- the teams); the Timeout counts from then.
+							local started = hold.knitStarted
+							if started and not hold.serverRegion then
+								hold.serverRegion = storedRegion()
+								if not hold.serverRegion then askRegion() end
+							end
+							local label = hold.serverRegion
+							local code = label and regionCode(label)
+							if label and (code or allowed(label, current.regions)) then
+								local shown = (code and code ~= canonical(label)) and (label..' ('..code..')') or label
+								if allowed(label, current.regions) then
+									hold.region = 'allowed'
+									if hold.release('region') then
+										notify('Loading in: this server is in '..shown..'.', 6, nil, 'RegionLock')
+									elseif hold.state == 'held' then
+										notify('This server is in '..shown..'. Waiting on AutoQueueDodge.', 6, nil, 'RegionLock')
+									end
+									return
+								end
+								hold.region = 'wrong'
+								if told ~= shown then
+									told = shown
+									notify('Not loading: this server is in '..shown..'.\nLeave to requeue, or add the region in RegionLock.', 15, 'warning', 'RegionLock')
+								end
+								if current.requeue == true then
+									requeue('RegionLock', 'this server is in '..shown)
+								end
+							else
+								-- No answer yet, or a label that names no region we know: never a reason
+								-- to hold for good, so the Timeout loads it anyway.
+								hold.region = 'finding'
+								local timeout = tonumber(current.timeout) or 20
+								if started and timeout > 0 and os.clock() - started >= timeout then
+									hold.region = 'unknown'
+									if hold.release('region') then
+										notify(label and ('Did not recognise this server\'s region ('..label..'), loading anyway.')
+											or ('Could not read this server\'s region'..(askError and (' ('..askError..')') or '')..', loading anyway.'), 10, 'warning', 'RegionLock')
+									end
+									return
+								end
+							end
+							task.wait(0.5)
+						end
+					end
+
+					task.spawn(function()
+						local regionOk, regionError = pcall(regionCheck)
+						-- Never strand anyone on an error in here either: this gate opens.
+						if not regionOk and hold.state == 'held' and hold.release('region') then
+							notify('Stopped checking the region ('..tostring(regionError)..'), loading you in.', 10, 'alert', 'RegionLock')
+						end
+					end)
+				end
+
+				if not dodging then return end
 
 				local TIER_NAMES = {'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Emerald', 'Nightmare'}
 				local rankCache, asked = {}, {}
@@ -990,6 +1325,8 @@ if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previou
 
 				local started = os.clock()
 				local lastReason, lastWaitNotice = nil, 0
+				-- A lobby still loading in can swing a verdict, so Requeue waits for it to hold.
+				local dodgeSince
 				while hold.state == 'held' do
 					if controller.connected then
 						hold.state = 'missed'
@@ -997,15 +1334,24 @@ if game.PlaceId == 6872274481 and not (type(previousHold) == 'table' and previou
 						break
 					end
 					local verdict, reason = decide(meta.teams, os.clock() - started >= (settings.maxWait or 30))
+					if verdict ~= 'dodge' then
+						dodgeSince = nil
+					end
 					if verdict == 'load' then
-						if hold.release() then
+						if hold.release('dodge') then
 							notify('Loading in: '..reason..'.', 8)
+						elseif hold.state == 'held' then
+							notify('The teams pass ('..reason..'). Waiting on RegionLock.', 8)
 						end
 						break
 					elseif verdict == 'dodge' then
 						if reason ~= lastReason then
 							lastReason = reason
 							notify('Not loading: '..reason..'.\nLeave to requeue, or press Load in now in the module.', 15, 'warning')
+						end
+						dodgeSince = dodgeSince or os.clock()
+						if settings.requeue == true and os.clock() - dodgeSince >= 3 then
+							requeue(nil, reason)
 						end
 					elseif os.clock() - lastWaitNotice >= 6 then
 						lastReason = nil

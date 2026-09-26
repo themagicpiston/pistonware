@@ -1648,43 +1648,60 @@ function vape:Load(skipgui, profile)
 		self:RequestSave()
 	end
 
-	--[[ isMobile, not TouchEnabled: this is the on-screen button that exists because a phone has
-	no keyboard to press the GUI bind with, and a Mac reporting touch does have one. ]]
-	if isMobile() and not skipgui then
-		local button = Instance.new('TextButton')
-		button.BackgroundColor3 = Color3.new()
-		button.BackgroundTransparency = 0.2
-		button.Position = vapeButtonFallback
-		button.Size = UDim2.fromOffset(vapeButtonSize, vapeButtonSize)
-		button.Text = ''
-		button.Parent = gui
-		local image = Instance.new('ImageLabel')
-		image.BackgroundTransparency = 1
-		image.Image = getvapeasset('pistonware/assets/new/vape.png')
-		image.Position = UDim2.fromOffset(6, 6)
-		image.Size = UDim2.fromOffset(20, 20)
-		image.Parent = button
-		addCorner(button, UDim.new(1, 0))
-		anchorVapeButton(button)
-
-		self.VapeButton = button
-		self.VapeButtonImage = image
-		self.VapeButtonTransparency = button.BackgroundTransparency
-		--[[ Options are already loaded by this point, so honour the saved setting on the
-		button we just built; the toggle's own Function ran before the button existed.
-		Transparency rather than Visible: see HideVapeButton. ]]
-		if self.HideVapeButton and self.HideVapeButton.Enabled then
-			button.BackgroundTransparency = 1
-			image.ImageTransparency = 1
-		end
-
-		button.MouseButton1Click:Connect(function()
-			self.GUIBind.Triggered:Fire(true)
-		end)
+	-- Normally already there from LoadGUI; see EnsureVapeButton.
+	if not skipgui then
+		self:EnsureVapeButton()
 	end
 
 	--[[ `toggleData` was undeclared; return the module toggle count used by the notification. ]]
 	return toggleCount, canSave
+end
+
+--[[ The on-screen button that opens the GUI. isMobile, not TouchEnabled: it exists because a
+phone has no keyboard to press the GUI bind with, and a Mac reporting touch does have one.
+
+Built at the end of LoadGUI, not only at the end of Load. Load is the profile apply, and a
+session can go without one finishing: main.lua skips it outright when the game payload fails or
+does not signal completion within 120s, a module whose Load throws aborts it part way, and a
+LoadLate or profile swap that moves LoadGeneration mid-apply returns from it early. Each of those
+left a phone with no button and so no way into the menu at all. Calling it again is harmless: a
+button that is still parented is kept. ]]
+function vape:EnsureVapeButton()
+	if not (isMobile() and gui) then return end
+	if self.VapeButton and self.VapeButton.Parent then return end
+
+	local button = Instance.new('TextButton')
+	button.BackgroundColor3 = Color3.new()
+	button.BackgroundTransparency = 0.2
+	button.Position = vapeButtonFallback
+	button.Size = UDim2.fromOffset(vapeButtonSize, vapeButtonSize)
+	button.Text = ''
+	button.Parent = gui
+	local image = Instance.new('ImageLabel')
+	image.BackgroundTransparency = 1
+	image.Image = getvapeasset('pistonware/assets/new/vape.png')
+	image.Position = UDim2.fromOffset(6, 6)
+	image.Size = UDim2.fromOffset(20, 20)
+	image.Parent = button
+	addCorner(button, UDim.new(1, 0))
+	anchorVapeButton(button)
+
+	self.VapeButton = button
+	self.VapeButtonImage = image
+	self.VapeButtonTransparency = button.BackgroundTransparency
+	--[[ Honour the saved setting on a button built after the options loaded; when the
+	button comes first, the toggle's own Function applies it on load. Transparency rather
+	than Visible: see HideVapeButton. ]]
+	if self.HideVapeButton and self.HideVapeButton.Enabled then
+		button.BackgroundTransparency = 1
+		image.ImageTransparency = 1
+	end
+
+	button.MouseButton1Click:Connect(function()
+		if self.GUIBind then
+			self.GUIBind.Triggered:Fire(true)
+		end
+	end)
 end
 
 --[[
@@ -4763,6 +4780,10 @@ function vape:LoadGUI()
 			table.remove(vape.HeldKeybinds, index)
 		end
 	end))
+
+	-- The phone's way into the menu, up as soon as there is a menu to open; see
+	-- EnsureVapeButton for why this does not wait for the profile.
+	self:EnsureVapeButton()
 end
 
 function vape:Remove(obj)
@@ -10799,11 +10820,18 @@ components = {
 		holder.Position = UDim2.fromOffset(10, 37)
 		holder.Size = UDim2.new(1, -20, 0, 2)
 		holder.Parent = twoslider
+		-- Where a value sits along the bar, from Min rather than from 0: dragging maps the bar
+		-- onto Min..Max, and drawing it as value / Max put the knobs of a 1..20 range short
+		-- of where the drag had left them.
+		local function sliderFraction(value)
+			local low = props.Min or 0
+			return math.clamp((value - low) / math.max(props.Max - low, 1e-9), 0, 1)
+		end
 		local fill = Instance.new('Frame')
 		fill.BackgroundColor3 = Color3.fromHSV(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value)
 		fill.BorderSizePixel = 0
-		fill.Position = UDim2.fromScale(math.clamp(component.ValueMin / props.Max, 0.04, 0.96), 0)
-		fill.Size = UDim2.fromScale(math.clamp(math.clamp(component.ValueMax / props.Max, 0, 1), 0.04, 0.96) - fill.Position.X.Scale, 1)
+		fill.Position = UDim2.fromScale(math.clamp(sliderFraction(component.ValueMin), 0.04, 0.96), 0)
+		fill.Size = UDim2.fromScale(math.clamp(sliderFraction(component.ValueMax), 0.04, 0.96) - fill.Position.X.Scale, 1)
 		fill.Parent = holder
 		local knob = Instance.new('Frame')
 		knob.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -10842,14 +10870,27 @@ components = {
 			knobmaxknob.ImageColor3 = fill.BackgroundColor3
 		end
 		
+		-- Callers use both GetRandomValue() and :GetRandomValue(), so this reads component
+		-- rather than self. A min knob dragged past the max one is still a range, just
+		-- written backwards; it is read the right way round instead of handed to NextNumber.
 		function component:GetRandomValue()
-			return random:NextNumber(component.ValueMin, component.ValueMax)
+			local low, high = component.ValueMin, component.ValueMax
+			if low > high then
+				low, high = high, low
+			end
+			return random:NextNumber(low, high)
 		end
-		
+
 		function component:Load(data)
 			-- Same clamp as Slider:Load -- a lowered Max must not leave a stale saved value
 			-- above it (see the comment there).
 			local newMin, newMax = data.ValueMin, data.ValueMax
+			-- Saved while this option was still a plain Slider ({Value = x}): that value
+			-- comes back as a range of one, so turning a slider into a range keeps what
+			-- the profile had instead of dropping it for the defaults.
+			if newMin == nil and newMax == nil and isFiniteNumber(data.Value) then
+				newMin, newMax = data.Value, data.Value
+			end
 			if isFiniteNumber(newMin) then
 				newMin = math.clamp(newMin, props.Min or 0, self.Max)
 			end
@@ -10882,10 +10923,10 @@ components = {
 			maxvalue.Text = self.ValueMax
 			minvalue.Text = self.ValueMin
 		
-			local size = math.clamp(math.clamp(self.ValueMin / props.Max, 0, 1), 0.04, 0.96)
+			local size = math.clamp(sliderFraction(self.ValueMin), 0.04, 0.96)
 			tween:Tween(fill, TweenInfo.new(0.1), {
 				Position = UDim2.fromScale(size, 0),
-				Size = UDim2.fromScale(math.clamp(math.clamp(self.ValueMax / props.Max, 0.04, 0.96) - size, 0, 1), 1)
+				Size = UDim2.fromScale(math.clamp(math.clamp(sliderFraction(self.ValueMax), 0.04, 0.96) - size, 0, 1), 1)
 			})
 
 			-- props.Function is defaulted to a no-op just above and was then never called, so

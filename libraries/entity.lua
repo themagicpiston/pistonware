@@ -896,8 +896,26 @@ entitylib.getUpdateConnections = function(entity)
 	}
 end
 
+-- The ForceField lookup is an engine call, and target queries make it for every candidate
+-- on every frame. The answer is held for one 60 Hz frame per entity, so at high frame
+-- rates it is looked up at most 60 times a second instead of once a frame. Health is a
+-- plain field and is still read fresh every time.
+local shieldCache = setmetatable({}, {__mode = 'k'})
+
 entitylib.isVulnerable = function(entity)
-	return entity.Health > 0 and not entity.Character.FindFirstChildWhichIsA(entity.Character, 'ForceField')
+	if not (entity.Health > 0) then return false end
+	local char = entity.Character
+	local now = os.clock()
+	local cached = shieldCache[entity]
+	if not cached then
+		cached = {}
+		shieldCache[entity] = cached
+	elseif cached.Character == char and now - cached.At < 1 / 60 then
+		return not cached.Shielded
+	end
+	cached.Character, cached.At = char, now
+	cached.Shielded = char.FindFirstChildWhichIsA(char, 'ForceField') ~= nil
+	return not cached.Shielded
 end
 
 entitylib.getEntityColor = function(entity)
@@ -916,23 +934,57 @@ entitylib.IgnoreObject.RespectCanCollide = true
 entitylib.Raycast = function(origin, direction, params)
 	return workspace:Raycast(origin, direction, params)
 end
+-- The characters the plain wall check's filter was last built from. The filter used to be
+-- rebuilt -- a fresh list, every entity walked into it, FilterDescendantsInstances
+-- reassigned -- on every call, which is per candidate per frame, for a list that only
+-- changes when someone spawns, dies or changes team. Now it is rebuilt only when the
+-- characters that belong in it change. They are compared against the live list rather
+-- than trusted to a version counter, because the game scripts build entities of their own
+-- that never bump one.
+local wallFilter = {Characters = {}, Count = -1, LocalCharacter = nil}
+
+local function wallFilterCurrent()
+	if wallFilter.LocalCharacter ~= lplr.Character then return false end
+	local characters = wallFilter.Characters
+	local count = 0
+	for _, entity in entitylib.List do
+		if entity.Targetable then
+			count += 1
+			if characters[count] ~= entity.Character then return false end
+		end
+	end
+	return count == wallFilter.Count
+end
+
 entitylib.Wallcheck = function(origin, position, ignoreobject)
 	if typeof(ignoreobject) ~= 'Instance' then
-		local ignorelist = {gameCamera, lplr.Character}
-		for _, entity in entitylib.List do
-			if entity.Targetable then
-				table.insert(ignorelist, entity.Character)
+		local extra = typeof(ignoreobject) == 'table'
+		if extra or not wallFilterCurrent() then
+			local localCharacter = lplr.Character
+			local ignorelist = {gameCamera, localCharacter}
+			local characters = wallFilter.Characters
+			table.clear(characters)
+			for _, entity in entitylib.List do
+				if entity.Targetable then
+					table.insert(ignorelist, entity.Character)
+					characters[#characters + 1] = entity.Character
+				end
 			end
-		end
 
-		if typeof(ignoreobject) == 'table' then
-			for _, obj in ignoreobject do
-				table.insert(ignorelist, obj)
+			if extra then
+				for _, obj in ignoreobject do
+					table.insert(ignorelist, obj)
+				end
+				-- this filter carries the caller's extras, so the next plain check rebuilds
+				wallFilter.Count = -1
+			else
+				wallFilter.Count = #characters
+				wallFilter.LocalCharacter = localCharacter
 			end
-		end
 
+			entitylib.IgnoreObject.FilterDescendantsInstances = ignorelist
+		end
 		ignoreobject = entitylib.IgnoreObject
-		ignoreobject.FilterDescendantsInstances = ignorelist
 	end
 	return entitylib.Raycast(origin, position - origin, ignoreobject)
 end

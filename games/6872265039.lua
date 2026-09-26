@@ -126,6 +126,11 @@ run(function()
 			return rawget(self, ind)
 		end
 	})
+	-- AutoQueue's mode list. Guarded on its own: a moved module costs that list, not the
+	-- controllers every other lobby module needs from this table.
+	pcall(function()
+		bedwars.QueueMeta = require(replicatedStorage.TS.game['queue-meta']).QueueMeta
+	end)
 
 	local kills = sessioninfo:AddItem('Kills')
 	local beds = sessioninfo:AddItem('Beds')
@@ -226,6 +231,279 @@ run(function()
 		end,
 		Tooltip = 'Automatically opens lucky crates, piston inspired!'
 	})
+end)
+
+run(function()
+	local AutoQueue
+	local Mode
+	local Delay
+	local modes, titles = {}, {}
+
+	-- Party.queueState, from @easy-games/lobby's QueueState: NONE 0, JOINING_QUEUE 1,
+	-- IN_QUEUE 2, LEAVING_QUEUE 3, MATCH_FOUND 4.
+	local QUEUE_NONE, QUEUE_IN = 0, 2
+	local LOBBY_EVENTS = 'events-@easy-games/lobby:shared/event/lobby-events@getEvents.Events'
+	-- The usual picks lead the list; List[1] is also the dropdown's default.
+	local FIRST = {bedwars_to1 = 1, bedwars_to2 = 2, bedwars_to4 = 3}
+
+	--[[ Every queue the lobby would let you into, under the title the game gives it: whatever
+	QueueMeta has that is not switched off, voice-chat only or a tournament. Read live, so a
+	mode the game adds or retires comes or goes without an update here. ]]
+	local function addMode(queueType, title)
+		title = tostring(title):gsub('[^%w%p ]', ''):gsub('^%s+', ''):gsub('%s+$', '')
+		if title == '' then title = queueType end
+		if modes[title] then title = title..' ('..queueType..')' end
+		modes[title] = queueType
+		table.insert(titles, title)
+	end
+
+	local ranks = {}
+	pcall(function()
+		for queueType, meta in bedwars.QueueMeta do
+			if type(meta) == 'table' and not meta.disabled and not meta.voiceChatOnly and not meta.tournament then
+				addMode(queueType, meta.title or queueType)
+				ranks[titles[#titles]] = FIRST[queueType] or (meta.game == 'bedwars' and 10 or 20)
+			end
+		end
+	end)
+	if #titles == 0 then
+		-- QueueMeta did not load: the three standard modes, by their queue types.
+		for queueType, title in {bedwars_to1 = 'BedWars (Solo)', bedwars_to2 = 'BedWars (Doubles)', bedwars_to4 = 'BedWars (Squads)'} do
+			addMode(queueType, title)
+			ranks[title] = FIRST[queueType]
+		end
+	end
+	table.sort(titles, function(a, b)
+		if ranks[a] ~= ranks[b] then
+			return ranks[a] < ranks[b]
+		end
+		return a < b
+	end)
+
+	local function partyState()
+		local ok, party = pcall(function()
+			return bedwars.Store:getState().Party
+		end)
+		return ok and type(party) == 'table' and party or nil
+	end
+
+	local function lobbyRemote(name)
+		local events = replicatedStorage:FindFirstChild(LOBBY_EVENTS)
+		return events and events:FindFirstChild(name)
+	end
+
+	--[[ QueueController:joinQueue is what the lobby's own queue NPCs and play menu call. It
+	checks party leadership and hands the request to LobbyQueueController, which fires the
+	lobby-events joinQueue remote with {queueType}. That remote is fired directly when the
+	controller is missing or throws. ]]
+	local function joinQueue(queueType)
+		local ok = pcall(function()
+			bedwars.QueueController:joinQueue(queueType)
+		end)
+		if not ok then
+			local remote = lobbyRemote('joinQueue')
+			if remote then
+				remote:FireServer({queueType = queueType})
+			end
+		end
+	end
+
+	local function leaveQueue()
+		local ok = pcall(function()
+			bedwars.QueueController:leaveQueue()
+		end)
+		if not ok then
+			local remote = lobbyRemote('leaveQueue')
+			if remote then
+				remote:FireServer()
+			end
+		end
+	end
+
+	AutoQueue = vape.Categories.Utility:CreateModule({
+		Name = 'AutoQueue',
+		Function = function(callback)
+			if not callback then return end
+
+			local warned = false
+			-- The delay counts from the moment you are out of a queue with nothing pending:
+			-- enabling it, arriving in the lobby, or leaving a queue.
+			local idleSince = os.clock()
+			local retryAt = 0
+
+			repeat
+				local party = partyState()
+				local now = os.clock()
+				if not party or party.queueState ~= QUEUE_NONE then
+					idleSince = now
+				elseif party.leader and party.leader.userId ~= lplr.UserId then
+					-- Only the leader can queue a party; the game ignores anyone else.
+					if not warned then
+						warned = true
+						notif('AutoQueue', 'You are not the party leader, so only they can queue.', 5)
+					end
+					idleSince = now
+				elseif now - idleSince >= Delay.Value and now >= retryAt then
+					local queueType = modes[Mode.Value]
+					if queueType then
+						joinQueue(queueType)
+						-- A request that did not take (a closed mode, a hiccup) is tried again,
+						-- but never faster than every 5s.
+						retryAt = now + math.max(Delay.Value, 5)
+					end
+				end
+				task.wait(0.25)
+			until not AutoQueue.Enabled
+		end,
+		Tooltip = 'Queues you into the chosen mode after the delay, whenever you are not in a queue.'
+	})
+	Mode = AutoQueue:CreateDropdown({
+		Name = 'Mode',
+		List = titles,
+		Function = function(_, isClick)
+			-- A different mode picked while already queued: leave, and the loop joins the new
+			-- one after the delay. Never once a match is found.
+			local party = isClick and AutoQueue.Enabled and partyState()
+			if party and party.queueState == QUEUE_IN then
+				leaveQueue()
+			end
+		end,
+		Tooltip = 'The gamemode to queue for.'
+	})
+	Delay = AutoQueue:CreateSlider({
+		Name = 'Delay',
+		Min = 0,
+		Max = 30,
+		Default = 3,
+		Decimal = 10,
+		Suffix = function(val)
+			return val == 1 and 'second' or 'seconds'
+		end,
+		Tooltip = 'How long to wait in the lobby before queueing.'
+	})
+end)
+
+run(function()
+	local RegionLock
+	local Regions
+	local Timeout
+	local Requeue
+	local httpService = cloneref(game:GetService('HttpService'))
+
+	--[[ RegionLock's settings live in their own file, not the per-place profiles: the lobby and
+	the match are different places, and this is one switch you set before queueing. main.lua's
+	teleport script reads it on the match server, holds the connect, and loads you in once the
+	server's region is one listed here. The match copy of the module reads and writes the same
+	file, so turning it on or off in either place is the same switch. ]]
+	local FILE = 'pistonware/regionlock.txt'
+	local synced, written = false, nil
+
+	-- Upper case, no spaces, no repeats. In place: the TextList keeps drawing from these tables.
+	local function normalise(list)
+		local seen, out = {}, {}
+		for _, value in list do
+			value = tostring(value):gsub('%s+', ''):upper()
+			if value ~= '' and not seen[value] then
+				seen[value] = true
+				table.insert(out, value)
+			end
+		end
+		table.clear(list)
+		table.move(out, 1, #out, 1, list)
+	end
+
+	-- Only once the file has been read back: the profile applying first must not overwrite it.
+	local function writeSettings()
+		if not synced then return end
+		local ok, encoded = pcall(function()
+			return httpService:JSONEncode({
+				enabled = RegionLock.Enabled,
+				list = Regions.List,
+				regions = Regions.ListEnabled,
+				timeout = Timeout.Value,
+				requeue = Requeue.Enabled
+			})
+		end)
+		if ok and encoded ~= written then
+			written = encoded
+			pcall(writefile, FILE, encoded)
+		end
+	end
+
+	RegionLock = vape.Categories.Utility:CreateModule({
+		Name = 'RegionLock',
+		Function = function()
+			writeSettings()
+		end,
+		ExtraText = function()
+			return Regions and #Regions.ListEnabled > 0 and table.concat(Regions.ListEnabled, ' ') or 'Any'
+		end,
+		Tooltip = 'Only plays on servers in the regions you pick.'
+	})
+	Regions = RegionLock:CreateTextList({
+		Name = 'Regions',
+		Placeholder = 'NA / EU / SEA',
+		Default = {'NA', 'EU', 'SEA'},
+		Function = function()
+			if not Regions then return end
+			normalise(Regions.List)
+			normalise(Regions.ListEnabled)
+			writeSettings()
+			vape:UpdateTextGUI()
+		end,
+		Tooltip = 'The regions to allow. With none on, any region is allowed.'
+	})
+	Timeout = RegionLock:CreateSlider({
+		Name = 'Timeout',
+		Min = 0,
+		Max = 120,
+		Default = 20,
+		Function = function()
+			writeSettings()
+		end,
+		Suffix = function(val)
+			return val == 1 and 'second' or 'seconds'
+		end,
+		Tooltip = 'Loads anyway after this long without a region. 0 waits forever.'
+	})
+	Requeue = RegionLock:CreateToggle({
+		Name = 'Requeue',
+		Function = function()
+			writeSettings()
+		end,
+		Tooltip = 'Queues again when the server is in the wrong region. Not in a party.'
+	})
+
+	-- Once the profile is applied, the file wins: it is the last thing set anywhere.
+	task.spawn(function()
+		repeat task.wait(0.5) until vape.Loaded == true or vape.Loaded == nil
+		if vape.Loaded == nil then return end
+		local data
+		pcall(function()
+			if isfile(FILE) then
+				data = httpService:JSONDecode(readfile(FILE))
+			end
+		end)
+		if type(data) == 'table' then
+			if type(data.list) == 'table' and type(data.regions) == 'table' then
+				Regions:Load({List = data.list, ListEnabled = data.regions})
+			end
+			if tonumber(data.timeout) then
+				Timeout:SetValue(tonumber(data.timeout))
+			end
+			if (data.requeue == true) ~= Requeue.Enabled then
+				Requeue:Toggle()
+			end
+			if (data.enabled == true) ~= RegionLock.Enabled then
+				RegionLock:Toggle()
+			end
+		end
+		synced = true
+		repeat
+			writeSettings()
+			task.wait(1)
+		until vape.Loaded == nil
+	end)
 end)
 run(function()
 	local DeviceSpoofer

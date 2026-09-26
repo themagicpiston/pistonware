@@ -13,3 +13,8 @@ pistonware_release.json
 pistonware/loader.log
 pistonware/loader_telemetry.jsonl
 pistonware/errors/
+pistonware/mcp/
+tools/mcp-relay/pistonware_mcp.log
+tools/mcp-relay/pistonware_events*.jsonl
+/mcp/
+autowin_log.txt

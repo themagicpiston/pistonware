@@ -150,7 +150,15 @@ local function addBlur(parent)
 	blur.Size = UDim2.new(1, 89, 1, 52)
 	blur.Position = UDim2.fromOffset(-48, -31)
 	blur.BackgroundTransparency = 1
-	blur.Image = getcustomasset('pistonware/assets/new/blur.png')
+	--[[ No blur rather than an error. getcustomasset is missing or refuses on some executors,
+	and the GUI only downloads this asset where it uses assets itself -- never on a touch
+	device -- so there the file is not there to load. Unguarded, that threw inside every
+	caller after it had already parented its billboard: KitESP's came out empty and its loop
+	died with it. ]]
+	local ok, image = pcall(function()
+		return getcustomasset('pistonware/assets/new/blur.png')
+	end)
+	blur.Image = ok and type(image) == 'string' and image or ''
 	blur.ScaleType = Enum.ScaleType.Slice
 	blur.SliceCenter = Rect.new(52, 31, 261, 502)
 	blur.Parent = parent
@@ -1013,11 +1021,25 @@ run(function()
 	local CircleColor
 	local CircleTransparency
 	local CircleFilled
+	local CircleThickness
 	local CircleObject
 	local RightClick
 	local ShowTarget
 	local moveConst = Vector2.new(1, 0.77) * math.rad(0.5)
-	
+	local speedRoll, speedRollAt = 0, 0
+
+	--[[ Speed is a range: a value from it is held for a random 0.25-0.6s and then re-rolled.
+	Rolled every frame it would average straight back out to the middle of the range; held,
+	the pull visibly speeds up and eases off the way a hand does. ]]
+	local function aimSpeed()
+		local now = os.clock()
+		if now >= speedRollAt then
+			speedRoll = Speed:GetRandomValue()
+			speedRollAt = now + 0.25 + math.random() * 0.35
+		end
+		return speedRoll
+	end
+
 	local function wrapAngle(num)
 		num = num % math.pi
 		num -= num >= (math.pi / 2) and math.pi or 0
@@ -1064,7 +1086,7 @@ run(function()
 								local diffPitch = math.asin(facing.Y) - math.asin(new.Y)
 								local angle = Vector2.new(diffYaw, diffPitch) // (moveConst * UserSettings():GetService('UserGameSettings').MouseSensitivity)
 	
-								angle *= math.min(Speed.Value * dt, 1)
+								angle *= math.min(aimSpeed() * dt, 1)
 								mousemoverel(angle.X, angle.Y)
 							end
 						end
@@ -1105,11 +1127,13 @@ run(function()
 			end
 		end
 	})
-	Speed = AimAssist:CreateSlider({
+	Speed = AimAssist:CreateTwoSlider({
 		Name = 'Speed',
 		Min = 0,
 		Max = 30,
-		Default = 15
+		DefaultMin = 15,
+		DefaultMax = 15,
+		Tooltip = 'How hard it pulls. Set a range and the pull varies within it.'
 	})
 	AimAssist:CreateToggle({
 		Name = 'Range Circle',
@@ -1121,6 +1145,7 @@ run(function()
 				CircleObject.Position = vape.gui.AbsoluteSize / 2
 				CircleObject.Radius = FOV.Value
 				CircleObject.NumSides = 100
+				CircleObject.Thickness = CircleThickness and CircleThickness.Value or 1
 				CircleObject.Transparency = 1 - CircleTransparency.Value
 				CircleObject.Visible = AimAssist.Enabled
 			else
@@ -1128,10 +1153,14 @@ run(function()
 					CircleObject.Visible = false
 					CircleObject:Remove()
 				end)
+				CircleObject = nil
 			end
 			CircleColor.Object.Visible = callback
 			CircleTransparency.Object.Visible = callback
 			CircleFilled.Object.Visible = callback
+			if CircleThickness then
+				CircleThickness.Object.Visible = callback
+			end
 		end
 	})
 	CircleColor = AimAssist:CreateColorSlider({
@@ -1163,6 +1192,19 @@ run(function()
 		Function = function(callback)
 			if CircleObject then
 				CircleObject.Filled = callback
+			end
+		end,
+		Darker = true,
+		Visible = false
+	})
+	CircleThickness = AimAssist:CreateSlider({
+		Name = 'Circle Thickness',
+		Min = 1,
+		Max = 10,
+		Default = 1,
+		Function = function(val)
+			if CircleObject then
+				CircleObject.Thickness = val
 			end
 		end,
 		Darker = true,
@@ -1259,7 +1301,7 @@ run(function()
 							local parts = workspace:GetPartBoundsInBox(tool.Parent.CFrame * CFrame.new(0, 0, Value.Value / 2), tool.Parent.Size + Vector3.new(0, 0, Value.Value), Overlay)
 			
 							for _, v in parts do
-								if reachRandom:NextNumber(0, 100) > Chance.Value then
+								if reachRandom:NextNumber(0, 100) > Chance:GetRandomValue() then
 									task.wait(0.2)
 									break
 								end
@@ -1308,12 +1350,13 @@ run(function()
 			return val == 1 and 'stud' or 'studs'
 		end
 	})
-	Chance = Reach:CreateSlider({
+	Chance = Reach:CreateTwoSlider({
 		Name = 'Chance',
 		Min = 0,
 		Max = 100,
-		Default = 100,
-		Suffix = '%'
+		DefaultMin = 100,
+		DefaultMax = 100,
+		Tooltip = 'Percent of touches that get the extra reach. Each one rolls its chance from this range.'
 	})
 end)
 	
@@ -1336,6 +1379,7 @@ run(function()
 	local CircleColor
 	local CircleTransparency
 	local CircleFilled
+	local CircleThickness
 	local CircleObject
 	local Projectile
 	local ProjectileSpeed
@@ -1353,8 +1397,8 @@ run(function()
 	local oldnamecall, oldray
 
 	local function getTarget(origin, obj)
-		if rand.NextNumber(rand, 0, 100) > (AutoFire.Enabled and 100 or HitChance.Value) then return end
-		local targetPart = (rand.NextNumber(rand, 0, 100) < (AutoFire.Enabled and 100 or HeadshotChance.Value)) and 'Head' or 'RootPart'
+		if rand.NextNumber(rand, 0, 100) > (AutoFire.Enabled and 100 or HitChance.GetRandomValue()) then return end
+		local targetPart = (rand.NextNumber(rand, 0, 100) < (AutoFire.Enabled and 100 or HeadshotChance.GetRandomValue())) and 'Head' or 'RootPart'
 		targetQuery.Range = Range.Value
 		targetQuery.Wallcheck = Target.Walls.Enabled and (obj or true) or nil
 		targetQuery.Part = targetPart
@@ -1570,19 +1614,21 @@ run(function()
 			return val == 1 and 'stud' or 'studs'
 		end
 	})
-	HitChance = SilentAim:CreateSlider({
+	HitChance = SilentAim:CreateTwoSlider({
 		Name = 'Hit Chance',
 		Min = 0,
 		Max = 100,
-		Default = 85,
-		Suffix = '%'
+		DefaultMin = 85,
+		DefaultMax = 85,
+		Tooltip = 'Percent of shots that get redirected. Each shot rolls its chance from this range.'
 	})
-	HeadshotChance = SilentAim:CreateSlider({
+	HeadshotChance = SilentAim:CreateTwoSlider({
 		Name = 'Headshot Chance',
 		Min = 0,
 		Max = 100,
-		Default = 65,
-		Suffix = '%'
+		DefaultMin = 65,
+		DefaultMax = 65,
+		Tooltip = 'Percent of redirected shots aimed at the head. Each shot rolls its chance from this range.'
 	})
 	AutoFire = SilentAim:CreateToggle({
 		Name = 'AutoFire',
@@ -1633,6 +1679,7 @@ run(function()
 				CircleObject.Position = vape.gui.AbsoluteSize / 2
 				CircleObject.Radius = Range.Value
 				CircleObject.NumSides = 100
+				CircleObject.Thickness = CircleThickness and CircleThickness.Value or 1
 				CircleObject.Transparency = 1 - CircleTransparency.Value
 				CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse'
 			else
@@ -1640,10 +1687,14 @@ run(function()
 					CircleObject.Visible = false
 					CircleObject:Remove()
 				end)
+				CircleObject = nil
 			end
 			CircleColor.Object.Visible = callback
 			CircleTransparency.Object.Visible = callback
 			CircleFilled.Object.Visible = callback
+			if CircleThickness then
+				CircleThickness.Object.Visible = callback
+			end
 		end
 	})
 	CircleColor = SilentAim:CreateColorSlider({
@@ -1675,6 +1726,19 @@ run(function()
 		Function = function(callback)
 			if CircleObject then
 				CircleObject.Filled = callback
+			end
+		end,
+		Darker = true,
+		Visible = false
+	})
+	CircleThickness = SilentAim:CreateSlider({
+		Name = 'Circle Thickness',
+		Min = 1,
+		Max = 10,
+		Default = 1,
+		Function = function(val)
+			if CircleObject then
+				CircleObject.Thickness = val
 			end
 		end,
 		Darker = true,
@@ -6534,27 +6598,40 @@ run(function()
 	Waypoints = vape.Categories.Render:CreateModule({
 		Name = 'Waypoints',
 		Function = function(callback)
+			--[[ The waypoints live in Pistonware's GUI (CoreGui or gethui wherever the identity
+			can be raised), and this thread does not carry that identity; both ways, since
+			switching off clears the folder. Each point is built whole and then parented, so an
+			entry that is not 'x, y, z/name' costs itself rather than every point after it. ]]
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
 			if callback then
 				for _, v in List.ListEnabled do
-					local split = v:split('/')
-					local tagSize = getfontsize(removeTags(split[2]), 14 * Scale.Value, FontOption.Value, Vector2.new(100000, 100000))
-					local billboard = Instance.new('BillboardGui')
-					billboard.Size = UDim2.fromOffset(tagSize.X + 8, tagSize.Y + 7)
-					billboard.StudsOffsetWorldSpace = Vector3.new(unpack(split[1]:split(',')))
-					billboard.AlwaysOnTop = true
-					billboard.Parent = WaypointFolder
-					local tag = Instance.new('TextLabel')
-					tag.BackgroundColor3 = Color3.new()
-					tag.BorderSizePixel = 0
-					tag.Visible = true
-					tag.RichText = true
-					tag.FontFace = FontOption.Value
-					tag.TextSize = 14 * Scale.Value
-					tag.BackgroundTransparency = Background.Value
-					tag.Size = billboard.Size
-					tag.Text = split[2]
-					tag.TextColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-					tag.Parent = billboard
+					local billboard
+					local ok = pcall(function()
+						local split = v:split('/')
+						local tagSize = getfontsize(removeTags(split[2]), 14 * Scale.Value, FontOption.Value, Vector2.new(100000, 100000))
+						billboard = Instance.new('BillboardGui')
+						billboard.Size = UDim2.fromOffset(tagSize.X + 8, tagSize.Y + 7)
+						billboard.StudsOffsetWorldSpace = Vector3.new(unpack(split[1]:split(',')))
+						billboard.AlwaysOnTop = true
+						local tag = Instance.new('TextLabel')
+						tag.BackgroundColor3 = Color3.new()
+						tag.BorderSizePixel = 0
+						tag.Visible = true
+						tag.RichText = true
+						tag.FontFace = FontOption.Value
+						tag.TextSize = 14 * Scale.Value
+						tag.BackgroundTransparency = Background.Value
+						tag.Size = billboard.Size
+						tag.Text = split[2]
+						tag.TextColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+						tag.Parent = billboard
+						billboard.Parent = WaypointFolder
+					end)
+					if not ok and billboard then
+						pcall(function() billboard:Destroy() end)
+					end
 				end
 			else
 				WaypointFolder:ClearAllChildren()
@@ -8149,162 +8226,323 @@ run(function()
 	local Disguise
 	local Mode
 	local IDBox
-	local desc
-	
-	local function itemAdded(v, manual)
-		if (not v:GetAttribute('Disguise')) and ((v:IsA('Accessory') and (not v:GetAttribute('InvItem')) and (not v:GetAttribute('ArmorSlot'))) or v:IsA('ShirtGraphic') or v:IsA('Shirt') or v:IsA('Pants') or v:IsA('BodyColors') or manual) then
-			repeat
+	local assetService = cloneref(game:GetService('AssetService'))
+	local DEFAULT_USER = 239702688
+	local DEFAULT_BUNDLE = 43
+	local LOOK = {'Accessory', 'ShirtGraphic', 'Shirt', 'Pants', 'BodyColors'}
+	local SCALES = {'HeightScale', 'WidthScale', 'DepthScale', 'HeadScale', 'ProportionScale', 'BodyTypeScale'}
+	--[[ Everything the disguise changed on the current character, so switching it off puts it
+	back instead of leaving you bald until you respawn:
+	  hidden     -- your own items, parked outside the character (item -> where it was)
+	  added      -- the disguise's items
+	  animations -- Animation -> the AnimationId it had
+	  head, emotes -- the head mesh and emote lists before they were swapped ]]
+	local applied
+
+	local function isLook(v)
+		for _, class in LOOK do
+			if v:IsA(class) then return true end
+		end
+		return false
+	end
+
+	-- Your own look, not what the game hangs on you: held items and armour carry InvItem /
+	-- ArmorSlot and are left alone, and anything this module put there carries Disguise.
+	local function isOwnLook(v)
+		if v:GetAttribute('Disguise') or not isLook(v) then return false end
+		return not (v:IsA('Accessory') and (v:GetAttribute('InvItem') or v:GetAttribute('ArmorSlot')))
+	end
+
+	--[[ Parked rather than destroyed, so it can be handed back. Deferred and retried: an item
+	that arrives through ChildAdded is still being parented, and moving it again on the spot
+	throws. ]]
+	local function hide(state, v)
+		if state.hidden[v] then return end
+		state.hidden[v] = v.Parent
+		task.spawn(function()
+			for _ = 1, 10 do
 				task.wait()
-				v.Parent = game
-			until v.Parent == game
-	
-			v:ClearAllChildren()
-			v:Destroy()
+				if applied ~= state or pcall(function() v.Parent = nil end) then return end
+			end
+		end)
+	end
+
+	local function restore()
+		local state = applied
+		applied = nil
+		if not state then return end
+
+		for _, connection in state.connections do
+			pcall(function() connection:Disconnect() end)
+		end
+		for _, v in state.added do
+			pcall(function() v:Destroy() end)
+		end
+
+		local character = state.character
+		if not (character and character.Parent) then return end
+		for v, parent in state.hidden do
+			pcall(function() v.Parent = parent end)
+		end
+		for animation, id in state.animations do
+			pcall(function() animation.AnimationId = id end)
+		end
+		if state.head then
+			pcall(function() state.head.Part.MeshId = state.head.MeshId end)
+		end
+		if state.emotes then
+			pcall(function()
+				state.emotes.Description:SetEmotes(state.emotes.Emotes)
+				state.emotes.Description:SetEquippedEmotes(state.emotes.Equipped)
+			end)
 		end
 	end
-	
-	local function characterAdded(char)
-		if Mode.Value == 'Character' then
-			task.wait(0.1)
+
+	-- A few tries a second apart while the module stays on, then a notification instead of
+	-- the endless silent retry the old loop fell into (a username in the box never loaded).
+	local function fetch(label, getter)
+		for attempt = 1, 5 do
+			local ok, result = pcall(getter)
+			if ok and result then return result end
+			if attempt < 5 then
+				task.wait(1)
+				if not Disguise.Enabled then return end
+			end
+		end
+		notif('Disguise', 'Could not load '..label, 5, 'warning')
+	end
+
+	local function boxText()
+		return (IDBox.Value:gsub('^%s+', ''):gsub('%s+$', ''))
+	end
+
+	-- A user id, or a username looked up to one; empty means the default.
+	local function resolveUserId()
+		local text = boxText()
+		if text == '' then return DEFAULT_USER end
+		return tonumber(text) or fetch('the user '..text, function()
+			return playersService:GetUserIdFromNameAsync(text)
+		end)
+	end
+
+	--[[ The disguise as a model to take the look from. Your own character dressed in the
+	description is the first choice: same rig and part names, so its accessories weld straight
+	onto yours. CreateHumanoidModelFromDescription is the fallback for clients that refuse
+	ApplyDescriptionClientServer. Either way the description carries your scales first, or the
+	accessories come out sized and placed for someone else's body. ]]
+	local function dressedModel(char, desc, ownDesc)
+		if ownDesc then
+			for _, scale in SCALES do
+				pcall(function() desc[scale] = ownDesc[scale] end)
+			end
+		end
+
+		local clone
+		local ok = pcall(function()
+			local archivable = char.Character.Archivable
 			char.Character.Archivable = true
-	
-			local clone = char.Character:Clone()
-			repeat
-				if pcall(function()
-					desc = playersService:GetHumanoidDescriptionFromUserId(IDBox.Value == '' and 239702688 or tonumber(IDBox.Value))
-				end) and desc then break end
-				task.wait(1)
-			until not Disguise.Enabled
-	
-			if not Disguise.Enabled then
-				clone:ClearAllChildren()
-				clone:Destroy()
-				clone = nil
-				if desc then
-					desc:Destroy()
-					desc = nil
-				end
-				return
-			end
-	
-			clone.Parent = game
-	
-			local originalDesc = char.Humanoid:WaitForChild('HumanoidDescription', 2) or {
-				HeightScale = 1,
-				SetEmotes = function() end,
-				SetEquippedEmotes = function() end
-			}
-			originalDesc.JumpAnimation = desc.JumpAnimation
-			desc.HeightScale = originalDesc.HeightScale
-	
+			clone = char.Character:Clone()
+			char.Character.Archivable = archivable
+			-- Your own items off the copy (held items and armour included), so everything
+			-- left on it once the description is applied is the disguise's.
 			for _, v in clone:GetChildren() do
-				if v:IsA('Accessory') or v:IsA('ShirtGraphic') or v:IsA('Shirt') or v:IsA('Pants') then
-					v:ClearAllChildren()
-					v:Destroy()
-				end
+				if isLook(v) then v:Destroy() end
 			end
-	
-			clone.Humanoid:ApplyDescriptionClientServer(desc)
-			for _, v in char.Character:GetChildren() do
-				itemAdded(v)
+			if not pcall(function() clone.Parent = game end) then
+				clone.Parent = nil
 			end
-			Disguise:Clean(char.Character.ChildAdded:Connect(itemAdded))
-	
-			for _, v in clone:WaitForChild('Animate'):GetChildren() do
-				if not char.Character:FindFirstChild('Animate') then return end
-				local real = char.Character.Animate:FindFirstChild(v.Name)
-				if v and real then
-					local anim = v:FindFirstChildWhichIsA('Animation') or {AnimationId = ''}
-					local realanim = real:FindFirstChildWhichIsA('Animation') or {AnimationId = ''}
-					if realanim then
-						realanim.AnimationId = anim.AnimationId
-					end
-				end
-			end
-	
-			for _, v in clone:GetChildren() do
-				v:SetAttribute('Disguise', true)
-				if v:IsA('Accessory') then
-					for _, v2 in v:GetDescendants() do
-						if v2:IsA('Weld') and v2.Part1 then
-							v2.Part1 = char.Character[v2.Part1.Name]
+			clone:FindFirstChildOfClass('Humanoid'):ApplyDescriptionClientServer(desc)
+		end)
+		if ok and clone then return clone end
+		if clone then clone:Destroy() end
+
+		local model
+		ok, model = pcall(function()
+			return playersService:CreateHumanoidModelFromDescription(desc, char.Humanoid.RigType)
+		end)
+		return ok and model or nil
+	end
+
+	local function wearCharacter(char, state)
+		local userId = resolveUserId()
+		if not userId or applied ~= state then return end
+		local desc = fetch('the avatar of '..userId, function()
+			return playersService:GetHumanoidDescriptionFromUserId(userId)
+		end)
+		if not desc or applied ~= state then return end
+
+		local character = char.Character
+		local ownDesc = char.Humanoid:FindFirstChildOfClass('HumanoidDescription')
+		local model = dressedModel(char, desc, ownDesc)
+		if not model or applied ~= state then
+			if model then model:Destroy() end
+			notif('Disguise', 'Could not build that avatar on this client', 5, 'warning')
+			return
+		end
+
+		for _, v in character:GetChildren() do
+			if isOwnLook(v) then hide(state, v) end
+		end
+		-- The game re-dresses you (a kit skin, a respawn of an item): those go too.
+		table.insert(state.connections, character.ChildAdded:Connect(function(v)
+			if applied == state and isOwnLook(v) then hide(state, v) end
+		end))
+
+		-- One item at a time, so one that will not move costs itself and not the rest.
+		for _, v in model:GetChildren() do
+			if isLook(v) then
+				pcall(function()
+					v:SetAttribute('Disguise', true)
+					for _, weld in v:GetDescendants() do
+						if weld:IsA('Weld') and weld.Part1 then
+							local part = character:FindFirstChild(weld.Part1.Name)
+							if part then weld.Part1 = part end
 						end
 					end
-					v.Parent = char.Character
-				elseif v:IsA('ShirtGraphic') or v:IsA('Shirt') or v:IsA('Pants') or v:IsA('BodyColors') then
-					v.Parent = char.Character
-				elseif v.Name == 'Head' and char.Head:IsA('MeshPart') and (not char.Head:FindFirstChild('FaceControls')) then
-					char.Head.MeshId = v.MeshId
-				end
-			end
-	
-			local localface = char.Character:FindFirstChild('face', true)
-			local cloneface = clone:FindFirstChild('face', true)
-			if localface and cloneface then
-				itemAdded(localface, true)
-				cloneface.Parent = char.Head
-			end
-			originalDesc:SetEmotes(desc:GetEmotes())
-			originalDesc:SetEquippedEmotes(desc:GetEquippedEmotes())
-			clone:ClearAllChildren()
-			clone:Destroy()
-			clone = nil
-	
-			if desc then
-				desc:Destroy()
-				desc = nil
-			end
-		else
-			local data
-			repeat
-				if pcall(function()
-					data = marketplaceService:GetProductInfo(IDBox.Value == '' and 43 or tonumber(IDBox.Value), Enum.InfoType.Bundle)
-				end) then break end
-				task.wait(1)
-			until not Disguise.Enabled
-	
-			if not Disguise.Enabled then
-				if data then
-					table.clear(data)
-					data = nil
-				end
-				return
-			end
-	
-			if not data then return end
-			if data.BundleType == 'AvatarAnimations' then
-				local animate = char.Character:FindFirstChild('Animate')
-				if not animate then return end
-	
-				for _, v in data.Items do
-					local animtype = v.Name:split(' ')[2]:lower()
-					if animtype ~= 'animation' then
-						local suc, res = pcall(function()
-							return game:GetObjects('rbxassetid://'..v.Id)
-						end)
-	
-						if suc then
-							animate[animtype]:FindFirstChildWhichIsA('Animation').AnimationId = res[1]:FindFirstChildWhichIsA('Animation', true).AnimationId
-						end
-					end
-				end
-			else
-				notif('Disguise', 'that\'s not an animation pack', 5, 'warning')
+					v.Parent = character
+					table.insert(state.added, v)
+				end)
 			end
 		end
+
+		local head, modelHead = char.Head, model:FindFirstChild('Head')
+		if head and modelHead and head:IsA('MeshPart') and modelHead:IsA('MeshPart') and not head:FindFirstChild('FaceControls') then
+			local oldMesh = head.MeshId
+			if pcall(function() head.MeshId = modelHead.MeshId end) then
+				state.head = {Part = head, MeshId = oldMesh}
+			end
+		end
+
+		local face = head and head:FindFirstChild('face')
+		local modelFace = modelHead and modelHead:FindFirstChild('face')
+		if face and modelFace then
+			hide(state, face)
+			pcall(function()
+				modelFace:SetAttribute('Disguise', true)
+				modelFace.Parent = head
+				table.insert(state.added, modelFace)
+			end)
+		end
+
+		-- The disguise's animation set. FindFirstChild, never WaitForChild: a character with no
+		-- Animate script (or a model without one) used to hang here forever, after your own
+		-- accessories were already gone and before any of the disguise's went on.
+		local animate, modelAnimate = character:FindFirstChild('Animate'), model:FindFirstChild('Animate')
+		if animate and modelAnimate then
+			for _, slot in modelAnimate:GetChildren() do
+				local real = animate:FindFirstChild(slot.Name)
+				if real then
+					for _, anim in slot:GetChildren() do
+						local realAnim = anim:IsA('Animation') and real:FindFirstChild(anim.Name)
+						if realAnim and realAnim:IsA('Animation') and anim.AnimationId ~= '' then
+							state.animations[realAnim] = state.animations[realAnim] or realAnim.AnimationId
+							realAnim.AnimationId = anim.AnimationId
+						end
+					end
+				end
+			end
+		end
+
+		if ownDesc then
+			pcall(function()
+				state.emotes = {Description = ownDesc, Emotes = ownDesc:GetEmotes(), Equipped = ownDesc:GetEquippedEmotes()}
+				ownDesc:SetEmotes(desc:GetEmotes())
+				ownDesc:SetEquippedEmotes(desc:GetEquippedEmotes())
+			end)
+		end
+
+		model:Destroy()
+		desc:Destroy()
 	end
-	
+
+	local function wearAnimations(char, state)
+		local text = boxText()
+		local bundleId = text == '' and DEFAULT_BUNDLE or tonumber(text)
+		if not bundleId then
+			notif('Disguise', 'Animation mode takes an animation pack (bundle) id', 5, 'warning')
+			return
+		end
+		local data = fetch('bundle '..bundleId, function()
+			local ok, info = pcall(function()
+				return marketplaceService:GetProductInfo(bundleId, Enum.InfoType.Bundle)
+			end)
+			if ok and type(info) == 'table' and type(info.Items) == 'table' then return info end
+			return assetService:GetBundleDetailsAsync(bundleId)
+		end)
+		if not data or applied ~= state then return end
+
+		local animate = char.Character:FindFirstChild('Animate')
+		if not animate then
+			notif('Disguise', 'Your character has no animation script to change', 5, 'warning')
+			return
+		end
+
+		local changed = 0
+		for _, item in (data.Items or {}) do
+			-- 'Ninja Run', 'Old School Run': the slot is the LAST word. The old code took the
+			-- second one, so any pack with a two-word name indexed a nil slot and errored out.
+			local slot = type(item.Name) == 'string' and item.Name:match('(%a+)%s*$')
+			local real = slot and animate:FindFirstChild(slot:lower())
+			if real and applied == state then
+				local ok, objects = pcall(function()
+					return game:GetObjects('rbxassetid://'..item.Id)
+				end)
+				local loaded = ok and objects and objects[1]
+				if loaded then
+					for _, anim in real:GetChildren() do
+						if anim:IsA('Animation') then
+							local source = loaded:FindFirstChild(anim.Name, true)
+							if not (source and source:IsA('Animation')) then
+								source = loaded:FindFirstChildWhichIsA('Animation', true)
+							end
+							if source then
+								state.animations[anim] = state.animations[anim] or anim.AnimationId
+								anim.AnimationId = source.AnimationId
+								changed += 1
+							end
+						end
+					end
+				end
+			end
+		end
+
+		if changed == 0 and applied == state then
+			notif('Disguise', 'That is not an animation pack', 5, 'warning')
+		end
+	end
+
+	local function characterAdded(char)
+		restore()
+		if not (Disguise.Enabled and char and char.Character) then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+
+		local state = {character = char.Character, hidden = {}, added = {}, animations = {}, connections = {}}
+		applied = state
+		local ok, err = pcall(Mode.Value == 'Character' and wearCharacter or wearAnimations, char, state)
+		if not ok then
+			notif('Disguise', 'Failed: '..tostring(err), 5, 'warning')
+		end
+		-- Switched off (or re-applied) while the avatar was still loading: undo this pass.
+		if applied == state and not Disguise.Enabled then
+			restore()
+		end
+	end
+
 	Disguise = vape.Legit:CreateModule({
 		Name = 'Disguise',
 		Function = function(callback)
 			if callback then
 				Disguise:Clean(entitylib.Events.LocalAdded:Connect(characterAdded))
 				if entitylib.isAlive then
-					characterAdded(entitylib.character)
+					task.spawn(characterAdded, entitylib.character)
 				end
+			else
+				restore()
 			end
 		end,
-		Tooltip = 'Changes your character or animation to a specific ID (animation packs or userid\'s only)'
+		Tooltip = 'Wears someone else\'s avatar (a user id or username), or an animation pack (bundle id), on your own screen'
 	})
 	Mode = Disguise:CreateDropdown({
 		Name = 'Mode',
@@ -8318,7 +8556,7 @@ run(function()
 	})
 	IDBox = Disguise:CreateTextBox({
 		Name = 'Disguise',
-		Placeholder = 'Disguise User Id',
+		Placeholder = 'User id / username, or bundle id',
 		Function = function()
 			if Disguise.Enabled then
 				Disguise:Toggle()

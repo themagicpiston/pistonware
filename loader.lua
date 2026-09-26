@@ -2960,15 +2960,22 @@ pcall(function()
 	firstRunProfiles = #listfiles('pistonware/profiles') < 3
 end)
 
---[[ profilecheck.txt persists a prior 'No' answer, so the download prompt only asks once --
-without it, a user who declines would get nagged again on every reinject (the profiles
-folder stays under 3 files forever if nothing gets downloaded). ]]
+--[[ profilecheck.txt persists a prior 'No' on the first-run download prompt, and optout.txt
+persists a prior 'No' (or 'Do not ask me again') on the sync prompt. Either file is enough:
+both live on disk next to the other saved decisions, so a rejection still holds after a reload
+or a rejoin. Whitespace is ignored on the way back in -- a trailing newline from writefile used
+to fail the exact 'false' compare and ask again every reinject. ]]
+local syncOptedOut = false
+pcall(function()
+	syncOptedOut = isfile('pistonware/optout.txt')
+end)
 local declinedDownload = false
 pcall(function()
 	if isfile('pistonware/profiles/profilecheck.txt') then
-		declinedDownload = readfile('pistonware/profiles/profilecheck.txt') == 'false'
+		declinedDownload = trim(readfile('pistonware/profiles/profilecheck.txt')) == 'false'
 	end
 end)
+declinedDownload = declinedDownload or syncOptedOut
 
 --[[ Step 2: offer the shipped configs. ]]
 local wantsDownload = true
@@ -2977,14 +2984,19 @@ if firstRunProfiles and not declinedDownload then
 	local ok, res = pcall(function()
 		return console:Ask('Would you like to download the latest config?', {
 			{text = 'Yes', key = true, tooltip = 'Downloads the Blatant and Legit configs from GitHub'},
-			{text = 'No', key = false, tooltip = 'Starts on default settings and stops asking on future runs'}
+			{text = 'No', key = 'no', tooltip = 'Starts on default settings and stops asking on future runs'}
 		}, 60, true)
 	end)
 	--[[ checked before the answer is acted on, so cancelling mid-question never counts as a 'No' ]]
 	if console:IsAborted() then deleteInstall() return end
 	wantsDownload = ok and res == true
-	if not wantsDownload then
-		pcall(function() writefile('pistonware/profiles/profilecheck.txt', 'false') end)
+	--[[ Explicit No only. A timeout falls back to Yes and must not be recorded as a rejection.
+	Both files, so losing one of them cannot bring the prompt back. ]]
+	if ok and res == 'no' then
+		declinedDownload = true
+		pcall(writefile, 'pistonware/profiles/profilecheck.txt', 'false')
+		pcall(writefile, 'pistonware/optout.txt', 'true')
+		syncOptedOut = true
 	end
 end
 console:SetProgress(0.53)
@@ -3026,14 +3038,9 @@ download/sync, offer to overwrite the shipped configs with the latest ones. Only
 that exist in the GitHub profiles folder get redownloaded -- profiles the user made
 themselves are left alone. Skipped on reinjects/teleports so it only ever asks once per
 session, on the first manual execution. ]]
---[[ optout.txt is written by 'Do not ask me again' on the sync prompt below. Its presence is
-the whole signal -- delete the file to be asked again. Checked before the fingerprint
+--[[ optout.txt was read above. Its presence is the whole signal -- delete the file (and
+profilecheck.txt, if that one says 'false') to be asked again. Checked before the fingerprint
 fetch so an opted-out boot does not spend a request on a question it will never ask. ]]
-local syncOptedOut = false
-pcall(function()
-	syncOptedOut = isfile('pistonware/optout.txt')
-end)
-
 if not firstRunProfiles and not declinedDownload and not isReload and not syncOptedOut then
 	local latestCommit, cachedCommit
 	pcall(function()
@@ -3056,12 +3063,16 @@ if not firstRunProfiles and not declinedDownload and not isReload and not syncOp
 		local ok, wantsSync = pcall(function()
 			return console:Ask('Would you like to sync to the latest config?', {
 				{text = 'Yes', key = true, tooltip = 'Replaces the shipped configs with the newer ones on GitHub'},
-				{text = 'No', key = false, tooltip = 'Keeps the configs you have, asks again next session'}
+				{text = 'No', key = 'no', tooltip = 'Keeps the configs you have and does not ask again'}
 			}, 60, false, {text = 'Do not ask me again', key = 'optout', tooltip = 'Keeps the configs you have and never asks again'})
 		end)
 		if console:IsAborted() then deleteInstall() return end
-		if ok and wantsSync == 'optout' then
+		--[[ 'no' is distinct from the timeout fallback (false), so tabbing away still asks next
+		session. An answered No is saved the same way as 'Do not ask me again'. ]]
+		if ok and (wantsSync == 'optout' or wantsSync == 'no') then
 			pcall(writefile, 'pistonware/optout.txt', 'true')
+			syncOptedOut = true
+			declinedDownload = true
 		end
 		if ok and wantsSync == true then
 			console:SetLine('Syncing configs...')
@@ -3142,8 +3153,8 @@ if not firstRunProfiles and not declinedDownload and not isReload and not syncOp
 				shared.VapeCustomProfile = lastProfile
 			end
 		end
-		--[[ On "No"/timeout the stored commit stays stale, so the prompt returns next session
-		until the user agrees to sync once. ]]
+		--[[ Timeout leaves the stored commit stale, so the prompt can return next session.
+		An answered No is already on disk and will not. ]]
 	end
 end
 phase('config download/sync')

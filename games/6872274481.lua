@@ -179,6 +179,47 @@ local store = {
 	queueType = 'bedwars_test',
 	tools = {}
 }
+
+--[[ Every kit you are playing, not just the first.
+
+Kit Fusion (combined_kit_to4) plays two at once. The game keeps them in the PlayingAsKits
+attribute as "kit_a,kit_b" (KitController:getActiveKits), while Bedwars.kit -- what
+store.equippedKit mirrors -- only ever holds the first (getPrimaryActiveKit). So every
+`store.equippedKit == kit` check was blind to the second kit, and its AutoKit loop, AutoBuy
+picks and kit modules never ran. hasKit is the game's own KitController:isUsingKit: any active
+kit, or one granted on top of them as an ExtraKit_<kit> attribute. Both functions live on store
+so every module reads the same answer. ]]
+do
+	local listSource, listKits = nil, {}
+
+	function store.activeKits()
+		local list = lplr:GetAttribute('PlayingAsKits')
+		if type(list) ~= 'string' then
+			list = store.equippedKit or ''
+		end
+		if list ~= listSource then
+			listSource = list
+			listKits = {}
+			for _, kit in list:split(',') do
+				if kit ~= '' and kit ~= 'none' then
+					table.insert(listKits, kit)
+				end
+			end
+		end
+		-- The store has the kit before the attribute arrives (and after it is cleared).
+		if store.equippedKit and store.equippedKit ~= '' and not table.find(listKits, store.equippedKit) then
+			local kits = table.clone(listKits)
+			table.insert(kits, 1, store.equippedKit)
+			return kits
+		end
+		return listKits
+	end
+
+	function store.hasKit(kit)
+		if type(kit) ~= 'string' or kit == '' then return false end
+		return table.find(store.activeKits(), kit) ~= nil or lplr:GetAttribute('ExtraKit_'..kit) == true
+	end
+end
 local Reach = {}
 local HitBoxes = {}
 local InfiniteFly = {}
@@ -234,7 +275,15 @@ local function addBlur(parent)
 	blur.Size = UDim2.new(1, 89, 1, 52)
 	blur.Position = UDim2.fromOffset(-48, -31)
 	blur.BackgroundTransparency = 1
-	blur.Image = getcustomasset('pistonware/assets/new/blur.png')
+	--[[ No blur rather than an error. getcustomasset is missing or refuses on some executors,
+	and the GUI only downloads this asset where it uses assets itself -- never on a touch
+	device -- so there the file is not there to load. Unguarded, that threw inside every
+	caller after it had already parented its billboard: KitESP's came out empty and its loop
+	died with it. ]]
+	local ok, image = pcall(function()
+		return getcustomasset('pistonware/assets/new/blur.png')
+	end)
+	blur.Image = ok and type(image) == 'string' and image or ''
 	blur.ScaleType = Enum.ScaleType.Slice
 	blur.SliceCenter = Rect.new(52, 31, 261, 502)
 	blur.Parent = parent
@@ -2244,10 +2293,23 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		task.wait(0.1)
 	end
 
-	local BowConstantsTable = debug.getupvalue(
-		Knit.Controllers.ProjectileController.enableBeam,
-		7
-	)
+	local BowConstantsTable
+	for i = 1, 32 do
+		local ok, value = pcall(debug.getupvalue, Knit.Controllers.ProjectileController.enableBeam, i)
+		if not ok then break end
+		if type(value) == 'table' and type(rawget(value, 'RelX')) == 'number' then
+			BowConstantsTable = value
+			break
+		end
+	end
+	BowConstantsTable = BowConstantsTable or {
+		BeamGrowthMultiplier = 0.08,
+		CameraMultiplier = 10,
+		RelX = 0.8,
+		RelY = -0.6,
+		RelZ = 0,
+		YTargetOffset = 0.05
+	}
 
 	local Flamework = require(replicatedStorage['rbxts_include']['node_modules']['@flamework'].core.out).Flamework
 	local InventoryUtil = require(replicatedStorage.TS.inventory['inventory-util']).InventoryUtil
@@ -2558,8 +2620,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		return false
 	end
 
-	local function calculatePath(target, blockpos)
-		local origin = entitylib.isAlive and entitylib.character.RootPart.Position or Vector3.zero
+	local function calculatePath(target, blockpos, hitResolver, originOverride)
+		local origin = originOverride
+			or (entitylib.isAlive and entitylib.character.RootPart.Position or Vector3.zero)
+		hitResolver = hitResolver or getBlockHits
 		local visited, distances, path = {}, {[blockpos] = 0}, {}
 		local heap, heapsize = {{0, blockpos}}, 1
 
@@ -2632,7 +2696,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 					continue
 				end
 
-				local curdist = getBlockHits(block, side) + cost
+				local curdist = hitResolver(block, side) + cost
 				if curdist < (distances[side] or math.huge) then
 					distances[side] = curdist
 					path[side] = current
@@ -2652,6 +2716,8 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			return best, bestcost, path
 		end
 	end
+
+	bedwars.calculateBreakPath = calculatePath
 
 	--[[ Where does the line from the player to this dig spot first meet a block? That block is
 	what someone standing here would actually hit swinging at it, and it is what has to come
@@ -3430,6 +3496,77 @@ run(function()
 	local Shake
 	local TargetPriority
 	local FirstPersonOnly
+	local Projectiles
+	local ProjectileRange
+	local speedRoll, speedRollAt = 0, 0
+	local projectileRay = RaycastParams.new()
+	projectileRay.FilterType = Enum.RaycastFilterType.Exclude
+
+	--[[ Aim Speed is a range: a value from it is held for a random 0.25-0.6s, then re-rolled.
+	Rolled every frame it would average straight back to the middle of the range; held, the
+	pull speeds up and eases off the way a hand does. ]]
+	local function aimSpeed()
+		local now = os.clock()
+		if now >= speedRollAt then
+			speedRoll = AimSpeed:GetRandomValue()
+			speedRollAt = now + 0.25 + math.random() * 0.35
+		end
+		return speedRoll
+	end
+
+	--[[ What the held tool fires, if it is a launcher: its speed and drop from ProjectileMeta, for
+	the ammo you actually carry (a bow fires the first of its ammoItemTypes you have). A
+	self-fuelled launcher lists no ammo and fires its own projectileType. Telepearls are for
+	moving yourself, not for hitting anyone, so they are left alone. ]]
+	local function heldProjectile()
+		local tool = store.hand.tool
+		local meta = tool and bedwars.ItemMeta[tool.Name]
+		local source = meta and meta.projectileSource
+		if not source then return end
+
+		local ammo
+		if source.ammoItemTypes then
+			for _, itemType in source.ammoItemTypes do
+				if getItem(itemType) then
+					ammo = itemType
+					break
+				end
+			end
+			if not ammo then return end
+		end
+
+		local projType = source.projectileType
+		if type(projType) == 'function' then
+			local ok, resolved = pcall(projType, ammo)
+			projType = ok and resolved or nil
+		end
+		local projMeta = type(projType) == 'string' and projType ~= 'telepearl' and bedwars.ProjectileMeta[projType]
+		if not projMeta then return end
+
+		return {
+			Speed = projMeta.launchVelocity or 100,
+			Gravity = projMeta.gravitationalAcceleration or 196.2
+		}
+	end
+
+	--[[ The direction to look for a shot that lands: where the target will be when the
+	projectile gets there, with the drop allowed for (the same SolveTrajectory the other aim
+	code uses, with the target's own fall and landing). SolveTrajectory returns origin plus the
+	launch velocity, so this is that velocity's direction. The camera is turned to look ALONG
+	it rather than through a point on it: a bow fires at what the crosshair is over, and that is
+	usually well past the target, so it is the look direction that has to match. ]]
+	local function projectileDirection(ent, projectile)
+		local head = entitylib.character.Head
+		local root = ent.RootPart
+		if not (head and root and prediction) then return end
+		local origin = head.Position
+		projectileRay.FilterDescendantsInstances = {lplr.Character, gameCamera}
+		local aim = prediction.SolveTrajectory(origin, projectile.Speed, projectile.Gravity, root.Position,
+			root.Velocity, workspace.Gravity, ent.HipHeight, nil, projectileRay)
+		local direction = aim and (aim - origin)
+		if not direction or direction.Magnitude < 0.01 then return end
+		return direction.Unit
+	end
 
 	--[[ The game's own test, from CameraPerspectiveController (decompile:
 	camera-perspective-controller): perspective 0 is first person, and it is 0 whenever the
@@ -3495,10 +3632,11 @@ run(function()
 		return name ~= nil and (name == 'Falcon' or name:match('^Falcon%-') ~= nil)
 	end
 
-	local function findAimTarget()
-		if KillauraTarget.Enabled then return store.KillauraTarget end
+	-- range: set for projectiles, which reach well past Killaura, so its target is not used.
+	local function findAimTarget(range)
+		if KillauraTarget.Enabled and not range then return store.KillauraTarget end
 		return priorityTarget({
-			Range = Distance.Value,
+			Range = range or Distance.Value,
 			Part = 'RootPart',
 			Wallcheck = Targets.Walls.Enabled,
 			Players = Targets.Players.Enabled,
@@ -3519,18 +3657,33 @@ run(function()
 			end
 			if callback then
 				AimAssist:Clean(runService.Heartbeat:Connect(function(dt)
-					if entitylib.isAlive and store.hand.toolType == 'sword' and ((not ClickAim.Enabled) or (os.clock() - bedwars.SwordController.lastSwing) < 0.4)
-						and not (FirstPersonOnly.Enabled and not inFirstPerson()) then
-						local ent = findAimTarget()
-	
+					if not entitylib.isAlive or (FirstPersonOnly.Enabled and not inFirstPerson()) then return end
+
+					-- A sword, or with Projectiles on, anything that fires one. Click Aim means a
+					-- recent swing for the sword and the attack button held (drawing) for a
+					-- launcher; a phone has no held button to read, so it always counts there.
+					local projectile
+					if store.hand.toolType == 'sword' then
+						if ClickAim.Enabled and (os.clock() - bedwars.SwordController.lastSwing) >= 0.4 then return end
+					else
+						projectile = Projectiles.Enabled and heldProjectile()
+						if not projectile then return end
+						if ClickAim.Enabled and not (inputService.TouchEnabled or inputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)) then return end
+					end
+
+					do
+						local ent = findAimTarget(projectile and ProjectileRange.Value or nil)
+
 						if ent then
 							if isFalconDecoy(ent) then return end
 							local delta = (ent.RootPart.Position - entitylib.character.RootPart.Position)
 							local localfacing = entitylib.character.RootPart.CFrame.LookVector * Vector3.new(1, 0, 1)
 							local angle = math.acos(localfacing:Dot((delta * Vector3.new(1, 0, 1)).Unit))
 							if angle >= (math.rad(AngleSlider.Value) / 2) then return end
+							local direction = projectile and projectileDirection(ent, projectile)
+							if projectile and not direction then return end
 							targetinfo.Targets[ent] = tick() + 1
-							local aimspeed = AimSpeed.Value + (StrafeIncrease.Enabled and (inputService:IsKeyDown(Enum.KeyCode.A) or inputService:IsKeyDown(Enum.KeyCode.D)) and 10 or 0)
+							local aimspeed = aimSpeed() + (StrafeIncrease.Enabled and (inputService:IsKeyDown(Enum.KeyCode.A) or inputService:IsKeyDown(Enum.KeyCode.D)) and 10 or 0)
 							--[[ Strip last frame's shake, aim from that, then hang this frame's
 							off the result -- the shake sits OUTSIDE the aim lerp. Folded
 							into the lerp target it was a low-pass away from invisible: at
@@ -3540,7 +3693,8 @@ run(function()
 							first is also what keeps the leftovers from compounding frame
 							over frame into a slow wander. ]]
 							local base = gameCamera.CFrame * shakeapplied:Inverse()
-							local aimed = base:Lerp(CFrame.lookAt(base.p, ent.RootPart.Position), aimspeed * dt)
+							local goal = direction and base.p + direction or ent.RootPart.Position
+							local aimed = base:Lerp(CFrame.lookAt(base.p, goal), aimspeed * dt)
 							shakeapplied = shakeRotation(dt)
 							gameCamera.CFrame = aimed * shakeapplied
 						end
@@ -3548,7 +3702,7 @@ run(function()
 					end))
 				end
 			end,
-		Tooltip = 'Smoothly pulls your aim onto the closest target while you have a sword out'
+		Tooltip = 'Smoothly pulls your aim onto the closest target while you have a sword out,\nand with Projectiles on, onto where your shot will land'
 	})
 	Targets = AimAssist:CreateTargets({
 		Players = true,
@@ -3569,11 +3723,13 @@ run(function()
 		Name = 'Target Mode',
 		List = methods
 	})
-	AimSpeed = AimAssist:CreateSlider({
+	AimSpeed = AimAssist:CreateTwoSlider({
 		Name = 'Aim Speed',
 		Min = 1,
 		Max = 20,
-		Default = 6
+		DefaultMin = 6,
+		DefaultMax = 6,
+		Tooltip = 'How hard it pulls. Set a range and the pull varies within it.'
 	})
 	Distance = AimAssist:CreateSlider({
 		Name = 'Distance',
@@ -3610,6 +3766,26 @@ run(function()
 	FirstPersonOnly = AimAssist:CreateToggle({
 		Name = 'First Person Only',
 		Tooltip = 'Only pulls your aim while the camera is in first person'
+	})
+	Projectiles = AimAssist:CreateToggle({
+		Name = 'Projectiles',
+		Function = function(callback)
+			if ProjectileRange then
+				ProjectileRange.Object.Visible = callback
+			end
+		end,
+		Tooltip = 'Also aims bows, crossbows and other launchers: ahead of a moving target\nand above it for the drop. With Click Aim, only while you are drawing.'
+	})
+	ProjectileRange = AimAssist:CreateSlider({
+		Name = 'Projectile Range',
+		Min = 10,
+		Max = 150,
+		Default = 80,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end
 	})
 end)
 	
@@ -3747,7 +3923,8 @@ run(function()
 		local original = bedwars.SwordController.attackEntity
 		oldAttackEntity = original
 		attackEntityHook = function(self, ...)
-			if AirChance.Value < 100 and isAirborne() and airRand:NextNumber(0, 100) > AirChance.Value then
+			local airChance = AirChance:GetRandomValue()
+			if airChance < 100 and isAirborne() and airRand:NextNumber(0, 100) > airChance then
 				bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = originalSwordReach or 14.4
 				local results = table.pack(pcall(original, self, ...))
 				-- read the module state again rather than restoring a saved value, in case
@@ -3803,13 +3980,13 @@ run(function()
 			return val == 1 and 'stud' or 'studs'
 		end
 	})
-	AirChance = Reach:CreateSlider({
+	AirChance = Reach:CreateTwoSlider({
 		Name = 'Air Hit Chance',
 		Min = 0,
 		Max = 100,
-		Default = 100,
-		Suffix = function(val) return '%' end,
-		Tooltip = 'How often a swing gets the extra range while you are in the air'
+		DefaultMin = 100,
+		DefaultMax = 100,
+		Tooltip = 'Percent of swings that get the extra range while you are in the air.\nEach swing rolls its chance from this range.'
 	})
 	PlaceBlocks = Reach:CreateToggle({
 		Name = 'Place Blocks',
@@ -4111,7 +4288,7 @@ run(function()
 					-- A failed Chance roll (or being AFK) leaves this hit alone. This used to
 					-- `return` here, which skipped applyKnockback altogether -- so every
 					-- missed roll took off ALL of the knockback instead of none of it.
-					if rand:NextNumber(0, 100) > Chance.Value or (AFKCheck.Enabled and isLocalAfk()) then
+					if rand:NextNumber(0, 100) > Chance:GetRandomValue() or (AFKCheck.Enabled and isLocalAfk()) then
 						return old(root, mass, dir, knockback, ...)
 					end
 					local check = (not TargetCheck.Enabled) or entitylib.EntityPosition({
@@ -4153,12 +4330,13 @@ run(function()
 		Default = 0,
 		Suffix = function(val) return '%' end
 	})
-	Chance = Velocity:CreateSlider({
+	Chance = Velocity:CreateTwoSlider({
 		Name = 'Chance',
 		Min = 0,
 		Max = 100,
-		Default = 100,
-		Suffix = function(val) return '%' end
+		DefaultMin = 100,
+		DefaultMax = 100,
+		Tooltip = 'Percent of hits whose knockback gets reduced. Each hit rolls its chance from this range.'
 	})
 	TargetCheck = Velocity:CreateToggle({Name = 'Only when targeting'})
 	AFKCheck = Velocity:CreateToggle({
@@ -4242,6 +4420,31 @@ run(function()
 	local Color
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
+	local antiFallPriorityGeneration = 0
+
+	local function setAutoWinAntiFallPriority(active)
+		local handlers = store.AutoWinHandlers
+		local movement = handlers and handlers.Movement
+		if movement and movement.SetPriority then
+			movement:SetPriority('ANTIFALL', active == true)
+		end
+	end
+
+	local function clearAutoWinAntiFallPriority()
+		antiFallPriorityGeneration += 1
+		setAutoWinAntiFallPriority(false)
+	end
+
+	local function pulseAutoWinAntiFallPriority(seconds)
+		antiFallPriorityGeneration += 1
+		local generation = antiFallPriorityGeneration
+		setAutoWinAntiFallPriority(true)
+		task.delay(seconds or 0.3, function()
+			if generation == antiFallPriorityGeneration then
+				setAutoWinAntiFallPriority(false)
+			end
+		end)
+	end
 
 	local function getLowGround()
 		local mag = math.huge
@@ -4280,12 +4483,15 @@ run(function()
 							if Mode.Value == 'Normal' then
 								local top = getNearGround()
 								if top then
+									antiFallPriorityGeneration += 1
+									setAutoWinAntiFallPriority(true)
 									local lastTeleport = lplr:GetAttribute('LastTeleported')
 									local connection
 									connection = runService.PreSimulation:Connect(function()
-										if vape.Modules.Fly.Enabled or vape.Modules.LongJump.Enabled then
+										if vape.Modules.Fly.Enabled or (vape.Modules.TestFly and vape.Modules.TestFly.Enabled) or vape.Modules.LongJump.Enabled then
 											connection:Disconnect()
 											AntiFallDirection = nil
+											clearAutoWinAntiFallPriority()
 											return
 										end
 
@@ -4316,15 +4522,18 @@ run(function()
 											if delta.Magnitude < 1 then
 												connection:Disconnect()
 												AntiFallDirection = nil
+												clearAutoWinAntiFallPriority()
 											end
 										else
 											connection:Disconnect()
 											AntiFallDirection = nil
+											clearAutoWinAntiFallPriority()
 										end
 									end)
 									AntiFall:Clean(connection)
 								end
 							elseif Mode.Value == 'Velocity' then
+								pulseAutoWinAntiFallPriority(0.35)
 								entitylib.character.RootPart.Velocity = Vector3.new(entitylib.character.RootPart.Velocity.X, 100, entitylib.character.RootPart.Velocity.Z)
 							end
 						end
@@ -4332,6 +4541,7 @@ run(function()
 				end
 			else
 				AntiFallDirection = nil
+				clearAutoWinAntiFallPriority()
 			end
 		end,
 		Tooltip = 'Helps you with your Parkinsons.\nCatches you before you go into the void.'
@@ -4495,7 +4705,238 @@ run(function()
 end)
 	
 local Fly
+local TestFly
 local LongJump
+
+--[[ Persistent grounded/airborne state belongs to the adapter, not TPDown.
+TPDown is a policy module: it decides when to teleport down and whether to show
+its status bar. GroundWatcher stays alive regardless of that module so TestFly,
+AutoZephyr and future traversal features all observe the same takeoff/landing
+state.
+
+lastGroundTick / lastGroundLandTick deliberately preserve the old TPDown timing
+semantics. airTimerTick is separate: legitimate mid-air mechanics such as a
+Zephyr air jump can renew the floating-time window without pretending the
+player touched the ground. ResetAirTimer also updates entitylib.character.AirTime
+for compatibility with the existing BedWars/Vape airborne clock. GroundWatcher
+itself remains authoritative for AutoZephyr's countdown. ]]
+local GroundWatcher = {
+	grounded = false,
+	airborne = false,
+	lastGroundTick = 0,
+	lastGroundLandTick = 0,
+	takeoffPosition = nil,
+	landedPosition = nil,
+	airTimerTick = 0,
+	Takeoff = Instance.new('BindableEvent'),
+	Landed = Instance.new('BindableEvent'),
+	AirTimerReset = Instance.new('BindableEvent')
+}
+store.GroundWatcher = GroundWatcher
+vape:Clean(GroundWatcher.Takeoff)
+vape:Clean(GroundWatcher.Landed)
+vape:Clean(GroundWatcher.AirTimerReset)
+
+function GroundWatcher:ResetAirTimer(reason)
+	local now = tick()
+	self.airTimerTick = now
+	if entitylib.isAlive and entitylib.character then
+		entitylib.character.AirTime = os.clock()
+	end
+	self.AirTimerReset:Fire(now, reason)
+	return now
+end
+
+run(function()
+	local wasGrounded
+
+	vape:Clean(runService.Heartbeat:Connect(function()
+		if not entitylib.isAlive then
+			wasGrounded = nil
+			GroundWatcher.grounded = false
+			GroundWatcher.airborne = false
+			return
+		end
+
+		local character = entitylib.character
+		local humanoid = character.Humanoid
+		local root = character.RootPart
+		if not humanoid or not root then return end
+
+		local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
+		GroundWatcher.grounded = grounded
+
+		if wasGrounded == nil then
+			wasGrounded = grounded
+			if grounded then
+				GroundWatcher.airborne = false
+				GroundWatcher:ResetAirTimer('initial-ground')
+			else
+				local now = tick()
+				GroundWatcher.lastGroundTick = now
+				GroundWatcher.takeoffPosition = root.Position
+				GroundWatcher.landedPosition = nil
+				GroundWatcher.lastGroundLandTick = 0
+				GroundWatcher.airborne = true
+				GroundWatcher:ResetAirTimer('initial-air')
+				GroundWatcher.Takeoff:Fire(now, root.Position)
+			end
+			return
+		end
+
+		if wasGrounded and not grounded then
+			local now = tick()
+			GroundWatcher.lastGroundTick = now
+			GroundWatcher.takeoffPosition = root.Position
+			GroundWatcher.landedPosition = nil
+			GroundWatcher.lastGroundLandTick = 0
+			GroundWatcher.airborne = true
+			GroundWatcher:ResetAirTimer('takeoff')
+			GroundWatcher.Takeoff:Fire(now, root.Position)
+		elseif not wasGrounded and grounded then
+			GroundWatcher.landedPosition = root.Position
+			GroundWatcher.lastGroundLandTick = tick()
+			GroundWatcher.airborne = false
+			GroundWatcher:ResetAirTimer('landed')
+			GroundWatcher.Landed:Fire(
+				GroundWatcher.lastGroundTick,
+				GroundWatcher.takeoffPosition,
+				GroundWatcher.landedPosition,
+				GroundWatcher.lastGroundLandTick
+			)
+		end
+
+		wasGrounded = grounded
+	end))
+end)
+
+--[[ AutoZephyr follows TPDown's live Air Time option. Shortly before that
+countdown expires it asks the vanilla JumpHeightController to spend one of
+Zephyr's two air jumps by firing the same JumpRequest generated by user input.
+The normal controller therefore remains responsible for NotifyAirJump, its
+private air-jump counter and the 0.25s debounce.
+
+A confirmed Freefall -> Jumping Zephyr transition renews GroundWatcher's
+air-timer clock (and entitylib.character.AirTime), which restarts TPDown's
+countdown/status window without falsifying lastGroundTick. ]]
+run(function()
+	local AutoZephyr
+	local LeadTime
+	local nextAttempt = 0
+	local airJumpsUsed = 0
+
+	local function reset()
+		nextAttempt = 0
+		airJumpsUsed = 0
+	end
+
+	local function getTPDown()
+		local module = vape.Modules and vape.Modules.TPDown
+		local airTime = module and module.Options and module.Options['Air Time']
+		return module, airTime
+	end
+
+	local function zephyrReady()
+		local controller = bedwars.WindWalkerController
+		return store.equippedKit == 'wind_walker'
+			and controller ~= nil
+			and controller.doubleJumpActive == true
+	end
+
+	local function watchHumanoid(humanoid)
+		if not humanoid then return end
+		AutoZephyr:Clean(humanoid.StateChanged:Connect(function(oldState, newState)
+			if newState == Enum.HumanoidStateType.Landed then
+				reset()
+				return
+			end
+
+			-- This is the same state transition WindWalker's controller uses to
+			-- identify a real air jump. Only a successful jump renews TPDown.
+			if oldState == Enum.HumanoidStateType.Freefall
+				and newState == Enum.HumanoidStateType.Jumping
+				and GroundWatcher.airborne
+				and zephyrReady() then
+				airJumpsUsed = math.min(airJumpsUsed + 1, 2)
+				GroundWatcher:ResetAirTimer('zephyr-air-jump')
+				nextAttempt = tick() + 0.25
+			end
+		end))
+	end
+
+	AutoZephyr = vape.Categories.Utility:CreateModule({
+		Name = 'AutoZephyr',
+		Function = function(callback)
+			if not callback then
+				reset()
+				return
+			end
+
+			reset()
+			if entitylib.isAlive then
+				watchHumanoid(entitylib.character.Humanoid)
+			end
+			AutoZephyr:Clean(entitylib.Events.LocalAdded:Connect(function(ent)
+				reset()
+				watchHumanoid(ent.Humanoid)
+			end))
+			AutoZephyr:Clean(GroundWatcher.Takeoff.Event:Connect(reset))
+			AutoZephyr:Clean(GroundWatcher.Landed.Event:Connect(reset))
+
+			AutoZephyr:Clean(runService.Heartbeat:Connect(function()
+				if not (entitylib.isAlive and GroundWatcher.airborne and zephyrReady()) then
+					return
+				end
+				if airJumpsUsed >= 2 then return end
+
+				local humanoid = entitylib.character.Humanoid
+				if not humanoid or humanoid:GetState() ~= Enum.HumanoidStateType.Freefall then
+					return
+				end
+
+				local tpDown, airTime = getTPDown()
+				if not (tpDown and tpDown.Enabled and airTime and type(airTime.Value) == 'number') then
+					return
+				end
+
+				-- TPDown supplies the configured Air Time duration; GroundWatcher
+				-- supplies the persistent countdown start. ResetAirTimer also keeps
+				-- entitylib.character.AirTime synchronized for existing consumers.
+				local remaining = airTime.Value - (tick() - GroundWatcher.airTimerTick)
+				local now = tick()
+				if remaining > LeadTime.Value or now < nextAttempt then return end
+
+				nextAttempt = now + 0.26
+				if type(firesignal) == 'function' then
+					pcall(firesignal, inputService.JumpRequest)
+				end
+			end))
+		end,
+		ExtraText = function()
+			local tpDown, airTime = getTPDown()
+			if not (tpDown and tpDown.Enabled and airTime and type(airTime.Value) == 'number'
+				and GroundWatcher.airTimerTick > 0) then
+				return ''
+			end
+			return string.format('%.1fs', math.max(
+				airTime.Value - (tick() - GroundWatcher.airTimerTick),
+				0
+			))
+		end,
+		Tooltip = 'Uses a Zephyr air jump just before TPDown Air Time expires'
+	})
+
+	LeadTime = AutoZephyr:CreateSlider({
+		Name = 'Lead Time',
+		Min = 0,
+		Max = 1,
+		Default = 0.15,
+		Decimal = 100,
+		Suffix = function(val) return val == 1 and 'second' or 'seconds' end,
+		Tooltip = 'How early before TPDown Air Time expires AutoZephyr requests a jump'
+	})
+end)
+
 run(function()
 	local Value
 	local VerticalValue
@@ -4620,6 +5061,891 @@ run(function()
 	})
 end)
 	
+
+run(function()
+	local Mode
+	local Value
+	local VerticalValue
+	local WallCheck
+	local PopBalloons
+	local Notifications
+	local VelocityBounceValue
+	local CFrameBounceValue
+	local BounceRepeat
+	local BounceWait
+	local VelocityIncrease
+	local CFrameIncrease
+	local VerticalClipVelocity
+	local VerticalClipIncrement
+	local VerticalClipWait
+	local VerticalClipLoops
+	local VerticalClipMaxY
+	local JumpDuration
+	local JumpHeightAbove
+	local JumpMargin
+	local rayCheck = RaycastParams.new()
+	rayCheck.RespectCanCollide = true
+	local up, down = 0, 0
+	local activeMode
+	local modeGeneration = 0
+	local modeCleanups = {}
+	local Modes, ModeList = {}, {}
+	local testFlySessionTick = 0
+	local pendingOnGroundTick
+	local waitForLandingGeneration
+	local ModeContext = {}
+
+	local function registerMode(name, hooks)
+		Modes[name] = hooks or {}
+		if not table.find(ModeList, name) then
+			table.insert(ModeList, name)
+		end
+	end
+
+	function ModeContext:Clean(item)
+		if item ~= nil then
+			table.insert(modeCleanups, item)
+		end
+		return item
+	end
+
+	local function cleanupModeResources()
+		for i = #modeCleanups, 1, -1 do
+			local item = modeCleanups[i]
+			pcall(function()
+				local itemType = typeof(item)
+				if itemType == 'RBXScriptConnection' then
+					item:Disconnect()
+				elseif itemType == 'Instance' then
+					item:Destroy()
+				elseif type(item) == 'function' then
+					item()
+				elseif type(item) == 'table' then
+					if type(item.Disconnect) == 'function' then
+						item:Disconnect()
+					elseif type(item.Destroy) == 'function' then
+						item:Destroy()
+					end
+				end
+			end)
+		end
+		table.clear(modeCleanups)
+	end
+
+	local function callModeHook(mode, hook, ...)
+		local callback = mode and mode[hook]
+		if type(callback) ~= 'function' then return end
+		local ok, err = pcall(callback, ModeContext, ...)
+		if not ok then
+			bufferCall('error', 'testfly.mode.'..hook:lower(), tostring(err), {
+				mode = Mode and Mode.Value or 'unknown'
+			})
+		end
+	end
+
+	local function stopMode(reason)
+		local mode = activeMode
+		activeMode = nil
+		modeGeneration += 1
+		ModeContext.Generation = modeGeneration
+		callModeHook(mode, 'End', reason)
+		cleanupModeResources()
+		callModeHook(mode, 'Cleanup', reason)
+		ModeContext.State = nil
+	end
+
+	local function startMode(name)
+		local mode = Modes[name]
+		activeMode = mode
+		modeGeneration += 1
+		local generation = modeGeneration
+		ModeContext.Generation = generation
+		ModeContext.State = {}
+		waitForLandingGeneration = nil
+
+		if mode and type(mode.Once) == 'function' then
+			task.spawn(function()
+				callModeHook(mode, 'Once')
+				if not (TestFly.Enabled and activeMode == mode and ModeContext.Generation == generation) then return end
+				-- AutoWin owns the landing and releases this flight after support returns.
+				if store.TestFlyJump and store.TestFlyJump.AutoWinOwned then return end
+
+				if Notifications and Notifications.Enabled then
+					-- Give GroundWatcher one frame to observe a ground -> air transition made by
+					-- the final Once step before deciding whether a landing is pending.
+					if entitylib.isAlive and entitylib.character.Humanoid.FloorMaterial == Enum.Material.Air then
+						task.wait()
+					end
+
+					if TestFly.Enabled
+						and activeMode == mode
+						and ModeContext.Generation == generation
+						and GroundWatcher.airborne
+						and GroundWatcher.lastGroundTick >= testFlySessionTick then
+						waitForLandingGeneration = generation
+						return
+					end
+				end
+
+				if TestFly.Enabled and activeMode == mode and ModeContext.Generation == generation then
+					TestFly:Toggle()
+				end
+			end)
+			return
+		end
+
+		callModeHook(mode, 'Start')
+	end
+
+	local function switchMode(name)
+		if not (TestFly and TestFly.Enabled) then return end
+		stopMode('switch')
+		startMode(name)
+	end
+
+	local function notifyFlightStats(onGroundTick, onGroundPosition, landedPosition, landedTick)
+		if not (Notifications and Notifications.Enabled) then return end
+		if onGroundTick <= 0 or landedTick < onGroundTick or not onGroundPosition or not landedPosition then return end
+		local horizontal = (landedPosition - onGroundPosition) * Vector3.new(1, 0, 1)
+		notif('TestFly', string.format(
+			'Flew %.1f studs for %.2f seconds',
+			horizontal.Magnitude,
+			landedTick - onGroundTick
+		), 5)
+	end
+
+	vape:Clean(GroundWatcher.Landed.Event:Connect(function(onGroundTick, onGroundPosition, landedPosition, landedTick)
+		local belongsToActiveSession = TestFly and TestFly.Enabled and onGroundTick >= testFlySessionTick
+		local belongsToPendingFlight = pendingOnGroundTick ~= nil and onGroundTick == pendingOnGroundTick
+		local finishesOnceMode = waitForLandingGeneration ~= nil
+			and TestFly
+			and TestFly.Enabled
+			and ModeContext.Generation == waitForLandingGeneration
+			and onGroundTick >= testFlySessionTick
+
+		if belongsToActiveSession or belongsToPendingFlight then
+			notifyFlightStats(onGroundTick, onGroundPosition, landedPosition, landedTick)
+		end
+		if belongsToPendingFlight then
+			pendingOnGroundTick = nil
+		end
+		if finishesOnceMode and not (store.TestFlyJump and store.TestFlyJump.AutoWinOwned) then
+			waitForLandingGeneration = nil
+			TestFly:Toggle()
+		end
+	end))
+
+	local function startFlightMode(context)
+		up, down = 0, 0
+		context.State.oldDeflate = bedwars.BalloonController.deflateBalloon
+		bedwars.BalloonController.deflateBalloon = function() end
+
+		if lplr.Character and (lplr.Character:GetAttribute('InflatedBalloons') or 0) == 0 and getItem('balloon') then
+			bedwars.BalloonController:inflateBalloon()
+		end
+
+		context:Clean(vapeEvents.AttributeChanged.Event:Connect(function(changed)
+			if changed == 'InflatedBalloons' and lplr.Character and (lplr.Character:GetAttribute('InflatedBalloons') or 0) == 0 and getItem('balloon') then
+				bedwars.BalloonController:inflateBalloon()
+			end
+		end))
+	end
+
+	local function endFlightMode(context, reason)
+		local oldDeflate = context.State and context.State.oldDeflate
+		if oldDeflate then
+			bedwars.BalloonController.deflateBalloon = oldDeflate
+		end
+
+		if reason == 'disable' and PopBalloons.Enabled and entitylib.isAlive and lplr.Character and (lplr.Character:GetAttribute('InflatedBalloons') or 0) > 0 then
+			for _ = 1, 3 do
+				bedwars.BalloonController:deflateBalloon()
+			end
+		end
+	end
+
+	local function cleanupFlightMode()
+		up, down = 0, 0
+	end
+
+	-- `maxSpeed` (optional) caps the studs a second moved this step below the
+	-- usual getSpeed() plus the Speed slider's top-up.
+	local function applyHorizontal(dt, maxSpeed)
+		if not (entitylib.isAlive and isnetworkowner(entitylib.character.RootPart)) then return end
+
+		local char = entitylib.character
+		local root, moveDirection = char.RootPart, char.Humanoid.MoveDirection
+		local velo = getSpeed()
+		local speed = math.max(Value.Value, velo)
+		if maxSpeed then
+			speed = math.clamp(maxSpeed, 0, speed)
+		end
+		local walk = math.min(velo, speed)
+		local destination = moveDirection * (speed - walk) * dt
+		rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera, AntiFallPart}
+		rayCheck.CollisionGroup = root.CollisionGroup
+
+		if WallCheck.Enabled then
+			local ray = workspace:Raycast(root.Position, destination, rayCheck)
+			if ray then
+				destination = (ray.Position + ray.Normal) - root.Position
+			end
+		end
+
+		root.CFrame += destination
+		root.AssemblyLinearVelocity = (moveDirection * walk) + Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+		return root, moveDirection, velo
+	end
+
+	local function runBounceOnce(context, baseOption, increaseOption, apply)
+		local generation = context.Generation
+		local amount = baseOption.Value
+		local repeats = math.max(math.floor(BounceRepeat.Value), 1)
+
+		for _ = 1, repeats do
+			if not TestFly.Enabled or context.Generation ~= generation then return end
+			if entitylib.isAlive and isnetworkowner(entitylib.character.RootPart) then
+				local ok, err = pcall(apply, entitylib.character.RootPart, amount)
+				if not ok then
+					bufferCall('error', 'testfly.bounce', tostring(err), {
+						mode = Mode and Mode.Value or 'unknown'
+					})
+				end
+			end
+
+			amount += increaseOption.Value
+			task.wait(BounceWait.Value)
+		end
+	end
+	registerMode('Heatseeker', {
+		Start = startFlightMode,
+		PreSimulation = function(_, dt)
+			local root, moveDirection, velo = applyHorizontal(dt)
+			if root then
+				local balloons = lplr.Character:GetAttribute('InflatedBalloons')
+				local flyAllowed = (balloons and balloons > 0) or store.matchState == 2
+				local mass = (1.5 + (flyAllowed and 6 or 0) * (os.clock() % 0.4 < 0.2 and -1 or 1)) + ((up + down) * VerticalValue.Value)
+				root.AssemblyLinearVelocity = (moveDirection * velo) + Vector3.new(0, mass, 0)
+			end
+		end,
+		End = endFlightMode,
+		Cleanup = cleanupFlightMode
+	})
+
+	registerMode('VelocityBounce', {
+		Once = function(context)
+			runBounceOnce(context, VelocityBounceValue, VelocityIncrease, function(root, amount)
+				root.AssemblyLinearVelocity += Vector3.new(0, amount, 0)
+			end)
+		end
+	})
+
+	registerMode('CFrameBounce', {
+		Once = function(context)
+			runBounceOnce(context, CFrameBounceValue, CFrameIncrease, function(root, amount)
+				root.CFrame += Vector3.new(0, amount, 0)
+			end)
+		end
+	})
+
+	registerMode('VerticalClip', {
+		PreSimulation = function(_, dt)
+			applyHorizontal(dt)
+		end,
+		Once = function(context)
+			local generation = context.Generation
+			local amount = VerticalClipVelocity.Value
+			local loops = math.max(math.floor(VerticalClipLoops.Value), 1)
+
+			-- Apply the configured vertical velocity pulse, wait, and repeat.
+			-- With the defaults this runs 120 Y velocity 8 times at 0.17s
+			-- intervals, so the final clip occurs after roughly 1.36 seconds.
+			for _ = 1, loops do
+				if not TestFly.Enabled or context.Generation ~= generation then return end
+				if entitylib.isAlive and isnetworkowner(entitylib.character.RootPart) then
+					local root = entitylib.character.RootPart
+					local velocity = root.AssemblyLinearVelocity
+					root.AssemblyLinearVelocity = Vector3.new(velocity.X, amount, velocity.Z)
+				end
+
+				amount += VerticalClipIncrement.Value
+				task.wait(VerticalClipWait.Value)
+			end
+
+			-- Clip to the exact configured absolute world-space Y after the
+			-- velocity sequence completes, preserving X/Z and rotation.
+			if TestFly.Enabled and context.Generation == generation and entitylib.isAlive then
+				local root = entitylib.character.RootPart
+				local rotation = root.CFrame - root.CFrame.Position
+				root.CFrame = CFrame.new(
+					root.Position.X,
+					VerticalClipMaxY.Value,
+					root.Position.Z
+				) * rotation
+			end
+		end
+	})
+
+
+	--[[ Jump. The map's block heights (player-placed blocks ignored, so towers
+	cannot raise it) set the ceiling: the top block of every column, and the
+	80th percentile of those tops rather than the single highest, so one spire
+	does not lift every flight. Max Y = that top face + Jump Height Above
+	Blocks, the highest point that does not take damage. It is worked out again
+	when the match state changes, so the start of the match re-reads the map
+	that actually loaded instead of the lobby's. The jump rises for
+	exactly Jump Duration and peaks Jump Margin studs below that ceiling, then
+	falls normally; unlike VerticalClip it never teleports.
+
+	Every physics step re-solves the rise from where the character really is:
+	the parabola through (now, current y) whose apex is (T, target y). With
+	tau = T - now and dy = target y - current y, the straight line between those
+	points has slope dy/tau, and that parabola's velocity now is 2 * dy/tau
+	(falling linearly to zero at T). World gravity for the coming step is added
+	back (g * dt), so the rise tracks the arc despite gravity, frame drops or
+	knockback, and never passes the target. ]]
+	local jumpCeiling = {}
+	local JUMP_CEILING_PERCENTILE = 0.8
+	local function jumpCeilingCurrent(blockStore)
+		return jumpCeiling.Store == blockStore
+			and jumpCeiling.MatchState == store.matchState
+			and jumpCeiling.Top ~= nil
+	end
+
+	local function getHighestMapBlockTop()
+		local blockStore = bedwars.BlockController:getStore()
+		if jumpCeilingCurrent(blockStore) then
+			return jumpCeiling.Top
+		end
+		local matchState = store.matchState
+
+		-- Top map block per column. Attribute reads only for a new candidate
+		-- height in that column.
+		local columns = {}
+		for index, pos in blockStore:getAllBlockPositions() do
+			local column = Vector3.new(pos.X, 0, pos.Z)
+			local best = columns[column]
+			if not best or pos.Y > best then
+				local block = blockStore:getBlockAt(pos)
+				if block and (block:GetAttribute('PlacedByUserId') or 0) == 0 then
+					columns[column] = pos.Y
+				end
+			end
+			if index % 4000 == 0 then
+				task.wait()
+			end
+		end
+
+		local tops = {}
+		for _, y in columns do
+			table.insert(tops, y)
+		end
+		if #tops > 0 then
+			table.sort(tops)
+			local index = math.clamp(math.ceil(#tops * JUMP_CEILING_PERCENTILE), 1, #tops)
+			jumpCeiling.Store = blockStore
+			jumpCeiling.MatchState = matchState
+			jumpCeiling.Top = tops[index] * 3 + 1.5
+		end
+		return jumpCeiling.Top
+	end
+
+	--[[ Aimed arc: AutoWin sets store.TestFlyJump.Target (the root position to
+	land at) before switching Jump on, and the flight goes there instead of up
+	to the ceiling. Its time is t = d / v: d the horizontal distance left, v the
+	speed this step moves at (getSpeed() plus the Speed slider's top-up). The
+	vertical velocity is the parabola under gravity g that reaches the target's
+	height at that time, vy = dy / t + g * t / 2. Re-solved every step, so a
+	faster speed flattens the arc and lands sooner instead of falling out the
+	rest of a fixed rise. t is never shorter than:
+	  - on the ground: a lift of Clearance studs over the higher end, so the
+	    flight leaves its block and comes down onto the landing;
+	  - rising below Clearance over the landing, or well under it: an apex
+	    Clearance studs over the landing;
+	  - otherwise: the free fall from here (never pushed down past gravity).
+	When t is one of those, horizontal speed is cut to d / t. Nothing rises
+	past the Jump ceiling. ]]
+	local function arcSeconds(apexRise, dy, gravity)
+		-- From rest up apexRise to the apex, then down to dy (apexRise >= dy).
+		return math.sqrt(2 * math.max(apexRise, 0) / gravity)
+			+ math.sqrt(2 * math.max(apexRise - dy, 0) / gravity)
+	end
+
+	local function steerArc(arc, target, dt)
+		local char = entitylib.character
+		local root = char.RootPart
+		local position = root.Position
+		local gravity = math.max(workspace.Gravity, 1)
+		local clearance = math.max(tonumber(store.TestFlyJump.Clearance) or 0, 0)
+		local distance = Vector3.new(target.X - position.X, 0, target.Z - position.Z).Magnitude
+		local dy = target.Y - position.Y
+		local vy = root.AssemblyLinearVelocity.Y
+		local grounded = char.Humanoid.FloorMaterial ~= Enum.Material.Air
+
+		local moving = char.Humanoid.MoveDirection.Magnitude > 0.05
+		if not grounded then
+			arc.Launched = true
+		elseif not moving or (arc.Launched and distance <= 4.5) then
+			-- Not steered yet, or down on the landing (the owner ends the flight).
+			applyHorizontal(dt)
+			return
+		end
+
+		local minimum
+		if grounded then
+			minimum = arcSeconds(math.max(dy, 0) + clearance, dy, gravity)
+		elseif (vy >= 0 and dy > -clearance) or dy > 1.5 then
+			minimum = arcSeconds(dy + clearance, dy, gravity)
+		elseif dy > 0 then
+			-- Falling, just under the landing's height: nothing left to aim.
+			applyHorizontal(dt)
+			return
+		else
+			minimum = (vy + math.sqrt(vy * vy - 2 * gravity * dy)) / gravity
+		end
+
+		local speed = math.max(Value.Value, getSpeed(), 1)
+		local seconds = math.max(moving and distance / speed or 0, minimum, 2 * dt)
+		root = applyHorizontal(dt, distance / seconds)
+		if not root then return end
+
+		local velocityY = dy / seconds + gravity * seconds / 2
+		if arc.CeilingY then
+			velocityY = math.min(velocityY, math.sqrt(2 * gravity * math.max(arc.CeilingY - position.Y, 0)))
+		end
+		local velocity = root.AssemblyLinearVelocity
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X, velocityY, velocity.Z)
+	end
+
+	registerMode('Jump', {
+		PreSimulation = function(context, dt)
+			local arc = context.State and context.State.Arc
+			local target = arc and store.TestFlyJump and store.TestFlyJump.Target
+			if typeof(target) == 'Vector3' then
+				if entitylib.isAlive and isnetworkowner(entitylib.character.RootPart) then
+					steerArc(arc, target, dt)
+				end
+				return
+			end
+
+			local root = applyHorizontal(dt)
+			local jump = context.State and context.State.Jump
+			if not root or not jump then return end
+
+			local remaining = jump.Duration - (os.clock() - jump.Started)
+			if remaining <= 0 then return end
+
+			-- At least two steps of remaining time, so one step can never carry
+			-- the character past the target.
+			local tau = math.max(remaining, 2 * dt)
+			local rise = jump.TargetY - root.Position.Y
+			local velocity = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = Vector3.new(
+				velocity.X,
+				math.max(2 * rise / tau, 0) + workspace.Gravity * dt,
+				velocity.Z
+			)
+		end,
+		Once = function(context)
+			local generation = context.Generation
+			local function current()
+				return TestFly.Enabled and context.Generation == generation and entitylib.isAlive
+			end
+
+			if store.TestFlyJump and typeof(store.TestFlyJump.Target) == 'Vector3' then
+				-- Aimed arc: PreSimulation steers it until the owner ends the flight.
+				local arc = {}
+				context.State.Arc = arc
+				local top = getHighestMapBlockTop()
+				if top and current() then
+					arc.CeilingY = top + JumpHeightAbove.Value - JumpMargin.Value
+				end
+				return
+			end
+
+			local top = getHighestMapBlockTop()
+			if not top or not current() then return end
+
+			local root = entitylib.character.RootPart
+			local duration = math.max(JumpDuration.Value, 0.05)
+			local targetY = top + JumpHeightAbove.Value - JumpMargin.Value
+			if targetY <= root.Position.Y then return end
+
+			local jump = {
+				TargetY = targetY,
+				Duration = duration,
+				Started = os.clock()
+			}
+			context.State.Jump = jump
+			repeat
+				task.wait()
+			until not current() or os.clock() - jump.Started >= duration
+			if context.State and context.State.Jump == jump then
+				context.State.Jump = nil
+			end
+
+			-- Apex reached: stop rising here and fall under normal gravity.
+			if current() and isnetworkowner(entitylib.character.RootPart) then
+				local apexRoot = entitylib.character.RootPart
+				local velocity = apexRoot.AssemblyLinearVelocity
+				apexRoot.AssemblyLinearVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+			end
+		end
+	})
+
+	-- Modes with Once run only that hook and TestFly disables when it returns.
+	-- Other modes use Start/PreSimulation/Heartbeat/End/Cleanup normally.
+
+	local function updateModeVisibility(name)
+		local velocityBounce = name == 'VelocityBounce'
+		local cframeBounce = name == 'CFrameBounce'
+		local verticalClip = name == 'VerticalClip'
+		local anyBounce = velocityBounce or cframeBounce
+
+		if VerticalValue then VerticalValue.Object.Visible = name == 'Heatseeker' end
+		if VelocityBounceValue then VelocityBounceValue.Object.Visible = velocityBounce end
+		if CFrameBounceValue then CFrameBounceValue.Object.Visible = cframeBounce end
+		if BounceRepeat then BounceRepeat.Object.Visible = anyBounce end
+		if BounceWait then BounceWait.Object.Visible = anyBounce end
+		if VelocityIncrease then VelocityIncrease.Object.Visible = velocityBounce end
+		if CFrameIncrease then CFrameIncrease.Object.Visible = cframeBounce end
+		if VerticalClipVelocity then VerticalClipVelocity.Object.Visible = verticalClip end
+		if VerticalClipIncrement then VerticalClipIncrement.Object.Visible = verticalClip end
+		if VerticalClipWait then VerticalClipWait.Object.Visible = verticalClip end
+		if VerticalClipLoops then VerticalClipLoops.Object.Visible = verticalClip end
+		if VerticalClipMaxY then VerticalClipMaxY.Object.Visible = verticalClip end
+		local jump = name == 'Jump'
+		if JumpDuration then JumpDuration.Object.Visible = jump end
+		if JumpHeightAbove then JumpHeightAbove.Object.Visible = jump end
+		if JumpMargin then JumpMargin.Object.Visible = jump end
+	end
+
+	TestFly = vape.Categories.Blatant:CreateModule({
+		Name = 'TestFly',
+		Function = function(callback)
+			frictionTable.TestFly = callback or nil
+			updateVelocity()
+			if callback then
+				testFlySessionTick = tick()
+				pendingOnGroundTick = nil
+				waitForLandingGeneration = nil
+				startMode(Mode.Value)
+
+				TestFly:Clean(runService.PreSimulation:Connect(function(dt)
+					callModeHook(activeMode, 'PreSimulation', dt)
+				end))
+
+				TestFly:Clean(runService.Heartbeat:Connect(function(dt)
+					callModeHook(activeMode, 'Heartbeat', dt)
+				end))
+
+				TestFly:Clean(inputService.InputBegan:Connect(function(input)
+					if not inputService:GetFocusedTextBox() then
+						if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then
+							up = 1
+						elseif input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.ButtonL2 then
+							down = -1
+						end
+					end
+				end))
+
+				TestFly:Clean(inputService.InputEnded:Connect(function(input)
+					if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then
+						up = 0
+					elseif input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.ButtonL2 then
+						down = 0
+					end
+				end))
+
+				if inputService.TouchEnabled then
+					pcall(function()
+						local jumpButton = lplr.PlayerGui.TouchGui.TouchControlFrame.JumpButton
+						TestFly:Clean(jumpButton:GetPropertyChangedSignal('ImageRectOffset'):Connect(function()
+							up = jumpButton.ImageRectOffset.X == 146 and 1 or 0
+						end))
+					end)
+				end
+			else
+				waitForLandingGeneration = nil
+				stopMode('disable')
+				-- A manual disable still allows the current flight to report after
+				-- landing without forcing TestFly to remain enabled.
+				if Notifications and Notifications.Enabled and GroundWatcher.airborne and GroundWatcher.lastGroundTick >= testFlySessionTick then
+					pendingOnGroundTick = GroundWatcher.lastGroundTick
+				end
+			end
+		end,
+		ExtraText = function()
+			return Mode.Value
+		end,
+		Tooltip = 'Copy of Fly for testing custom flight modes and lifecycle hooks'
+	})
+
+	ModeContext.Module = TestFly
+
+	Mode = TestFly:CreateDropdown({
+		Name = 'Mode',
+		List = ModeList,
+		Default = 'Heatseeker',
+		Function = function(val)
+			updateModeVisibility(val)
+			switchMode(val)
+		end
+	})
+
+	Value = TestFly:CreateSlider({
+		Name = 'Speed',
+		Min = 1,
+		Max = 23,
+		Default = 23,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end
+	})
+
+	VerticalValue = TestFly:CreateSlider({
+		Name = 'Vertical Speed',
+		Min = 1,
+		Max = 150,
+		Default = 50,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end
+	})
+
+	VelocityBounceValue = TestFly:CreateSlider({
+		Name = 'Velocity',
+		Min = 0,
+		Max = 150,
+		Default = 25,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end
+	})
+
+	CFrameBounceValue = TestFly:CreateSlider({
+		Name = 'CFrame',
+		Min = 0,
+		Max = 20,
+		Decimal = 10,
+		Default = 1,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end
+	})
+
+	BounceRepeat = TestFly:CreateSlider({
+		Name = 'Repeat',
+		Min = 1,
+		Max = 20,
+		Default = 3,
+		Darker = true,
+		Visible = false
+	})
+
+	BounceWait = TestFly:CreateSlider({
+		Name = 'Wait',
+		Min = 0.01,
+		Max = 2,
+		Decimal = 100,
+		Default = 0.1,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'second' or 'seconds'
+		end
+	})
+
+	VelocityIncrease = TestFly:CreateSlider({
+		Name = 'Increase Velocity',
+		Min = -50,
+		Max = 50,
+		Default = 0,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return (val == 1 or val == -1) and 'stud' or 'studs'
+		end
+	})
+
+	CFrameIncrease = TestFly:CreateSlider({
+		Name = 'Increase CFrame',
+		Min = -10,
+		Max = 10,
+		Decimal = 10,
+		Default = 0,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return (val == 1 or val == -1) and 'stud' or 'studs'
+		end
+	})
+
+	VerticalClipVelocity = TestFly:CreateSlider({
+		Name = 'Clip Velocity',
+		Min = -150,
+		Max = 150,
+		Default = 120,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return (val == 1 or val == -1) and 'stud' or 'studs'
+		end
+	})
+
+	VerticalClipIncrement = TestFly:CreateSlider({
+		Name = 'Clip Increment',
+		Min = -50,
+		Max = 50,
+		Default = 0,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return (val == 1 or val == -1) and 'stud' or 'studs'
+		end
+	})
+
+	VerticalClipWait = TestFly:CreateSlider({
+		Name = 'Clip Wait',
+		Min = 0.01,
+		Max = 2,
+		Decimal = 100,
+		Default = 0.17,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'second' or 'seconds'
+		end
+	})
+
+	VerticalClipLoops = TestFly:CreateSlider({
+		Name = 'Clip Loop Count',
+		Min = 1,
+		Max = 20,
+		Default = 8,
+		Darker = true,
+		Visible = false
+	})
+
+	VerticalClipMaxY = TestFly:CreateSlider({
+		Name = 'Max Y',
+		Min = -500,
+		Max = 190,
+		Decimal = 10,
+		Default = 180,
+		Darker = true,
+		Visible = false,
+		Tooltip = 'Exact absolute world-space Y to clip to after the velocity sequence'
+	})
+
+	JumpDuration = TestFly:CreateSlider({
+		Name = 'Jump Duration',
+		Min = 0.3,
+		Max = 3,
+		Decimal = 100,
+		Default = 1.2,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'second' or 'seconds'
+		end,
+		Tooltip = 'Time the Jump rise takes to reach its apex (for an aimed arc, the latest it may peak)'
+	})
+
+	JumpHeightAbove = TestFly:CreateSlider({
+		Name = 'Jump Height Above Blocks',
+		Min = 0,
+		Max = 200,
+		Default = 125,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end,
+		Tooltip = 'Max Y before damage: the highest map block top plus this many studs'
+	})
+
+	JumpMargin = TestFly:CreateSlider({
+		Name = 'Jump Margin',
+		Min = 0,
+		Max = 30,
+		Decimal = 10,
+		Default = 5,
+		Darker = true,
+		Visible = false,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end,
+		Tooltip = 'How far below Max Y the Jump apex stops'
+	})
+
+	WallCheck = TestFly:CreateToggle({
+		Name = 'Wall Check',
+		Default = true
+	})
+
+	PopBalloons = TestFly:CreateToggle({
+		Name = 'Pop Balloons',
+		Default = true
+	})
+
+	Notifications = TestFly:CreateToggle({
+		Name = 'Notifications',
+		Tooltip = 'Reports takeoff/landing flight stats and keeps Once modes enabled until landing'
+	})
+
+	-- Jump ceiling for AutoWin's flight planning. ApexY may scan the map once
+	-- (yields); CachedApexY never scans and is nil until the ceiling is known.
+	-- Target (a root position) set before Jump starts flies the aimed arc to
+	-- it, landing from at least Clearance studs above; nil flies the rise.
+	store.TestFlyJump = {
+		AutoWinOwned = false,
+		Target = nil,
+		Clearance = nil,
+		ApexY = function()
+			local top = getHighestMapBlockTop()
+			return top and top + JumpHeightAbove.Value - JumpMargin.Value or nil
+		end,
+		CachedApexY = function()
+			if not jumpCeilingCurrent(bedwars.BlockController:getStore()) then
+				return nil
+			end
+			return jumpCeiling.Top + JumpHeightAbove.Value - JumpMargin.Value
+		end,
+		Duration = function()
+			return math.max(JumpDuration.Value, 0.05)
+		end
+	}
+
+	ModeContext.Options = {
+		Mode = Mode,
+		Speed = Value,
+		VerticalSpeed = VerticalValue,
+		Velocity = VelocityBounceValue,
+		CFrame = CFrameBounceValue,
+		Repeat = BounceRepeat,
+		Wait = BounceWait,
+		IncreaseVelocity = VelocityIncrease,
+		IncreaseCFrame = CFrameIncrease,
+		ClipVelocity = VerticalClipVelocity,
+		ClipIncrement = VerticalClipIncrement,
+		ClipWait = VerticalClipWait,
+		ClipLoopCount = VerticalClipLoops,
+		MaxY = VerticalClipMaxY,
+		JumpDuration = JumpDuration,
+		JumpHeightAbove = JumpHeightAbove,
+		JumpMargin = JumpMargin,
+		WallCheck = WallCheck,
+		PopBalloons = PopBalloons,
+		Notifications = Notifications
+	}
+
+	updateModeVisibility(Mode.Value)
+end)	
 run(function()
 	local Mode
 	local Expand
@@ -4801,8 +6127,31 @@ run(function()
 	local WallCheck
 	local AutoJump
 	local AlwaysJump
+	local PauseOnLagback
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
+	--[[ Pause on Lagback: the executor's own isnetworkowner (the file's local one answers
+	true on most executors). While the server holds the character -- a lagback -- every
+	push here is set back again. The probe is not cheap, so it is read at most every 0.1s
+	rather than every rendered frame. Without an executor function it never pauses. ]]
+	local ownedAt, owned = 0, true
+	local function ownsCharacter(root)
+		if not PauseOnLagback.Enabled then
+			return isnetworkowner(root)
+		end
+		local now = os.clock()
+		if now - ownedAt >= 0.1 then
+			ownedAt = now
+			local check = getgenv and getgenv().isnetworkowner
+			if type(check) == 'function' then
+				local ok, result = pcall(check, root)
+				owned = not ok or result == true
+			else
+				owned = isnetworkowner(root)
+			end
+		end
+		return owned
+	end
 	
 	Speed = vape.Categories.Blatant:CreateModule({
 		Name = 'Speed',
@@ -4816,7 +6165,7 @@ run(function()
 			if callback then
 				Speed:Clean(runService.PreSimulation:Connect(function(dt)
 					bedwars.StatefulEntityKnockbackController.lastImpulseTime = callback and math.huge or time()
-						if entitylib.isAlive and not Fly.Enabled and not vape.Modules.LongJump.Enabled and isnetworkowner(entitylib.character.RootPart) then
+						if entitylib.isAlive and not Fly.Enabled and not TestFly.Enabled and not vape.Modules.LongJump.Enabled and ownsCharacter(entitylib.character.RootPart) then
 						local char = entitylib.character
 						local hum = char.Humanoid
 						local state = hum:GetState()
@@ -4890,69 +6239,450 @@ run(function()
 		Visible = false,
 		Darker = true
 	})
+	PauseOnLagback = Speed:CreateToggle({
+		Name = 'Pause on Lagback',
+		Tooltip = 'Stops speeding while the server holds your character\n(no network ownership of it: a lagback).'
+	})
 end)
 	
 run(function()
 	local BedESP
+	local Method
+	local Color
+	local TeamColor
+	local BoundingBox
+	local Filled
+	local HealthBar
+	local Name
+	local Background
+	local Teammates
+	local Distance
+	local DistanceLimit
 	local Reference = {}
-	local Folder = Instance.new('Folder')
-	Folder.Parent = vape.gui
-	
-	local function Added(bed)
-		if not BedESP.Enabled then return end
-		local BedFolder = Instance.new('Folder')
-		BedFolder.Parent = Folder
-		Reference[bed] = BedFolder
-		local parts = bed:GetChildren()
-		table.sort(parts, function(a, b)
-			return a.Name > b.Name
-		end)
-	
-		for _, part in parts do
-			if part:IsA('BasePart') and part.Name ~= 'Blanket' then
-				local handle = Instance.new('BoxHandleAdornment')
-				handle.Size = part.Size + Vector3.new(.01, .01, .01)
-				handle.AlwaysOnTop = true
-				handle.ZIndex = 2
-				handle.Visible = true
-				handle.Adornee = part
-				handle.Color3 = part.Color
-				if part.Name == 'Legs' then
-					handle.Color3 = Color3.fromRGB(167, 112, 64)
-					handle.Size = part.Size + Vector3.new(.01, -1, .01)
-					handle.CFrame = CFrame.new(0, -0.4, 0)
-					handle.ZIndex = 0
+
+	--[[ Drawn with the Drawing library, like ESP, rather than adornments in Pistonware's GUI:
+	nothing is parented anywhere, so there is no GUI permission for an executor to refuse, and
+	the options are ESP's -- 2D or 3D box, fill, health bar, name with a background, priority
+	only, distance range -- read against a bed instead of a character.
+
+	Every bed is boxed by its own block: a BasePart two cells long, or a model's bounding box.
+	The 3D mode draws its twelve edges; the 2D mode the screen rectangle around them. The name
+	and the health bar hang off that rectangle in both modes. ]]
+	local CORNERS = {
+		Vector3.new(-1, -1, -1), Vector3.new(1, -1, -1), Vector3.new(1, -1, 1), Vector3.new(-1, -1, 1),
+		Vector3.new(-1, 1, -1), Vector3.new(1, 1, -1), Vector3.new(1, 1, 1), Vector3.new(-1, 1, 1)
+	}
+	local EDGES = {
+		{1, 2}, {2, 3}, {3, 4}, {4, 1},
+		{5, 6}, {6, 7}, {7, 8}, {8, 5},
+		{1, 5}, {2, 6}, {3, 7}, {4, 8}
+	}
+
+	-- The team a bed belongs to: the id in its Team<id>NoBreak attribute, the one the game
+	-- itself protects the bed with.
+	local function bedTeam(bed)
+		for name in bed:GetAttributes() do
+			local id = name:match('^Team(.+)NoBreak$')
+			if id then return id end
+		end
+	end
+
+	-- The team's name and colour for this match, from its queue meta (displayName 'Blue',
+	-- colorHex). A bed the meta does not cover falls back to 'Team <id>' and the colour of
+	-- its own blanket.
+	local function teamInfo(bed, teamId)
+		local name, color
+		pcall(function()
+			local meta = bedwars.QueueMeta[store.queueType]
+			for _, team in (meta and meta.teams or {}) do
+				if teamId and tostring(team.id) == tostring(teamId) then
+					name = team.displayName
+					local hex = tonumber(team.colorHex)
+					if hex then
+						color = Color3.fromRGB(hex // 65536 % 256, hex // 256 % 256, hex % 256)
+					end
+					break
 				end
-				handle.Parent = BedFolder
+			end
+		end)
+		if not color then
+			local part = bed:FindFirstChild('Blanket') or bed:FindFirstChild('Covers')
+			color = part and part:IsA('BasePart') and part.Color or nil
+		end
+		return name or (teamId and 'Team '..tostring(teamId)) or 'Bed', color
+	end
+
+	-- The bed's health the way the block engine counts it (hits already taken off), over its
+	-- block's full health. nil when there is nothing to read.
+	local function bedHealth(bed)
+		local health
+		pcall(function()
+			local _, cell = getPlacedBlock(bed.Position)
+			local data = cell and bedwars.BlockController:getStore():getBlockData(cell)
+			health = data and (data:GetAttribute('1') or data:GetAttribute('Health'))
+		end)
+		health = tonumber(health) or tonumber(bed:GetAttribute('Health'))
+		local meta = bedwars.ItemMeta[bed.Name]
+		local maxHealth = tonumber(bed:GetAttribute('MaxHealth')) or (meta and meta.block and tonumber(meta.block.health))
+		return health, maxHealth
+	end
+
+	local function bedBox(bed)
+		if bed:IsA('BasePart') then
+			return bed.CFrame, bed.Size
+		end
+		local ok, cframe, size = pcall(bed.GetBoundingBox, bed)
+		if ok then return cframe, size end
+	end
+
+	local function colorOf(ref)
+		return TeamColor.Enabled and ref.TeamColor or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+	end
+
+	local function newDrawing(class, props)
+		local object = Drawing.new(class)
+		for key, value in props do
+			object[key] = value
+		end
+		return object
+	end
+
+	local function removeBed(bed)
+		local ref = Reference[bed]
+		if not ref then return end
+		Reference[bed] = nil
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		for _, object in ref.Objects do
+			pcall(function()
+				object.Visible = false
+				object:Remove()
+			end)
+		end
+	end
+
+	local function addBed(bed)
+		if Reference[bed] or not bed.Parent then return end
+		local teamId = bedTeam(bed)
+		-- Priority Only: your own team's bed is the one you already know about.
+		if Teammates.Enabled and teamId and tostring(teamId) == tostring(lplr:GetAttribute('Team')) then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+
+		local teamName, teamColor = teamInfo(bed, teamId)
+		local ref = {Objects = {}, TeamColor = teamColor, Label = teamName..' Bed', HealthAt = 0}
+		local color = colorOf(ref)
+		local ok = pcall(function()
+			local objects = ref.Objects
+			if Method.Value == '3D' then
+				ref.Lines = {}
+				for index = 1, #EDGES do
+					local line = newDrawing('Line', {Thickness = 1, Color = color, ZIndex = 2})
+					ref.Lines[index] = line
+					table.insert(objects, line)
+				end
+			else
+				ref.Main = newDrawing('Square', {
+					Thickness = 1, Filled = false, ZIndex = 2, Color = color,
+					Transparency = BoundingBox.Enabled and 1 or 0
+				})
+				table.insert(objects, ref.Main)
+				if BoundingBox.Enabled then
+					ref.Border = newDrawing('Square', {Thickness = 1, Filled = false, ZIndex = 1, Color = Color3.new(), Transparency = 0.35})
+					ref.Border2 = newDrawing('Square', {Thickness = 1, Filled = Filled.Enabled, ZIndex = 1, Color = Color3.new(), Transparency = 0.35})
+					table.insert(objects, ref.Border)
+					table.insert(objects, ref.Border2)
+				end
+			end
+			if HealthBar.Enabled then
+				ref.HealthBorder = newDrawing('Line', {Thickness = 3, ZIndex = 1, Color = Color3.new(), Transparency = 0.35})
+				ref.HealthLine = newDrawing('Line', {Thickness = 1, ZIndex = 2, Color = Color3.fromHSV(1 / 2.5, 0.89, 0.75)})
+				table.insert(objects, ref.HealthBorder)
+				table.insert(objects, ref.HealthLine)
+			end
+			if Name.Enabled then
+				if Background.Enabled then
+					ref.TextBKG = newDrawing('Square', {Thickness = 1, Filled = true, ZIndex = 0, Color = Color3.new(), Transparency = 0.35})
+					table.insert(objects, ref.TextBKG)
+				end
+				ref.Drop = newDrawing('Text', {Text = ref.Label, Color = Color3.new(), Center = true, Size = 18, ZIndex = 1})
+				ref.Text = newDrawing('Text', {Text = ref.Label, Color = color, Center = true, Size = 18, ZIndex = 2})
+				table.insert(objects, ref.Drop)
+				table.insert(objects, ref.Text)
+			end
+			for _, object in objects do
+				object.Visible = false
+			end
+		end)
+		Reference[bed] = ref
+		-- A drawing that would not build leaves nothing half-drawn behind it.
+		if not ok then
+			removeBed(bed)
+		end
+	end
+
+	local function recolor()
+		for _, ref in Reference do
+			local color = colorOf(ref)
+			pcall(function()
+				if ref.Main then ref.Main.Color = color end
+				if ref.Text then ref.Text.Color = color end
+				for _, line in (ref.Lines or {}) do
+					line.Color = color
+				end
+			end)
+		end
+	end
+
+	local function hide(ref)
+		for _, object in ref.Objects do
+			object.Visible = false
+		end
+	end
+
+	local function render()
+		local camera = workspace.CurrentCamera
+		local rootPos = entitylib.isAlive and entitylib.character.RootPart.Position
+		local now = os.clock()
+		for bed, ref in Reference do
+			if not bed.Parent then
+				removeBed(bed)
+				continue
+			end
+			local cframe, size = bedBox(bed)
+			if not cframe then
+				hide(ref)
+				continue
+			end
+			if Distance.Enabled then
+				local distance = rootPos and (rootPos - cframe.Position).Magnitude or math.huge
+				if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
+					hide(ref)
+					continue
+				end
+			end
+
+			-- Every corner on screen space; one behind the camera would flip the box inside out.
+			local points, minX, minY, maxX, maxY = {}, math.huge, math.huge, -math.huge, -math.huge
+			local behind = false
+			for index, corner in CORNERS do
+				local screen = camera:WorldToViewportPoint(cframe:PointToWorldSpace(corner * size / 2))
+				if screen.Z <= 0 then
+					behind = true
+					break
+				end
+				local point = Vector2.new(screen.X, screen.Y)
+				points[index] = point
+				minX, minY = math.min(minX, point.X), math.min(minY, point.Y)
+				maxX, maxY = math.max(maxX, point.X), math.max(maxY, point.Y)
+			end
+			if behind then
+				hide(ref)
+				continue
+			end
+			for _, object in ref.Objects do
+				object.Visible = true
+			end
+
+			local posX, posY = minX // 1, minY // 1
+			local sizeX, sizeY = math.max((maxX - minX) // 1, 2), math.max((maxY - minY) // 1, 2)
+			if ref.Lines then
+				for index, edge in EDGES do
+					ref.Lines[index].From = points[edge[1]]
+					ref.Lines[index].To = points[edge[2]]
+				end
+			elseif ref.Main then
+				ref.Main.Position = Vector2.new(posX, posY)
+				ref.Main.Size = Vector2.new(sizeX, sizeY)
+				if ref.Border then
+					ref.Border.Position = Vector2.new(posX - 1, posY - 1)
+					ref.Border.Size = Vector2.new(sizeX + 2, sizeY + 2)
+					ref.Border2.Position = Vector2.new(posX + 1, posY + 1)
+					ref.Border2.Size = Vector2.new(sizeX - 2, sizeY - 2)
+				end
+			end
+
+			if ref.HealthLine then
+				-- Five times a second is plenty for a bar; the engine lookup is not free.
+				if now >= ref.HealthAt then
+					ref.HealthAt = now + 0.2
+					local health, maxHealth = bedHealth(bed)
+					if health and (not maxHealth or maxHealth < health) then
+						-- No max to measure against: the most it has been seen at stands in.
+						ref.MaxSeen = math.max(ref.MaxSeen or 0, health)
+						maxHealth = ref.MaxSeen
+					end
+					ref.Fraction = (health and maxHealth and maxHealth > 0) and math.clamp(health / maxHealth, 0, 1) or 1
+					ref.HealthLine.Color = Color3.fromHSV(ref.Fraction / 2.5, 0.89, 0.75)
+				end
+				local barX = posX - 5
+				ref.HealthBorder.From = Vector2.new(barX, posY - 1)
+				ref.HealthBorder.To = Vector2.new(barX, posY + sizeY + 1)
+				ref.HealthLine.From = Vector2.new(barX, posY + sizeY)
+				ref.HealthLine.To = Vector2.new(barX, posY + sizeY - (sizeY * (ref.Fraction or 1)) // 1)
+			end
+
+			if ref.Text then
+				local textPos = Vector2.new(posX + sizeX / 2, posY - ref.Text.TextBounds.Y - 4) // 1
+				ref.Text.Position = textPos
+				ref.Drop.Position = textPos + Vector2.new(1, 1)
+				if ref.TextBKG then
+					ref.TextBKG.Size = ref.Text.TextBounds + Vector2.new(8, 4)
+					ref.TextBKG.Position = textPos - Vector2.new(4 + ref.Text.TextBounds.X / 2, 0)
+				end
 			end
 		end
-	
-		table.clear(parts)
 	end
-	
+
+	local function restart()
+		if BedESP.Enabled then
+			BedESP:Toggle()
+			BedESP:Toggle()
+		end
+	end
+
 	BedESP = vape.Categories.Render:CreateModule({
 		Name = 'BedESP',
 		Function = function(callback)
 			if callback then
+				-- Checked by use, not by type: some executors hand Drawing over as userdata.
+				if not pcall(function() assert(Drawing.new) end) then
+					notif('BedESP', 'Your executor has no Drawing library to draw with.', 5, 'warning')
+					return
+				end
 				BedESP:Clean(collectionService:GetInstanceAddedSignal('bed'):Connect(function(bed)
-					task.delay(0.2, Added, bed)
+					-- A placed bed replicates a moment before its team attribute does.
+					task.delay(0.2, addBed, bed)
 				end))
-				BedESP:Clean(collectionService:GetInstanceRemovedSignal('bed'):Connect(function(bed)
-					if Reference[bed] then
-						Reference[bed]:Destroy()
-						Reference[bed] = nil
+				BedESP:Clean(collectionService:GetInstanceRemovedSignal('bed'):Connect(removeBed))
+				for _, bed in collectionService:GetTagged('bed') do
+					addBed(bed)
+				end
+				BedESP:Clean(runService.RenderStepped:Connect(function()
+					-- One bed that fails to draw this frame hides only itself.
+					local ok = pcall(render)
+					if not ok then
+						for _, ref in Reference do
+							pcall(hide, ref)
+						end
 					end
 				end))
-				for _, bed in collectionService:GetTagged('bed') do
-					Added(bed)
-				end
+				-- A bed that could not be read yet (no team attribute, off the block store) is
+				-- picked up here.
+				BedESP:Clean(task.spawn(function()
+					repeat
+						task.wait(1)
+						for _, bed in collectionService:GetTagged('bed') do
+							if not Reference[bed] then
+								addBed(bed)
+							end
+						end
+					until not BedESP.Enabled
+				end))
 			else
-				Folder:ClearAllChildren()
-				table.clear(Reference)
+				for bed in Reference do
+					removeBed(bed)
+				end
 			end
 		end,
-		Tooltip = 'Shows beds through walls'
+		Tooltip = 'Shows beds through walls, with their team and how much health is left'
 	})
+	Method = BedESP:CreateDropdown({
+		Name = 'Mode',
+		List = {'2D', '3D'},
+		Function = function(val)
+			restart()
+			BoundingBox.Object.Visible = val == '2D'
+			Filled.Object.Visible = val == '2D' and BoundingBox.Enabled
+		end
+	})
+	Color = BedESP:CreateColorSlider({
+		Name = 'Bed Color',
+		Function = function()
+			recolor()
+		end
+	})
+	TeamColor = BedESP:CreateToggle({
+		Name = 'Team Color',
+		Default = true,
+		Function = function()
+			recolor()
+		end,
+		Tooltip = 'Draws each bed in its team colour instead of Bed Color'
+	})
+	BoundingBox = BedESP:CreateToggle({
+		Name = 'Bounding Box',
+		Function = function(callback)
+			restart()
+			if Filled then
+				Filled.Object.Visible = callback and Method.Value == '2D'
+			end
+		end,
+		Default = true,
+		Darker = true
+	})
+	Filled = BedESP:CreateToggle({
+		Name = 'Filled',
+		Function = restart,
+		Darker = true
+	})
+	HealthBar = BedESP:CreateToggle({
+		Name = 'Health Bar',
+		Function = restart,
+		Default = true,
+		Darker = true
+	})
+	Name = BedESP:CreateToggle({
+		Name = 'Name',
+		Function = function(callback)
+			restart()
+			if Background then
+				Background.Object.Visible = callback
+			end
+		end,
+		Default = true,
+		Darker = true,
+		Tooltip = 'Shows whose bed it is, like Blue Bed'
+	})
+	Background = BedESP:CreateToggle({
+		Name = 'Show Background',
+		Function = restart,
+		Darker = true
+	})
+	Teammates = BedESP:CreateToggle({
+		Name = 'Priority Only',
+		Function = restart,
+		Default = true,
+		Tooltip = 'Hides your own team\'s bed'
+	})
+	Distance = BedESP:CreateToggle({
+		Name = 'Distance Check',
+		Function = function(callback)
+			DistanceLimit.Object.Visible = callback
+		end
+	})
+	DistanceLimit = BedESP:CreateTwoSlider({
+		Name = 'Bed Distance',
+		Min = 0,
+		Max = 1024,
+		DefaultMin = 0,
+		DefaultMax = 512,
+		Darker = true,
+		Visible = false
+	})
+	-- Their Functions fire at creation, before the options they show and hide exist.
+	BoundingBox.Object.Visible = Method.Value == '2D'
+	Filled.Object.Visible = Method.Value == '2D' and BoundingBox.Enabled
+	Background.Object.Visible = Name.Enabled
+
+	-- Drawings outlive the module being switched off, so they go on uninject.
+	vape:Clean(function()
+		for bed in Reference do
+			removeBed(bed)
+		end
+	end)
 end)
 	
 run(function()
@@ -5003,43 +6733,74 @@ run(function()
 		star_collector = {'stars', 'crit_star'}
 	}
 
-	local function Added(ent, icon)
-		local part = ent:IsA('BasePart') and ent or ent:IsA('Model') and (ent.PrimaryPart or ent:FindFirstChild('Root') or ent:FindFirstChildWhichIsA('BasePart'))
-		if not part or Reference[ent] then return end
+	--[[ One billboard, built whole or not at all.
 
-		local billboard = Instance.new('BillboardGui')
-		billboard.Name = icon
-		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
-		billboard.Size = UDim2.fromOffset(36, 36)
-		billboard.AlwaysOnTop = true
-		billboard.ClipsDescendants = false
-		billboard.Adornee = part
-		billboard.Parent = Folder
-		local blur = addBlur(billboard)
-		blur.Visible = Background.Enabled
-		local image = Instance.new('ImageLabel')
-		image.Size = UDim2.fromOffset(36, 36)
-		image.Position = UDim2.fromScale(0.5, 0.5)
-		image.AnchorPoint = Vector2.new(0.5, 0.5)
-		image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-		image.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
-		image.BorderSizePixel = 0
-		image.Image = bedwars.getIcon({itemType = icon}, true)
-		image.Parent = billboard
-		local uicorner = Instance.new('UICorner')
-		uicorner.CornerRadius = UDim.new(0, 4)
-		uicorner.Parent = image
-		Reference[ent] = billboard
+	The Folder lives in Pistonware's GUI, which is under CoreGui or gethui on executors with a
+	settable identity; this runs on the module's thread and on CollectionService callbacks,
+	neither of which carries the raised identity, and parenting into that GUI from them throws.
+	So it raises first, the way NameTags and the other GUI-building modules do. Anything that
+	still fails (an icon the item meta no longer has) takes this one billboard with it, not the
+	KitESP loop, and the half-built billboard goes too, so the sweep below can try again. ]]
+	local function Added(ent, icon)
+		if Reference[ent] or not ent.Parent then return end
+		-- A model streamed in before its parts has nothing to hang the icon on yet; the sweep
+		-- picks it up once one arrives. Searched deep: a skinned model keeps its parts nested.
+		local part = ent:IsA('BasePart') and ent or ent:IsA('Model') and (ent.PrimaryPart or ent:FindFirstChild('Root') or ent:FindFirstChildWhichIsA('BasePart', true))
+		if not part then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+
+		local billboard
+		local ok = pcall(function()
+			billboard = Instance.new('BillboardGui')
+			billboard.Name = icon
+			billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+			billboard.Size = UDim2.fromOffset(36, 36)
+			billboard.AlwaysOnTop = true
+			billboard.ClipsDescendants = false
+			billboard.Adornee = part
+			local blur = addBlur(billboard)
+			blur.Visible = Background.Enabled
+			local image = Instance.new('ImageLabel')
+			image.Size = UDim2.fromOffset(36, 36)
+			image.Position = UDim2.fromScale(0.5, 0.5)
+			image.AnchorPoint = Vector2.new(0.5, 0.5)
+			image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+			image.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
+			image.BorderSizePixel = 0
+			-- An icon the item meta cannot resolve still gets its marker, just without the picture.
+			local iconOk, iconImage = pcall(bedwars.getIcon, {itemType = icon}, true)
+			image.Image = iconOk and type(iconImage) == 'string' and iconImage or ''
+			image.Parent = billboard
+			local uicorner = Instance.new('UICorner')
+			uicorner.CornerRadius = UDim.new(0, 4)
+			uicorner.Parent = image
+			-- Parented last, once it is complete.
+			billboard.Parent = Folder
+		end)
+		if ok then
+			Reference[ent] = billboard
+		elseif billboard then
+			pcall(function() billboard:Destroy() end)
+		end
 	end
 
 	KitESP = vape.Categories.Render:CreateModule({
 		Name = 'KitESP',
 		Function = function(callback)
+			-- Both ways: switching off clears the folder, which is in the GUI as well.
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
 			if callback then
 				local current
 				repeat
-					if store.equippedKit ~= current then
-						current = store.equippedKit
+					-- Every kit you are playing: Kit Fusion's second kit has its own things to find.
+					local kits = store.activeKits()
+					local key = table.concat(kits, ',')
+					if key ~= current then
+						current = key
 						for _, v in connections do
 							v:Disconnect()
 						end
@@ -5047,19 +6808,38 @@ run(function()
 						table.clear(Reference)
 						Folder:ClearAllChildren()
 
-						local kit = ESPKits[current]
-						if kit then
-							table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
-								Added(ent, kit[2])
-							end))
-							table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
-								if Reference[ent] then
-									Reference[ent]:Destroy()
-									Reference[ent] = nil
+						if vape.ThreadFix then
+							setthreadidentity(8)
+						end
+						for _, name in kits do
+							local kit = ESPKits[name]
+							if kit then
+								table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
+									Added(ent, kit[2])
+								end))
+								table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
+									if Reference[ent] then
+										Reference[ent]:Destroy()
+										Reference[ent] = nil
+									end
+								end))
+								for _, v in collectionService:GetTagged(kit[1]) do
+									Added(v, kit[2])
 								end
-							end))
-							for _, v in collectionService:GetTagged(kit[1]) do
-								Added(v, kit[2])
+							end
+						end
+					else
+						--[[ Every second, anything tagged that still has no billboard: models whose
+						parts had not streamed in when they were tagged, and anything a failed
+						build left out. Added returns at once for everything already marked. ]]
+						for _, name in kits do
+							local kit = ESPKits[name]
+							if kit then
+								for _, v in collectionService:GetTagged(kit[1]) do
+									if not Reference[v] then
+										Added(v, kit[2])
+									end
+								end
 							end
 						end
 					end
@@ -5084,8 +6864,10 @@ run(function()
 				Color.Object.Visible = callback
 			end
 			for _, v in Reference do
-				v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
-				v.Blur.Visible = callback
+				pcall(function()
+					v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
+					v.Blur.Visible = callback
+				end)
 			end
 		end,
 		Default = true
@@ -5096,8 +6878,10 @@ run(function()
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			for _, v in Reference do
-				v.ImageLabel.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-				v.ImageLabel.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
+				pcall(function()
+					v.ImageLabel.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+					v.ImageLabel.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
+				end)
 			end
 		end,
 		Darker = true
@@ -6373,7 +8157,20 @@ run(function()
 		end
 	end
 	
+	-- Pending: chests still waiting on their contents value, so the sweep does not start a
+	-- second wait on the same one.
+	local Pending = {}
+
+	--[[ Every billboard here lives in Pistonware's GUI -- under CoreGui or gethui wherever the
+	identity can be raised -- and every way into this module (its own thread, the chest tag,
+	chest contents and Amount changes) arrives without that identity, which is what building
+	into the GUI needs. So everything that builds or changes a billboard raises first, the way
+	NameTags does. ]]
 	local function refreshAdornee(v)
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		if not (v.Parent and v.Adornee) then return end
 		local chest = v.Adornee:FindFirstChild('ChestFolderValue')
 		chest = chest and chest.Value or nil
 		if not chest then
@@ -6408,7 +8205,8 @@ run(function()
 				local blockimage = Instance.new('ImageLabel')
 				blockimage.Size = UDim2.fromOffset(32, 32)
 				blockimage.BackgroundTransparency = 1
-				blockimage.Image = bedwars.getIcon({itemType = item.Name}, true)
+				local iconOk, icon = pcall(bedwars.getIcon, {itemType = item.Name}, true)
+				blockimage.Image = iconOk and type(icon) == 'string' and icon or ''
 				blockimage.Parent = v.Frame
 				if ShowAmount.Enabled and amounts[item.Name] > 1 then
 					local amount = Instance.new('TextLabel')
@@ -6440,37 +8238,61 @@ run(function()
 		table.clear(chestitems)
 	end
 	
+	-- Built whole and only then parented; a build that fails takes this one billboard with it
+	-- and the sweep tries the chest again. A chest with no contents value yet (still
+	-- streaming in) waits for the sweep the same way instead of being dropped for good.
 	local function Added(v)
+		if Reference[v] or Pending[v] then return end
+		Pending[v] = true
 		local chest = v:WaitForChild('ChestFolderValue', 3)
-		if not (chest and StorageESP.Enabled) or Reference[v] then return end
-		chest = chest.Value
-		local billboard = Instance.new('BillboardGui')
-		billboard.Parent = Folder
-		billboard.Name = 'chest'
-		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
-		billboard.Size = UDim2.fromOffset(36, 36)
-		billboard.AlwaysOnTop = true
-		billboard.ClipsDescendants = false
-		billboard.Adornee = v
-		local blur = addBlur(billboard)
-		blur.Visible = Background.Enabled
-		local frame = Instance.new('Frame')
-		frame.Size = UDim2.fromScale(1, 1)
-		frame.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-		frame.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
-		frame.Parent = billboard
-		local layout = Instance.new('UIListLayout')
-		layout.FillDirection = Enum.FillDirection.Horizontal
-		layout.Padding = UDim.new(0, 4)
-		layout.VerticalAlignment = Enum.VerticalAlignment.Center
-		layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-		layout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
-			billboard.Size = UDim2.fromOffset(math.max(layout.AbsoluteContentSize.X + 4, 36), 36)
+		Pending[v] = nil
+		chest = chest and chest.Value
+		if not (chest and StorageESP.Enabled and v.Parent) or Reference[v] then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+
+		local billboard
+		local ok = pcall(function()
+			billboard = Instance.new('BillboardGui')
+			billboard.Name = 'chest'
+			billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+			billboard.Size = UDim2.fromOffset(36, 36)
+			billboard.AlwaysOnTop = true
+			billboard.ClipsDescendants = false
+			billboard.Adornee = v
+			local blur = addBlur(billboard)
+			blur.Visible = Background.Enabled
+			local frame = Instance.new('Frame')
+			frame.Size = UDim2.fromScale(1, 1)
+			frame.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+			frame.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
+			frame.Parent = billboard
+			local layout = Instance.new('UIListLayout')
+			layout.FillDirection = Enum.FillDirection.Horizontal
+			layout.Padding = UDim.new(0, 4)
+			layout.VerticalAlignment = Enum.VerticalAlignment.Center
+			layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+			layout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				pcall(function()
+					billboard.Size = UDim2.fromOffset(math.max(layout.AbsoluteContentSize.X + 4, 36), 36)
+				end)
+			end)
+			layout.Parent = frame
+			local corner = Instance.new('UICorner')
+			corner.CornerRadius = UDim.new(0, 4)
+			corner.Parent = frame
+			billboard.Parent = Folder
 		end)
-		layout.Parent = frame
-		local corner = Instance.new('UICorner')
-		corner.CornerRadius = UDim.new(0, 4)
-		corner.Parent = frame
+		if not ok then
+			if billboard then
+				pcall(function() billboard:Destroy() end)
+			end
+			return
+		end
 		Reference[v] = billboard
 		StorageESP:Clean(chest.ChildAdded:Connect(function(item)
 			if table.find(List.ListEnabled, item.Name) or nearStorageItem(item.Name) then
@@ -6488,23 +8310,42 @@ run(function()
 	StorageESP = vape.Categories.Render:CreateModule({
 		Name = 'StorageESP',
 		Function = function(callback)
+			-- Both ways: switching off clears the folder, which is in the GUI as well.
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
 			if callback then
 				StorageESP:Clean(collectionService:GetInstanceAddedSignal('chest'):Connect(Added))
 				-- A broken chest used to leave its icons hanging in the air where it stood.
 				StorageESP:Clean(collectionService:GetInstanceRemovedSignal('chest'):Connect(function(v)
 					local billboard = Reference[v]
 					if billboard then
+						if vape.ThreadFix then
+							setthreadidentity(8)
+						end
 						for _, connection in AmountWatch[billboard] or {} do
 							connection:Disconnect()
 						end
 						AmountWatch[billboard] = nil
-						billboard:Destroy()
+						pcall(function() billboard:Destroy() end)
 						Reference[v] = nil
 					end
 				end))
 				for _, v in collectionService:GetTagged('chest') do
 					task.spawn(Added, v)
 				end
+				-- Every second, any chest still without a billboard: one whose build failed, or
+				-- whose contents had not streamed in within the first wait.
+				StorageESP:Clean(task.spawn(function()
+					repeat
+						task.wait(1)
+						for _, v in collectionService:GetTagged('chest') do
+							if not (Reference[v] or Pending[v]) then
+								task.spawn(Added, v)
+							end
+						end
+					until not StorageESP.Enabled
+				end))
 			else
 				for _, list in AmountWatch do
 					for _, connection in list do
@@ -6513,6 +8354,7 @@ run(function()
 				end
 				table.clear(AmountWatch)
 				table.clear(Reference)
+				table.clear(Pending)
 				Folder:ClearAllChildren()
 			end
 		end,
@@ -6540,9 +8382,14 @@ run(function()
 		Name = 'Background',
 		Function = function(callback)
 			if Color.Object then Color.Object.Visible = callback end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
 			for _, v in Reference do
-				v.Frame.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
-				v.Blur.Visible = callback
+				pcall(function()
+					v.Frame.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
+					v.Blur.Visible = callback
+				end)
 			end
 		end,
 		Default = true
@@ -6552,9 +8399,15 @@ run(function()
 		DefaultValue = 0,
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
 			for _, v in Reference do
-				v.Frame.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-				v.Frame.BackgroundTransparency = 1 - opacity
+				pcall(function()
+					v.Frame.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+					-- With Background off the frame stays clear; dragging the colour used to show it.
+					v.Frame.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
+				end)
 			end
 		end,
 		Darker = true
@@ -6666,8 +8519,27 @@ run(function()
 					setthreadidentity(8)
 				end
 				repeat task.wait(0.1) until store.equippedKit ~= '' and store.matchState ~= 0 or (not AutoKit.Enabled)
-				if AutoKit.Enabled and AutoKitFunctions[store.equippedKit] and Toggles[store.equippedKit].Enabled then
-					AutoKitFunctions[store.equippedKit]()
+				if not AutoKit.Enabled then return end
+				--[[ Every kit you are playing (Kit Fusion has two; see store.activeKits),
+				not only the first. A kit function can be a loop that runs until AutoKit goes
+				off, so all but the last get a thread of their own, raised like this one. ]]
+				local kits = {}
+				for _, kit in store.activeKits() do
+					if AutoKitFunctions[kit] and Toggles[kit] and Toggles[kit].Enabled then
+						table.insert(kits, kit)
+					end
+				end
+				for index, kit in kits do
+					if index < #kits then
+						task.spawn(function()
+							if vape.ThreadFix then
+								setthreadidentity(8)
+							end
+							AutoKitFunctions[kit]()
+						end)
+					else
+						AutoKitFunctions[kit]()
+					end
 				end
 			end
 		end,
@@ -7537,10 +9409,41 @@ end)
 	
 run(function()
 	local BedProtector
+	local Layers
+	-- Set while a build is running, so switching it on again mid-build does not start a second.
+	local building = false
 
 	--[[ Never used as a wall: they are blocks by meta, but a defense made of TNT is a trap for
 	whoever holds the bed, and a cannon is not a wall at all. ]]
 	local SKIP_BLOCKS = {tnt = true, siege_tnt = true, cannon = true}
+
+	--[[ Placed at the game's normal pace, one block per 1 / CpsConstants.BLOCK_PLACE_CPS
+	(12 a second), read here -- at load, before FastPlace can change it -- so FastPlace has no
+	say over this module.
+
+	The pace is not optional. Every placement goes through the game's BlockCpsController, which
+	cancels, without a word, any block that comes less than half an interval after the last
+	one. A layer sent in one burst had all but its first block thrown away that way: the build
+	went up one block per retry, and how much of it got through depended on what FastPlace had
+	the interval set to. Timed off the controller's own lastPlaceTimestamp, every block lands. ]]
+	local PLACE_INTERVAL = 1 / 12
+	pcall(function()
+		local cps = tonumber(require(replicatedStorage.TS['shared-constants']).CpsConstants.BLOCK_PLACE_CPS)
+		if cps and cps > 0 then
+			PLACE_INTERVAL = 1 / cps
+		end
+	end)
+
+	-- Until a normal interval has passed since the last block anything placed.
+	local function awaitPlaceSlot()
+		while true do
+			local controller = bedwars.BlockCpsController
+			local last = controller and tonumber(controller.lastPlaceTimestamp) or 0
+			local remaining = last + PLACE_INTERVAL + 0.01 - workspace:GetServerTimeNow()
+			if remaining <= 0 then return end
+			task.wait(remaining)
+		end
+	end
 
 	local function getBedNear()
 		local localPosition = entitylib.isAlive and entitylib.character.RootPart.Position or Vector3.zero
@@ -7646,51 +9549,108 @@ run(function()
 	BedProtector = vape.Categories.World:CreateModule({
 		Name = 'BedProtector',
 		Function = function(callback)
-			if callback then
-				local bed = getBedNear()
-				if not bed then
-					notif('BedProtector', 'Unable to locate bed', 5)
-					BedProtector:Toggle()
-					return
-				end
+			if not callback or building then return end
+			local bed = getBedNear()
+			if not bed then
+				notif('BedProtector', 'Unable to locate bed', 5)
+				BedProtector:Toggle()
+				return
+			end
 
-				local blocks = getBlocks()
-				if #blocks == 0 then
-					notif('BedProtector', 'No blocks to build with', 5)
-					BedProtector:Toggle()
-					return
-				end
+			local blocks = getBlocks()
+			if #blocks == 0 then
+				notif('BedProtector', 'No blocks to build with', 5)
+				BedProtector:Toggle()
+				return
+			end
 
-				local cells = getBedCells(bed)
+			--[[ Layers is a setting now. It used to be one layer per block TYPE in the
+			inventory: wool alone built one, and wool, stone, wood, glass and obsidian built five
+			-- a mound that spent every block you had and took an age to go up. Strongest blocks
+			still go against the bed. ]]
+			local cells = getBedCells(bed)
+			local plan = {}
+			for layer = 1, Layers.Value do
+				plan[layer] = getLayer(cells, layer)
+			end
 
-				--[[ Several passes, because a placement is not a guarantee: the server refuses a
-				block whose support has not landed yet, or one that arrives inside a burst it
-				throttles, and a single sweep left those cells open for good. A pass that finds
-				nothing left to place ends it. ]]
-				for _ = 1, 3 do
-					local attempted = 0
-					for layer = 1, #blocks do
-						if not BedProtector.Enabled then break end
-						for _, cell in getLayer(cells, layer) do
-							if not BedProtector.Enabled then break end
-							local pos = cell * 3
-							if getPlacedBlock(pos) then continue end
-							local item = pickBlock(blocks, layer)
-							if not item then break end
-							attempted += 1
-							pcall(bedwars.placeBlock, pos, item, false)
+			building = true
+			local inFlight = 0
+			-- Fire-and-forget, counted until the server answers: placeBlock returns only once
+			-- its call to the server has. It used to be called straight, so every block waited
+			-- a full round trip before the next was even sent.
+			local function place(cell, item)
+				awaitPlaceSlot()
+				inFlight += 1
+				task.spawn(function()
+					pcall(bedwars.placeBlock, cell * 3, item, false)
+					inFlight -= 1
+				end)
+			end
+
+			local ranOut = false
+			pcall(function()
+				for _ = 1, 4 do
+					local sent = 0
+					for layer, positions in plan do
+						if not BedProtector.Enabled then return end
+						local sentHere = 0
+						for _, cell in positions do
+							if not getPlacedBlock(cell * 3) then
+								local item = pickBlock(blocks, layer)
+								if not item then
+									ranOut = true
+									break
+								end
+								place(cell, item)
+								sentHere += 1
+							end
 						end
+						sent += sentHere
 					end
-					if attempted == 0 or not BedProtector.Enabled then break end
-					task.wait(0.3)
+					if sent == 0 then return end
+					--[[ Judged on the server's answers, not on the block store the moment a
+					block is sent: the game drops a predicted copy in straight away and takes it
+					back if the server refuses, so a pass judged early saw a finished wall with
+					holes about to open in it. ]]
+					local deadline = os.clock() + 1.5
+					repeat
+						task.wait()
+					until inFlight <= 0 or os.clock() > deadline
+					task.wait()
 				end
+			end)
+			building = false
 
-				if BedProtector.Enabled then
-					BedProtector:Toggle()
+			-- What is still open after every pass, and the likely reason, rather than a
+			-- defense with holes in it and nothing said.
+			local missing = 0
+			for _, positions in plan do
+				for _, cell in positions do
+					if not getPlacedBlock(cell * 3) then
+						missing += 1
+					end
 				end
+			end
+			if missing > 0 then
+				local plural = missing == 1 and ' block' or ' blocks'
+				notif('BedProtector', ranOut
+					and ('Ran out of blocks, '..missing..plural..' short.')
+					or (missing..plural..' could not be placed. Nobody can stand in the defense, you included:\nstep clear of the bed and run it again.'), 6)
+			end
+
+			if BedProtector.Enabled then
+				BedProtector:Toggle()
 			end
 		end,
 		Tooltip = 'Walls your bed in with the strongest blocks you have.'
+	})
+	Layers = BedProtector:CreateSlider({
+		Name = 'Layers',
+		Min = 1,
+		Max = 4,
+		Default = 2,
+		Tooltip = 'How many layers deep to build. The strongest blocks go against the bed.'
 	})
 end)
 	
@@ -8805,6 +10765,16 @@ run(function()
 	local Functions, id = {}
 	local Callbacks = {Custom, Functions, CustomPost}
 	local npctick = tick()
+
+	--[[ Only Bedwars used to mean "the queue name has bedwars in it", which shut AutoBuy off
+	for good in Kit Fusion (combined_kit_to4) and Hyper Kits (overpowered): same game, same
+	shop, other names. QueueMeta says which game a queue runs. ]]
+	local BEDWARS_GAMES = {bedwars = true, ['combined-kit'] = true, overpowered = true}
+	local function isBedwarsQueue(queueType)
+		if queueType:find('bedwars') then return true end
+		local meta = bedwars.QueueMeta and bedwars.QueueMeta[queueType]
+		return type(meta) == 'table' and BEDWARS_GAMES[meta.game] == true
+	end
 	
 	local swords = {
 		'wood_sword',
@@ -8863,11 +10833,21 @@ run(function()
 	
 	local function canBuy(item, currencytable, amount)
 		amount = amount or 1
-		if not currencytable[item.currency] then
-			local currency = getItem(item.currency)
-			currencytable[item.currency] = currency and currency.amount or 0
+		if currencytable[item.currency] == nil then
+			local bank = store.AutoBank
+			if bank and bank.GetAvailable then
+				currencytable[item.currency] = bank:GetAvailable(item.currency)
+			else
+				local currency = getItem(item.currency)
+				currencytable[item.currency] = currency and currency.amount or 0
+			end
 		end
-		if item.ignoredByKit and table.find(item.ignoredByKit, store.equippedKit or '') then return false end
+		-- Any kit you are playing, the second Kit Fusion kit included.
+		if item.ignoredByKit then
+			for _, kit in item.ignoredByKit do
+				if store.hasKit(kit) then return false end
+			end
+		end
 		if item.lockedByForge or item.disabled then return false end
 		if item.require and item.require.teamUpgrade then
 			if (bedwars.Store:getState().Bedwars.teamUpgrades[item.require.teamUpgrade.upgradeId] or -1) < item.require.teamUpgrade.lowestTierIndex then
@@ -8879,18 +10859,17 @@ run(function()
 	
 	local function buyItem(item, currencytable)
 		if not id then return end
-		notif('AutoBuy', 'Bought '..bedwars.ItemMeta[item.itemType].displayName, 3)
 		bedwars.Client:Get('BedwarsPurchaseItem'):CallServerAsync({
 			shopItem = item,
 			shopId = id
 		}):andThen(function(suc)
 			if suc then
+				notif('AutoBuy', 'Bought '..bedwars.ItemMeta[item.itemType].displayName, 3)
 				bedwars.SoundManager:playSound(bedwars.SoundList.BEDWARS_PURCHASE_ITEM)
 				bedwars.Store:dispatch({
 					type = 'BedwarsAddItemPurchased',
 					itemType = item.itemType
 				})
-				bedwars.BedwarsShopController.alreadyPurchasedMap[item.itemType] = true
 			end
 		end)
 		currencytable[item.currency] -= item.price
@@ -8902,15 +10881,23 @@ run(function()
         local currentUpgrades = bedwars.Store:getState().Bedwars.teamUpgrades[lplr:GetAttribute('Team')] or {}
         local currentTier = (currentUpgrades[upgradeType] or 0) + 1
         local bought = false
+        -- Paid in the game's team upgrade resource, not always diamonds.
+        local utilOk, util = pcall(function()
+            return require(replicatedStorage.TS.games.bedwars['team-upgrade']['team-upgrade-util']).TeamUpgradeUtil
+        end)
+        local currency = utilOk and util and util.TEAM_UPGRADE_RESOURCE or 'diamond'
     
         for i = currentTier, #upgrade.tiers do
             local tier = upgrade.tiers[i]
             if tier.availableOnlyInQueue and not table.find(tier.availableOnlyInQueue, store.queueType) then continue end
     
-            if canBuy({currency = 'diamond', price = tier.cost}, currencytable) then
-                notif('AutoBuy', 'Bought '..(upgrade.name == 'Armor' and 'Protection' or upgrade.name)..' '..i, 3)
-                bedwars.Client:Get('RequestPurchaseTeamUpgrade'):CallServerAsync(upgradeType)
-                currencytable.diamond -= tier.cost
+            if canBuy({currency = currency, price = tier.cost}, currencytable) then
+                bedwars.Client:Get('RequestPurchaseTeamUpgrade'):CallServerAsync(upgradeType):andThen(function(suc)
+                    if suc then
+                        notif('AutoBuy', 'Bought '..(upgrade.name == 'Armor' and 'Protection' or upgrade.name)..' '..i, 3)
+                    end
+                end)
+                currencytable[currency] -= tier.cost
                 bought = true
             else
                 break
@@ -8954,9 +10941,16 @@ run(function()
 		Name = 'AutoBuy',
 		Function = function(callback)
 			if callback then
+				if store.AutoWin and store.AutoWin.Enabled then
+					notif(
+						'AutoBuy',
+						'AutoWin is running: AutoBuy only buys team upgrades until it stops.',
+						5
+					)
+				end
 				repeat task.wait(0.1) until store.queueType ~= 'bedwars_test' or (not AutoBuy.Enabled)
 				if not AutoBuy.Enabled then return end
-				if BedwarsCheck.Enabled and not store.queueType:find('bedwars') then return end
+				if BedwarsCheck.Enabled and not isBedwarsQueue(store.queueType) then return end
 	
 				--[[ A pass that bought nothing used to latch AutoBuy off entirely
 				(npctick = tick() + math.huge), leaving InventoryAmountChanged as the
@@ -8993,9 +10987,12 @@ run(function()
 					if npc and npctick <= tick() and store.matchState ~= 2 and store.shopLoaded then
 						local currencytable = {}
 						local waitcheck
+						-- AutoWin buys the items itself; while it runs, AutoBuy only buys
+						-- team upgrades (every item callback returns without a shop).
+						local itemShop = not (store.AutoWin and store.AutoWin.Enabled) and shop or nil
 						for _, tab in Callbacks do
 							for _, callback in tab do
-								if callback(currencytable, shop, upgrades) then
+								if callback(currencytable, itemShop, upgrades) then
 									waitcheck = true
 								end
 							end
@@ -9022,7 +11019,7 @@ run(function()
 			Functions[2] = callback and function(currencytable, shop)
 				if not shop then return end
 	
-				if store.equippedKit == 'dasher' then
+				if store.hasKit('dasher') then
 					swords = {
 						[1] = 'wood_dao',
 						[2] = 'stone_dao',
@@ -9030,11 +11027,11 @@ run(function()
 						[4] = 'diamond_dao',
 						[5] = 'emerald_dao'
 					}
-				elseif store.equippedKit == 'ice_queen' then
+				elseif store.hasKit('ice_queen') then
 					swords[5] = 'ice_sword'
-				elseif store.equippedKit == 'ember' then
+				elseif store.hasKit('ember') then
 					swords[5] = 'infernal_saber'
-				elseif store.equippedKit == 'lumen' then
+				elseif store.hasKit('lumen') then
 					swords[5] = 'light_sword'
 				end
 	
