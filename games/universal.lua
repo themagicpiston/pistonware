@@ -3188,7 +3188,26 @@ run(function()
 	
 		return Vector3.fromNormalId(closest).X ~= 0 and 'X' or 'Z'
 	end
-	
+
+	-- Puts back what Phase changed: the parts it made passable and the FFlag.
+	local function releasePhase()
+		if fflag then
+			setfflag('AssemblyExtentsExpansionStudHundredth', '30')
+		end
+		for part in modified do
+			part.CanCollide = true
+		end
+		table.clear(modified)
+		fflag = nil
+	end
+
+	-- AutoWin walks on the blocks it plans around, and every mode here put the
+	-- body inside them (suffocation). Phase stays on but holds off while it runs.
+	local function heldByAutoWin()
+		local autoWin = vape.Modules.AutoWin
+		return autoWin ~= nil and autoWin.Enabled == true
+	end
+
 	local Functions = {
 		Part = function()
 			local chars = {gameCamera, lplr.Character}
@@ -3258,7 +3277,9 @@ run(function()
 		Function = function(callback)
 			if callback then
 				Phase:Clean(runService.Stepped:Connect(function()
-					if entitylib.isAlive then
+					if heldByAutoWin() then
+						releasePhase()
+					elseif entitylib.isAlive then
 						Functions[Mode.Value]()
 					end
 				end))
@@ -3270,31 +3291,19 @@ run(function()
 					end))
 				end
 			else
-				if fflag then
-					setfflag('AssemblyExtentsExpansionStudHundredth', '30')
-				end
-				for part in modified do
-					part.CanCollide = true
-				end
-				table.clear(modified)
-				fflag = nil
+				releasePhase()
 			end
 		end,
 		Tooltip = 'Lets you Phase/Clip through walls. (Hold shift to use Phase over spider)'
 	})
+	-- Tells AutoWin this Phase holds off by itself, so it is left switched on.
+	Phase.AutoWinAware = true
 	Mode = Phase:CreateDropdown({
 		Name = 'Mode',
 		List = {'Part', 'Character', 'CFrame', 'Motor', 'FFlag'},
 		Function = function(val)
 			StudLimit.Object.Visible = val == 'CFrame' or val == 'Motor'
-			if fflag then
-				setfflag('AssemblyExtentsExpansionStudHundredth', '30')
-			end
-			for part in modified do
-				part.CanCollide = true
-			end
-			table.clear(modified)
-			fflag = nil
+			releasePhase()
 		end,
 		Tooltip = 'Part - Modifies parts collision status around you\nCharacter - Modifies the local collision status of the character\nCFrame - Teleports you past parts\nMotor - Same as CFrame with a bypass\nFFlag - Directly adjusts all physics collisions'
 	})
@@ -3488,7 +3497,14 @@ run(function()
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
 	local Active, Truss
-	
+
+	-- While AutoWin is on it picks the climbs (a safe step ahead) and sets
+	-- Spider.AutoWinClimb for them; anywhere else Spider stays on but holds off.
+	local function heldByAutoWin()
+		local autoWin = vape.Modules.AutoWin
+		return autoWin ~= nil and autoWin.Enabled == true and not Spider.AutoWinClimb
+	end
+
 	Spider = vape.Categories.Blatant:CreateModule({
 		Name = 'Spider',
 		Function = function(callback)
@@ -3496,9 +3512,14 @@ run(function()
 				if Truss then
 					Truss.Parent = gameCamera
 				end
-	
+
 				Spider:Clean(runService.PreSimulation:Connect(function(dt)
-					if entitylib.isAlive then
+					if heldByAutoWin() then
+						Active = nil
+						if Truss then
+							Truss.Position = Vector3.zero
+						end
+					elseif entitylib.isAlive then
 						local root = entitylib.character.RootPart
 						local chars = {gameCamera, lplr.Character, Truss}
 						for _, v in entitylib.List do
@@ -3552,6 +3573,8 @@ run(function()
 		end,
 		Tooltip = 'Lets you climb up walls. (Hold shift to use Phase over spider)'
 	})
+	-- Tells AutoWin this Spider holds off by itself, so it is left switched on.
+	Spider.AutoWinAware = true
 	Mode = Spider:CreateDropdown({
 		Name = 'Mode',
 		List = {'Velocity', 'Impulse', 'CFrame', 'Part'},

@@ -151,15 +151,19 @@ local function priorityTarget(options, priority)
 	options.Cache = true
 	options.Output = options.Output or priorityTargetOutput
 	local targets = entitylib.AllPosition(options)
-	local originalOrder = {}
-	for index, entity in targets do originalOrder[entity] = index end
-	table.sort(targets, function(left, right)
-		local leftRank = priorityRank(left, priority.Value)
-		local rightRank = priorityRank(right, priority.Value)
-		if leftRank ~= rightRank then return leftRank < rightRank end
-		return (originalOrder[left] or 0) < (originalOrder[right] or 0)
-	end)
-	return targets[1]
+	--[[ The first target of the best rank, in the order AllPosition returned them. That is
+	exactly what the stable sort this replaces put at the front, without the sort, the order
+	table and the comparator it allocated on every call -- AimAssist makes one per frame. ]]
+	local mode = priority.Value
+	local best, bestRank
+	for _, entity in targets do
+		local rank = priorityRank(entity, mode)
+		if best == nil or rank < bestRank then
+			best, bestRank = entity, rank
+			if rank == 0 then break end
+		end
+	end
+	return best
 end
 
 local store = {
@@ -483,23 +487,84 @@ local function getBlocksInPoints(s, e)
 	return list
 end
 
+--[[ The nearest block with air above it, within `range` cells and under 60 studs.
+
+This used to list every block in the whole cube first and only then look for the nearest,
+which is a block store lookup for every cell: 41^3 of them at the range of 20 AutoPearl asks
+with, twice per throw, in the one moment a hitch hurts most -- while you are falling.
+
+It now walks outward from your own cell and never looks at a cell, row or slab that is
+already further away than the best found so far, so the nearer the ground, the sooner the
+search stops; with nothing in range at all it still never looks past 60 studs, which at
+AutoPearl's range is half the cube. The answer is the one the full sweep gave: the nearest,
+and on an exact tie the cell that comes first in x, then y, then z order, which is the cell
+the sweep reached first. ]]
 local function getNearGround(range)
 	range = Vector3.new(3, 3, 3) * (range or 10)
 	local localPos = entitylib.character.RootPart.Position
 	local closest, bestMag = nil, 60
+	local bestX, bestY, bestZ
 	local s, e = bedwars.BlockController:getBlockPosition(localPos - range), bedwars.BlockController:getBlockPosition(localPos + range)
-	local blocks = getBlocksInPoints(s, e)
+	local center = bedwars.BlockController:getBlockPosition(localPos)
+	local blocks = bedwars.BlockController:getStore()
+	local up = Vector3.new(0, 3, 0)
+	local lx, ly = localPos.X, localPos.Y
 
-	for _, v in blocks do
-		if not getPlacedBlock(v + Vector3.new(0, 3, 0)) then
-			local mag = (localPos - v).Magnitude
-			if mag < bestMag then
-				bestMag, closest = mag, v + Vector3.new(0, 3, 0)
+	-- Squared distance nothing can beat any more, with a little slack for float noise.
+	local function limit()
+		local bound = bestMag + 0.001
+		return bound * bound
+	end
+	-- The least distance, along one axis, of a cell `step` cells from yours: your cell's
+	-- centre is at most 1.5 studs from you.
+	local function gap(step)
+		return math.max(step * 3 - 1.51, 0)
+	end
+
+	for xStep = 0, math.max(center.X - s.X, e.X - center.X) do
+		local gx = gap(xStep)
+		if gx * gx > limit() then break end
+		for xSide = 1, xStep == 0 and 1 or 2 do
+			local x = xSide == 1 and center.X + xStep or center.X - xStep
+			if x < s.X or x > e.X then continue end
+			local dx = x * 3 - lx
+			for yStep = 0, math.max(center.Y - s.Y, e.Y - center.Y) do
+				local gy = gap(yStep)
+				if dx * dx + gy * gy > limit() then break end
+				for ySide = 1, yStep == 0 and 1 or 2 do
+					local y = ySide == 1 and center.Y + yStep or center.Y - yStep
+					if y < s.Y or y > e.Y then continue end
+					local dy = y * 3 - ly
+					local dxy = dx * dx + dy * dy
+					for zStep = 0, math.max(center.Z - s.Z, e.Z - center.Z) do
+						local gz = gap(zStep)
+						if dxy + gz * gz > limit() then break end
+						for zSide = 1, zStep == 0 and 1 or 2 do
+							local z = zSide == 1 and center.Z + zStep or center.Z - zStep
+							if z < s.Z or z > e.Z then continue end
+							local v = Vector3.new(x, y, z) * 3
+							local mag = (localPos - v).Magnitude
+							local better = mag < bestMag
+							if not better and mag == bestMag and closest then
+								if x ~= bestX then
+									better = x < bestX
+								elseif y ~= bestY then
+									better = y < bestY
+								else
+									better = z < bestZ
+								end
+							end
+							if better and blocks:getBlockAt(Vector3.new(x, y, z)) and not getPlacedBlock(v + up) then
+								bestMag, closest = mag, v + up
+								bestX, bestY, bestZ = x, y, z
+							end
+						end
+					end
+				end
 			end
 		end
 	end
 
-	table.clear(blocks)
 	return closest
 end
 
@@ -1219,10 +1284,11 @@ local function ensureCharPrimaryPart(char)
 end
 
 ensureCharPrimaryPart(lplr.Character)
-lplr.CharacterAdded:Connect(function(c)
+-- Registered for cleanup: every reinject used to leave its copy of this listener behind.
+vape:Clean(lplr.CharacterAdded:Connect(function(c)
     c:WaitForChild("HumanoidRootPart", 5)
     ensureCharPrimaryPart(c)
-end)
+end))
 
 --[[ == shared __namecall guard ==
 There is exactly ONE global __namecall hook in the whole product and it lives
@@ -3148,9 +3214,14 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			end
 
 			if newinv.inventory.hand ~= oldinv.inventory.hand then
-				local currentHand, toolType = new.Inventory.observedInventory.inventory.hand, ''
+				--[[ newinv, not new.Inventory.observedInventory: that is nil in exactly the case
+				newinv falls back for, and an item with no meta entry reads as no tool type
+				rather than an error. Either one thrown here aborted the store's change
+				dispatch, so the game's own listeners still waiting their turn missed that
+				update. ]]
+				local currentHand, toolType = newinv.inventory.hand, ''
 				if currentHand then
-					local handData = bedwars.ItemMeta[currentHand.itemType]
+					local handData = bedwars.ItemMeta[currentHand.itemType] or {}
 					toolType = handData.sword and 'sword' or handData.block and 'block' or currentHand.itemType:find('bow') and 'bow'
 				end
 
@@ -3229,9 +3300,25 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		telepearl = true,
 		pearl = true
 	}
+	--[[ Remembered per name. The launch handler below asks this of every child of workspace
+	for every tracked launch in the server, and lowering each name again every time was a
+	fresh string per child per shot. Names repeat, so the table stays small; the cap is only
+	a backstop. ]]
+	local trackedNames, trackedNameCount = {}, 0
 	local function isTrackedProjectile(name)
-		name = tostring(name):lower()
-		return validProjectiles[name] or name:find('telepearl', 1, true) ~= nil
+		local cached = trackedNames[name]
+		if cached ~= nil then return cached end
+		local lower = tostring(name):lower()
+		local result = validProjectiles[lower] or lower:find('telepearl', 1, true) ~= nil
+		if type(name) == 'string' then
+			if trackedNameCount >= 1024 then
+				table.clear(trackedNames)
+				trackedNameCount = 0
+			end
+			trackedNames[name] = result
+			trackedNameCount += 1
+		end
+		return result
 	end
 
 	--[[ optimized ZapNetworking hook ]]
@@ -3318,7 +3405,34 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		bedwars.lua passes the module that owns it; these are file-level, so they belong to vape
 		itself, which is what its Clean list is for.
 	]]
-	store.blocks = collection('block', vape)
+	--[[ Every block in the map, which is tens of thousands of entries once one has loaded. The
+	default removal is a table.find plus a shifting table.remove -- a walk of the whole list for
+	each block that breaks, so one explosion taking out fifty blocks paid for fifty of them in a
+	single frame. Each block's slot is kept alongside instead and a removal swaps the last entry
+	into it. Everything that reads store.blocks only iterates it; none of it relies on the order.
+	The same index also keeps a block from being listed twice. ]]
+	local blockSlots = {}
+	store.blocks = collection('block', vape, function(tab, obj)
+		if blockSlots[obj] then return end
+		local slot = #tab + 1
+		tab[slot] = obj
+		blockSlots[obj] = slot
+	end, function(tab, obj)
+		local slot = blockSlots[obj]
+		if not slot then return end
+		blockSlots[obj] = nil
+		if tab[slot] ~= obj then return end
+		local last = #tab
+		local moved = tab[last]
+		tab[last] = nil
+		if slot ~= last and moved ~= nil then
+			tab[slot] = moved
+			blockSlots[moved] = slot
+		end
+	end)
+	vape:Clean(function()
+		table.clear(blockSlots)
+	end)
 	store.shop = collection({'BedwarsItemShop', 'TeamUpgradeShopkeeper'}, vape, function(tab, obj)
 		table.insert(tab, {
 			Id = obj.Name,
@@ -4225,7 +4339,12 @@ run(function()
 					local doAttack
 					if not bedwars.AppController:isLayerOpen(bedwars.UILayers.MAIN) and not (SelfAFK.Enabled and isLocalAfk()) then
 						if entitylib.isAlive and store.hand.toolType == 'sword' and bedwars.DaoController.chargingMaid == nil then
-							local attackRange = bedwars.ItemMeta[store.hand.tool.Name].sword.attackRange
+							-- Guarded: no tool instance in hand, or a tool name the item meta has
+							-- no sword entry for, threw here, and the throw ended the loop with the
+							-- module still showing as on. The defaults below cover it instead.
+							local handTool = store.hand.tool
+							local handMeta = handTool and bedwars.ItemMeta[handTool.Name]
+							local attackRange = handMeta and handMeta.sword and handMeta.sword.attackRange
 							rayParams.FilterDescendantsInstances = {lplr.Character}
 	
 							local unit = lplr:GetMouse().UnitRay
@@ -4488,7 +4607,7 @@ run(function()
 									local lastTeleport = lplr:GetAttribute('LastTeleported')
 									local connection
 									connection = runService.PreSimulation:Connect(function()
-										if vape.Modules.Fly.Enabled or (vape.Modules.TestFly and vape.Modules.TestFly.Enabled) or vape.Modules.LongJump.Enabled then
+										if vape.Modules.Fly.Enabled or (vape.Modules.TestFly and vape.Modules.TestFly.Enabled) or (vape.Modules.LongJump and vape.Modules.LongJump.Enabled) then
 											connection:Disconnect()
 											AntiFallDirection = nil
 											clearAutoWinAntiFallPriority()
@@ -4505,12 +4624,13 @@ run(function()
 
 											local ray = workspace:Raycast(root.Position, AntiFallDirection, rayCheck)
 											if ray then
-												for _ = 1, 10 do
-													local dpos = roundPos(ray.Position + ray.Normal * 1.5) + Vector3.new(0, 3, 0)
-													if not getPlacedBlock(dpos) then
-														top = Vector3.new(top.X, ground, top.Z)
-														break
-													end
+												--[[ Asked once. This sat in a ten-pass loop whose
+												passes all asked the identical question, so a wall
+												with a block on top of it cost ten store lookups every
+												physics step for the same answer. ]]
+												local dpos = roundPos(ray.Position + ray.Normal * 1.5) + Vector3.new(0, 3, 0)
+												if not getPlacedBlock(dpos) then
+													top = Vector3.new(top.X, ground, top.Z)
 												end
 											end
 
@@ -4864,7 +4984,7 @@ run(function()
 		end))
 	end
 
-	AutoZephyr = vape.Categories.Utility:CreateModule({
+	AutoZephyr = vape.Categories.Minigames:CreateModule({
 		Name = 'AutoZephyr',
 		Function = function(callback)
 			if not callback then
@@ -6165,7 +6285,7 @@ run(function()
 			if callback then
 				Speed:Clean(runService.PreSimulation:Connect(function(dt)
 					bedwars.StatefulEntityKnockbackController.lastImpulseTime = callback and math.huge or time()
-						if entitylib.isAlive and not Fly.Enabled and not TestFly.Enabled and not vape.Modules.LongJump.Enabled and ownsCharacter(entitylib.character.RootPart) then
+						if entitylib.isAlive and not Fly.Enabled and not TestFly.Enabled and not (vape.Modules.LongJump and vape.Modules.LongJump.Enabled) and ownsCharacter(entitylib.character.RootPart) then
 						local char = entitylib.character
 						local hum = char.Humanoid
 						local state = hum:GetState()
@@ -6372,7 +6492,7 @@ run(function()
 		end
 
 		local teamName, teamColor = teamInfo(bed, teamId)
-		local ref = {Objects = {}, TeamColor = teamColor, Label = teamName..' Bed', HealthAt = 0}
+		local ref = {Objects = {}, TeamColor = teamColor, Label = teamName..' Bed', HealthAt = 0, TeamId = teamId, TeamAt = 0}
 		local color = colorOf(ref)
 		local ok = pcall(function()
 			local objects = ref.Objects
@@ -6442,13 +6562,50 @@ run(function()
 		end
 	end
 
+	-- The bed's team, looked up again twice a second until it is known. A bed added before
+	-- its team attribute had replicated kept the plain 'Bed' label, and Priority Only, which
+	-- only looked when the bed was added, drew our own bed for the whole match; the label
+	-- and colour follow the team once it is in.
+	local function teamOf(bed, ref)
+		if ref.TeamId == nil and os.clock() >= ref.TeamAt then
+			ref.TeamAt = os.clock() + 0.5
+			local teamId = bedTeam(bed)
+			if teamId then
+				ref.TeamId = teamId
+				local teamName, teamColor = teamInfo(bed, teamId)
+				ref.Label, ref.TeamColor = teamName..' Bed', teamColor
+				local color = colorOf(ref)
+				pcall(function()
+					if ref.Text then
+						ref.Text.Text = ref.Label
+						ref.Text.Color = color
+					end
+					if ref.Drop then ref.Drop.Text = ref.Label end
+					if ref.Main then ref.Main.Color = color end
+					for _, line in (ref.Lines or {}) do
+						line.Color = color
+					end
+				end)
+			end
+		end
+		return ref.TeamId
+	end
+
 	local function render()
 		local camera = workspace.CurrentCamera
 		local rootPos = entitylib.isAlive and entitylib.character.RootPart.Position
 		local now = os.clock()
+		-- Priority Only as it draws, against our team as it is now: before the teams are
+		-- given out (a profile loaded in the lobby cage) nothing matched when beds were added.
+		local ownTeam = Teammates.Enabled and lplr:GetAttribute('Team')
 		for bed, ref in Reference do
 			if not bed.Parent then
 				removeBed(bed)
+				continue
+			end
+			local teamId = teamOf(bed, ref)
+			if ownTeam ~= nil and ownTeam ~= false and teamId ~= nil and tostring(teamId) == tostring(ownTeam) then
+				hide(ref)
 				continue
 			end
 			local cframe, size = bedBox(bed)
@@ -7670,67 +7827,70 @@ run(function()
 
 	A pcall per tag per frame is a handful of nanoseconds against sixteen tags. Losing one
 	tag for a frame is a flicker; losing the rest of the list is the bug being reported. ]]
+	local function paintTag(ent, nametag, selfPos)
+		--[[ THIS is why tags froze on screen.
+
+		The whole loop used to sit under one pcall. An entity whose RootPart had gone --
+		died, streamed out, character swapped -- threw on `ent.RootPart.Position`, and
+		that one throw abandoned the rest of the frame. Every tag after it in the
+		iteration kept the Position and the Visible it was last given, so they hung
+		wherever they had been drawn while the players they belonged to walked away. It
+		repeated every frame for as long as the dead entity stayed in Reference, which is
+		until its label is destroyed -- so it never cleared on its own.
+
+		A missing RootPart is now just a hidden tag. The entry is deliberately LEFT in
+		Reference: Removed is what destroys the label, and it finds it through this
+		very table, so clearing it here would orphan the TextLabel under Folder for
+		the rest of the round. entitylib will report the entity properly soon enough
+		and the real cleanup happens there. ]]
+		local root = ent.RootPart
+		if not (root and root.Parent) then
+			nametag.Visible = false
+			return
+		end
+
+		--[[ And never draw against a character its player has moved on from. The
+		sweep prunes these once a second, which is up to a second of a tag sitting
+		over an empty spot -- two property reads a frame is cheaper than explaining
+		that to anyone. ]]
+		if supersededEntity(ent) then
+			nametag.Visible = false
+			return
+		end
+
+		local rootPos = root.Position
+
+		if DistanceCheck.Enabled then
+			local distance = selfPos and (selfPos - rootPos).Magnitude or math.huge
+			if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
+				nametag.Visible = false
+				return
+			end
+		end
+
+		local headPos, headVis = gameCamera:WorldToViewportPoint(rootPos + Vector3.new(0, ent.HipHeight + 1, 0))
+		nametag.Visible = headVis
+		if not headVis then
+			return
+		end
+
+		if Distance.Enabled then
+			local mag = selfPos and math.floor((selfPos - rootPos).Magnitude) or 0
+			if Sizes[ent] ~= mag then
+				nametag.Text = string.format(Strings[ent], mag)
+				local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
+				positionIcons(nametag, size.X, size.Y + 7)
+				Sizes[ent] = mag
+			end
+		end
+		nametag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
+	end
+
+	-- The per-tag pcall takes its arguments rather than wrapping a fresh closure: this runs
+	-- for every tag on every rendered frame.
 	local function drawTag(ent, nametag, selfPos)
-		pcall(function()
-					
-			--[[ THIS is why tags froze on screen.
-
-			The whole loop used to sit under one pcall. An entity whose RootPart had gone --
-			died, streamed out, character swapped -- threw on `ent.RootPart.Position`, and
-			that one throw abandoned the rest of the frame. Every tag after it in the
-			iteration kept the Position and the Visible it was last given, so they hung
-			wherever they had been drawn while the players they belonged to walked away. It
-			repeated every frame for as long as the dead entity stayed in Reference, which is
-			until its label is destroyed -- so it never cleared on its own.
-
-			A missing RootPart is now just a hidden tag. The entry is deliberately LEFT in
-			Reference: Removed is what destroys the label, and it finds it through this
-			very table, so clearing it here would orphan the TextLabel under Folder for
-			the rest of the round. entitylib will report the entity properly soon enough
-			and the real cleanup happens there. ]]
-			local root = ent.RootPart
-			if not (root and root.Parent) then
-				nametag.Visible = false
-				return
-			end
-
-			--[[ And never draw against a character its player has moved on from. The
-			sweep prunes these once a second, which is up to a second of a tag sitting
-			over an empty spot -- two property reads a frame is cheaper than explaining
-			that to anyone. ]]
-			if supersededEntity(ent) then
-				nametag.Visible = false
-				return
-			end
-
-			local rootPos = root.Position
-
-			if DistanceCheck.Enabled then
-				local distance = selfPos and (selfPos - rootPos).Magnitude or math.huge
-				if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-					nametag.Visible = false
-					return
-				end
-			end
-
-			local headPos, headVis = gameCamera:WorldToViewportPoint(rootPos + Vector3.new(0, ent.HipHeight + 1, 0))
-			nametag.Visible = headVis
-			if not headVis then
-				return
-			end
-
-			if Distance.Enabled then
-				local mag = selfPos and math.floor((selfPos - rootPos).Magnitude) or 0
-				if Sizes[ent] ~= mag then
-					nametag.Text = string.format(Strings[ent], mag)
-					local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-					nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
-					positionIcons(nametag, size.X, size.Y + 7)
-					Sizes[ent] = mag
-				end
-			end
-			nametag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
-		end)
+		pcall(paintTag, ent, nametag, selfPos)
 	end
 
 	local Loop = {
@@ -10913,6 +11073,9 @@ run(function()
 	
 		for i = tool, #tools do
 			local v = bedwars.Shop.getShopItem(tools[i], lplr)
+			--[[ A tier this queue's shop does not sell comes back nil, and canBuy indexing it
+			threw out of the whole AutoBuy loop -- nothing more was bought that match. ]]
+			if not v then continue end
 			if canBuy(v, currencytable) then
 				if SmartCheck.Enabled and bedwars.ItemMeta[tools[i]].breakBlock and i > 2 then
 					if Armor.Enabled then
@@ -11125,7 +11288,10 @@ run(function()
 			for _, entry in list do
 				local tab = entry:split('/')
 				local ind = tonumber(tab[1])
-				if ind then
+				--[[ An entry without a usable amount is skipped rather than registered: its
+				arithmetic below threw the first time the item showed up in the shop, and that
+				ended the whole AutoBuy loop for the match. ]]
+				if ind and tonumber(tab[3]) then
 					(tab[4] and CustomPost or Custom)[ind] = function(currencytable, shop)
 						if not shop then return end
 	
@@ -11730,9 +11896,7 @@ run(function()
 		vapeEvents.InventoryChanged.Event:Wait()
 	end
 	
-	local function sortCallback()
-		if Active then return end
-		Active = true
+	local function sortHotbar()
 		local items = (List.Hotbars[List.Selected] and List.Hotbars[List.Selected].Hotbar or {})
 	
 		for _, v in store.inventory.inventory.items do
@@ -11777,7 +11941,16 @@ run(function()
 				end
 			end
 		end
-	
+	end
+
+	--[[ Active is cleared whatever the sort does. It used to be reset on the sort's last line,
+	so anything that threw part way -- an item with no meta, a hotbar slot that is not there --
+	left it set, and every later sort returned on the first line: AutoHotbar stayed on and
+	never sorted again until a reinject. ]]
+	local function sortCallback()
+		if Active then return end
+		Active = true
+		pcall(sortHotbar)
 		Active = false
 	end
 	
@@ -12739,6 +12912,13 @@ run(function()
 			if callback then
 				old = bedwars.SoundManager.playSound
 				bedwars.SoundManager.playSound = function(self, id, ...)
+					--[[ A sound nobody listed goes straight through, arguments untouched. Every
+					sound the game plays passes here, and every one used to be copied into a
+					table and unpacked back out -- dropping any argument after a nil on the
+					way -- only to reach the few that are listed. ]]
+					if not trackedSounds[id] then
+						return old(self, id, ...)
+					end
 					local args = {...}
 					local isTracked = trackedSounds[id]
 					
@@ -13155,7 +13335,10 @@ run(function()
 		Name = 'Effects',
 		List = WinEffectName
 	})
+end)
 
+--[[ DeviceSpoofer and HideNametag used to sit inside WinEffect's block, which was never closed
+until after them, so a WinEffect that failed to build took both of them down with it. ]]
 run(function()
 	local DeviceSpoofer
 	local Device
@@ -13273,7 +13456,6 @@ run(function()
 		end,
 		Tooltip = 'Hides the nametag over your own head'
 	})
-end)
 end)
 
 --[[ == bedwars module loader ==
