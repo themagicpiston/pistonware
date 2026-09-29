@@ -4119,7 +4119,8 @@ run(function()
 	PlaceRange = Reach:CreateSlider({
 		Name = 'Place Range',
 		Min = 18,
-		Max = 50,
+		-- The server refuses a placement past 60 studs.
+		Max = 60,
 		Default = 18,
 		Visible = false,
 		Darker = true,
@@ -6875,6 +6876,8 @@ run(function()
 	local Background
 	local Color = {}
 	local Reference = {}
+	local Pending = {}
+	local Removing = {}
 	local connections = {}
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
@@ -6890,23 +6893,29 @@ run(function()
 		star_collector = {'stars', 'crit_star'}
 	}
 
-	--[[ One billboard, built whole or not at all.
+	--[[ Every GUI write happens on this module's own thread, never on the tag signals.
 
-	The Folder lives in Pistonware's GUI, which is under CoreGui or gethui on executors with a
-	settable identity; this runs on the module's thread and on CollectionService callbacks,
-	neither of which carries the raised identity, and parenting into that GUI from them throws.
-	So it raises first, the way NameTags and the other GUI-building modules do. Anything that
-	still fails (an icon the item meta no longer has) takes this one billboard with it, not the
-	KitESP loop, and the half-built billboard goes too, so the sweep below can try again. ]]
+	The tags are added by the game, on the game's thread (identity 2): an eldertree orb is
+	tagged inside EldertreeController's spawn handler. vape.gui sits in CoreGui or gethui on
+	executors with a settable identity, and a billboard parented there from the game's thread
+	fails. So the signals only note what came and went, and the loop below builds and removes.
+
+	The raise is guarded. vape.ThreadFix only says setthreadidentity exists; on an executor whose
+	ceiling is below 8 an unguarded setthreadidentity(8) throws, and it used to be the first line
+	of the loop, so KitESP stopped before drawing anything. ]]
+	local function raiseIdentity()
+		if not vape.ThreadFix then return end
+		if not pcall(setthreadidentity, 8) then
+			pcall(setthreadidentity, 7)
+		end
+	end
+
 	local function Added(ent, icon)
 		if Reference[ent] or not ent.Parent then return end
 		-- A model streamed in before its parts has nothing to hang the icon on yet; the sweep
 		-- picks it up once one arrives. Searched deep: a skinned model keeps its parts nested.
 		local part = ent:IsA('BasePart') and ent or ent:IsA('Model') and (ent.PrimaryPart or ent:FindFirstChild('Root') or ent:FindFirstChildWhichIsA('BasePart', true))
 		if not part then return end
-		if vape.ThreadFix then
-			setthreadidentity(8)
-		end
 
 		local billboard
 		local ok = pcall(function()
@@ -6917,7 +6926,10 @@ run(function()
 			billboard.AlwaysOnTop = true
 			billboard.ClipsDescendants = false
 			billboard.Adornee = part
+			billboard.Parent = Folder
 			local blur = addBlur(billboard)
+			blur.Size = UDim2.new(1, 89, 1, 52)
+			blur.Position = UDim2.fromOffset(-48, -31)
 			blur.Visible = Background.Enabled
 			local image = Instance.new('ImageLabel')
 			image.Size = UDim2.fromOffset(36, 36)
@@ -6933,82 +6945,91 @@ run(function()
 			local uicorner = Instance.new('UICorner')
 			uicorner.CornerRadius = UDim.new(0, 4)
 			uicorner.Parent = image
-			-- Parented last, once it is complete.
-			billboard.Parent = Folder
 		end)
 		if ok then
 			Reference[ent] = billboard
 		elseif billboard then
+			-- Half built: gone, so the next sweep can try again.
 			pcall(function() billboard:Destroy() end)
 		end
+	end
+
+	local function Removed(ent)
+		local billboard = Reference[ent]
+		Reference[ent] = nil
+		if billboard then
+			pcall(function() billboard:Destroy() end)
+		end
+	end
+
+	local function clearAll()
+		for _, v in connections do
+			v:Disconnect()
+		end
+		table.clear(connections)
+		table.clear(Reference)
+		table.clear(Pending)
+		table.clear(Removing)
+		pcall(function() Folder:ClearAllChildren() end)
 	end
 
 	KitESP = vape.Categories.Render:CreateModule({
 		Name = 'KitESP',
 		Function = function(callback)
-			-- Both ways: switching off clears the folder, which is in the GUI as well.
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			raiseIdentity()
 			if callback then
 				local current
+				local nextSweep = 0
 				repeat
-					-- Every kit you are playing: Kit Fusion's second kit has its own things to find.
-					local kits = store.activeKits()
-					local key = table.concat(kits, ',')
-					if key ~= current then
-						current = key
-						for _, v in connections do
-							v:Disconnect()
-						end
-						table.clear(connections)
-						table.clear(Reference)
-						Folder:ClearAllChildren()
-
-						if vape.ThreadFix then
-							setthreadidentity(8)
-						end
-						for _, name in kits do
-							local kit = ESPKits[name]
-							if kit then
-								table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
-									Added(ent, kit[2])
-								end))
-								table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
-									if Reference[ent] then
-										Reference[ent]:Destroy()
-										Reference[ent] = nil
-									end
-								end))
-								for _, v in collectionService:GetTagged(kit[1]) do
-									Added(v, kit[2])
+					local now = os.clock()
+					if now >= nextSweep then
+						nextSweep = now + 1
+						-- Every kit you are playing: Kit Fusion's second kit has its own things to find.
+						local kits = store.activeKits()
+						local key = table.concat(kits, ',')
+						if key ~= current then
+							current = key
+							clearAll()
+							for _, name in kits do
+								local kit = ESPKits[name]
+								if kit then
+									table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
+										Removing[ent] = nil
+										Pending[ent] = kit[2]
+									end))
+									table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
+										Pending[ent] = nil
+										Removing[ent] = true
+									end))
 								end
 							end
 						end
-					else
-						--[[ Every second, anything tagged that still has no billboard: models whose
-						parts had not streamed in when they were tagged, and anything a failed
-						build left out. Added returns at once for everything already marked. ]]
+						--[[ Once a second, everything tagged that still has no billboard: the whole
+						set on a kit change, models whose parts had not streamed in when they were
+						tagged, and anything a failed build left out. ]]
 						for _, name in kits do
 							local kit = ESPKits[name]
 							if kit then
 								for _, v in collectionService:GetTagged(kit[1]) do
 									if not Reference[v] then
-										Added(v, kit[2])
+										Pending[v] = kit[2]
 									end
 								end
 							end
 						end
 					end
-					task.wait(1)
+					for ent in Removing do
+						Removing[ent] = nil
+						Removed(ent)
+					end
+					for ent, icon in Pending do
+						Pending[ent] = nil
+						Added(ent, icon)
+					end
+					task.wait(0.1)
 				until not KitESP.Enabled
 			else
-				for _, v in connections do
-					v:Disconnect()
-				end
-				table.clear(connections)
-				table.clear(Reference)
-				Folder:ClearAllChildren()
+				clearAll()
 			end
 		end,
 		Tooltip = 'Marks the things your kit collects, like bees, orbs and hidden metal'
@@ -9850,8 +9871,17 @@ run(function()
 		balloon = 800,
 		arrow = 500,
 		iron_arrow = 600,
-		firework_arrow = 550
+		firework_arrow = 550,
+		explosive_trap = 880,
+		snap_trap = 870,
+		venom_trap = 860
 	}
+
+	--[[ Trap items -- snap, venom and explosive, which SkyWars chests hand out -- are blocks
+	whose meta sets disableInventoryPickup. That flag is about breaking a trap once it is PLACED
+	(it does not come back as an item), not about taking one out of a chest, so it does not
+	stop these. ]]
+	local TAKE_DESPITE_NO_PICKUP = {snap_trap = true, venom_trap = true, explosive_trap = true}
 
 	local function getChestAmount(item)
 		local amount = tonumber(item:GetAttribute('Amount'))
@@ -9981,7 +10011,7 @@ run(function()
 		if amount <= 0 then return end
 
 		local meta = bedwars.ItemMeta[itemType]
-		if not meta or (meta.block and meta.block.disableInventoryPickup) then return end
+		if not meta or (meta.block and meta.block.disableInventoryPickup and not TAKE_DESPITE_NO_PICKUP[itemType]) then return end
 
 		local currentAmount = profile.amounts[itemType] or 0
 		local maxStackSize = meta.maxStackSize and tonumber(meta.maxStackSize.amount)
@@ -12845,6 +12875,18 @@ run(function()
 		Name = 'Songs',
 		Placeholder = 'filepath/bpm/start'
 	})
+	Volume = SongBeats:CreateSlider({
+		Name = 'Volume',
+		Function = function(val)
+			if songobj then 
+				songobj.Volume = val / 100 
+			end
+		end,
+		Min = 1,
+		Max = 100,
+		Default = 100,
+		Suffix = function(val) return '%' end
+	})
 	FOV = SongBeats:CreateToggle({
 		Name = 'Beat FOV',
 		Function = function(callback)
@@ -12864,18 +12906,6 @@ run(function()
 		Max = 30,
 		Default = 5,
 		Darker = true
-	})
-	Volume = SongBeats:CreateSlider({
-		Name = 'Volume',
-		Function = function(val)
-			if songobj then 
-				songobj.Volume = val / 100 
-			end
-		end,
-		Min = 1,
-		Max = 100,
-		Default = 100,
-		Suffix = function(val) return '%' end
 	})
 end)
 
