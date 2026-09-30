@@ -2295,17 +2295,48 @@ end
 --[[ The `out` barrel re-exports sound-manager, but each of its re-exports is guarded by
 `or {}`, so a build where that submodule fails to resolve silently drops the key and
 leaves SoundManager nil -- which is how "attempt to index nil with 'playSound'" reached
-both SoundChanger and the projectile launch sound. Handing back a stub instead of nil is
-what fixes that: a dozen call sites across both files index this directly and none of
-them are worth taking down over a missing sound effect. Every method on the stub is a
-no-op, and SoundChanger's hook and restore still work against it. ]]
+both SoundChanger and the projectile launch sound. Handing back a stand-in instead of nil
+is what fixes that: a dozen call sites across both files index this directly and none of
+them are worth taking down over a missing sound effect.
+
+The current game has no SoundManager at all -- everything plays through AudioManager
+(playAudio(asset, config)) -- and while the stand-in was a stub of no-ops, every sound
+the script played itself was silent: its own projectile launches, pickups, purchases,
+the miner's hammer. So playSound now forwards to AudioManager:playAudio. The props the
+call sites pass (position, volumeMultiplier) are AudioManager config keys already, and a
+registered GameSound brings its own category and volume. It is pcall'd so a bad id still
+costs nothing but the sound.
+
+routesToAudioManager tells SoundChanger these already reach its AudioManager hook, so it
+leaves playSound alone rather than scaling them twice. Every other method is still a
+no-op, and without an AudioManager this is the plain stub. ]]
 local function resolveSoundManager()
     local ok, res = pcall(function()
         return require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).SoundManager
     end)
     if ok and res then return res end
 
-    return setmetatable({}, {__index = function() return blankFunction end})
+    local stub = setmetatable({}, {__index = function() return blankFunction end})
+    local audioOk, audio = pcall(function()
+        return require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).AudioManager
+    end)
+    if not (audioOk and type(audio) == 'table' and type(audio.playAudio) == 'function') then
+        return stub
+    end
+
+    stub.routesToAudioManager = true
+    function stub:playSound(id, props)
+        if type(id) ~= 'string' or id == '' then return nil end
+        local config = {}
+        if type(props) == 'table' then
+            for key, value in props do
+                config[key] = value
+            end
+        end
+        local played, handle = pcall(audio.playAudio, audio, id, config)
+        return played and handle or nil
+    end
+    return stub
 end
 
 --[[ pistonware funcs ]]
@@ -6875,9 +6906,8 @@ run(function()
 	local KitESP
 	local Background
 	local Color = {}
+	local Scale
 	local Reference = {}
-	local Pending = {}
-	local Removing = {}
 	local connections = {}
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
@@ -6893,148 +6923,105 @@ run(function()
 		star_collector = {'stars', 'crit_star'}
 	}
 
-	--[[ Every GUI write happens on this module's own thread, never on the tag signals.
-
-	The tags are added by the game, on the game's thread (identity 2): an eldertree orb is
-	tagged inside EldertreeController's spawn handler. vape.gui sits in CoreGui or gethui on
-	executors with a settable identity, and a billboard parented there from the game's thread
-	fails. So the signals only note what came and went, and the loop below builds and removes.
-
-	The raise is guarded. vape.ThreadFix only says setthreadidentity exists; on an executor whose
-	ceiling is below 8 an unguarded setthreadidentity(8) throws, and it used to be the first line
-	of the loop, so KitESP stopped before drawing anything. ]]
-	local function raiseIdentity()
-		if not vape.ThreadFix then return end
-		if not pcall(setthreadidentity, 8) then
-			pcall(setthreadidentity, 7)
-		end
-	end
-
 	local function Added(ent, icon)
-		if Reference[ent] or not ent.Parent then return end
-		-- A model streamed in before its parts has nothing to hang the icon on yet; the sweep
-		-- picks it up once one arrives. Searched deep: a skinned model keeps its parts nested.
+		-- Searched deep: a skinned model keeps its parts nested.
 		local part = ent:IsA('BasePart') and ent or ent:IsA('Model') and (ent.PrimaryPart or ent:FindFirstChild('Root') or ent:FindFirstChildWhichIsA('BasePart', true))
-		if not part then return end
+		if not part or Reference[ent] then return end
 
-		local billboard
-		local ok = pcall(function()
-			billboard = Instance.new('BillboardGui')
-			billboard.Name = icon
-			billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
-			billboard.Size = UDim2.fromOffset(36, 36)
-			billboard.AlwaysOnTop = true
-			billboard.ClipsDescendants = false
-			billboard.Adornee = part
-			billboard.Parent = Folder
-			local blur = addBlur(billboard)
-			blur.Size = UDim2.new(1, 89, 1, 52)
-			blur.Position = UDim2.fromOffset(-48, -31)
-			blur.Visible = Background.Enabled
-			local image = Instance.new('ImageLabel')
-			image.Size = UDim2.fromOffset(36, 36)
-			image.Position = UDim2.fromScale(0.5, 0.5)
-			image.AnchorPoint = Vector2.new(0.5, 0.5)
-			image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-			image.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
-			image.BorderSizePixel = 0
-			-- An icon the item meta cannot resolve still gets its marker, just without the picture.
-			local iconOk, iconImage = pcall(bedwars.getIcon, {itemType = icon}, true)
-			image.Image = iconOk and type(iconImage) == 'string' and iconImage or ''
-			image.Parent = billboard
-			local uicorner = Instance.new('UICorner')
-			uicorner.CornerRadius = UDim.new(0, 4)
-			uicorner.Parent = image
-		end)
-		if ok then
-			Reference[ent] = billboard
-		elseif billboard then
-			-- Half built: gone, so the next sweep can try again.
-			pcall(function() billboard:Destroy() end)
-		end
-	end
-
-	local function Removed(ent)
-		local billboard = Reference[ent]
-		Reference[ent] = nil
-		if billboard then
-			pcall(function() billboard:Destroy() end)
-		end
-	end
-
-	local function clearAll()
-		for _, v in connections do
-			v:Disconnect()
-		end
-		table.clear(connections)
-		table.clear(Reference)
-		table.clear(Pending)
-		table.clear(Removing)
-		pcall(function() Folder:ClearAllChildren() end)
+		local billboard = Instance.new('BillboardGui')
+		billboard.Name = icon
+		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+		billboard.Size = UDim2.fromOffset(36 * Scale.Value, 36 * Scale.Value)
+		billboard.AlwaysOnTop = true
+		billboard.ClipsDescendants = false
+		billboard.Adornee = part
+		billboard.Parent = Folder
+		local blur = addBlur(billboard)
+		blur.Size = UDim2.new(1, 89 * Scale.Value, 1, 52 * Scale.Value)
+		blur.Position = UDim2.fromOffset(-48 * Scale.Value, -31 * Scale.Value)
+		blur.Visible = Background.Enabled
+		local image = Instance.new('ImageLabel')
+		image.Size = UDim2.fromOffset(36 * Scale.Value, 36 * Scale.Value)
+		image.Position = UDim2.fromScale(0.5, 0.5)
+		image.AnchorPoint = Vector2.new(0.5, 0.5)
+		image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+		image.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
+		image.BorderSizePixel = 0
+		-- An icon the item meta cannot resolve still gets its marker, just without the picture.
+		local iconOk, iconImage = pcall(bedwars.getIcon, {itemType = icon}, true)
+		image.Image = iconOk and type(iconImage) == 'string' and iconImage or ''
+		image.Parent = billboard
+		local uicorner = Instance.new('UICorner')
+		uicorner.CornerRadius = UDim.new(0, 4)
+		uicorner.Parent = image
+		Reference[ent] = billboard
 	end
 
 	KitESP = vape.Categories.Render:CreateModule({
 		Name = 'KitESP',
 		Function = function(callback)
-			raiseIdentity()
 			if callback then
 				local current
-				local nextSweep = 0
 				repeat
-					local now = os.clock()
-					if now >= nextSweep then
-						nextSweep = now + 1
-						-- Every kit you are playing: Kit Fusion's second kit has its own things to find.
-						local kits = store.activeKits()
-						local key = table.concat(kits, ',')
-						if key ~= current then
-							current = key
-							clearAll()
-							for _, name in kits do
-								local kit = ESPKits[name]
-								if kit then
-									table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
-										Removing[ent] = nil
-										Pending[ent] = kit[2]
-									end))
-									table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
-										Pending[ent] = nil
-										Removing[ent] = true
-									end))
-								end
-							end
+					-- Every kit you are playing: Kit Fusion's second kit has its own things to find.
+					local kits = store.activeKits()
+					local key = table.concat(kits, ',')
+					if key ~= current then
+						current = key
+						for _, v in connections do
+							v:Disconnect()
 						end
-						--[[ Once a second, everything tagged that still has no billboard: the whole
-						set on a kit change, models whose parts had not streamed in when they were
-						tagged, and anything a failed build left out. ]]
+						table.clear(connections)
+						table.clear(Reference)
+						Folder:ClearAllChildren()
+
 						for _, name in kits do
 							local kit = ESPKits[name]
 							if kit then
-								for _, v in collectionService:GetTagged(kit[1]) do
-									if not Reference[v] then
-										Pending[v] = kit[2]
+								table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
+									Added(ent, kit[2])
+								end))
+								table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
+									if Reference[ent] then
+										Reference[ent]:Destroy()
+										Reference[ent] = nil
 									end
+								end))
+								for _, v in collectionService:GetTagged(kit[1]) do
+									Added(v, kit[2])
 								end
 							end
 						end
 					end
-					for ent in Removing do
-						Removing[ent] = nil
-						Removed(ent)
-					end
-					for ent, icon in Pending do
-						Pending[ent] = nil
-						Added(ent, icon)
-					end
-					task.wait(0.1)
+					task.wait(1)
 				until not KitESP.Enabled
 			else
-				clearAll()
+				for _, v in connections do
+					v:Disconnect()
+				end
+				table.clear(connections)
+				table.clear(Reference)
+				Folder:ClearAllChildren()
 			end
 		end,
 		Tooltip = 'Marks the things your kit collects, like bees, orbs and hidden metal'
 	})
 
+	Scale = KitESP:CreateSlider({
+		Name = 'Scale',
+		Function = function(val)
+			for _, v in Reference do
+				v.Size = UDim2.fromOffset(36 * val, 36 * val)
+				v.ImageLabel.Size = UDim2.fromOffset(36 * val, 36 * val)
+				v.Blur.Size = UDim2.new(1, 89 * val, 1, 52 * val)
+				v.Blur.Position = UDim2.fromOffset(-48 * val, -31 * val)
+			end
+		end,
+		Default = 1,
+		Min = 0.1,
+		Max = 1.5,
+		Decimal = 10
+	})
 	Background = KitESP:CreateToggle({
 		Name = 'Background',
 		Function = function(callback)
@@ -7042,10 +7029,8 @@ run(function()
 				Color.Object.Visible = callback
 			end
 			for _, v in Reference do
-				pcall(function()
-					v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
-					v.Blur.Visible = callback
-				end)
+				v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
+				v.Blur.Visible = callback
 			end
 		end,
 		Default = true
@@ -7056,10 +7041,8 @@ run(function()
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			for _, v in Reference do
-				pcall(function()
-					v.ImageLabel.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-					v.ImageLabel.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
-				end)
+				v.ImageLabel.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+				v.ImageLabel.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
 			end
 		end,
 		Darker = true
@@ -12913,11 +12896,136 @@ run(function()
 	local SoundChanger
 	local List
 	local Volume
+	local HitOnly
+	local MuteImpacts
 	local trackedSounds = {}
 	local customSounds = {}
 	local capturedRegistry = {}
-	local old, oldRegister
-	
+	local projectileSounds = {}
+	local old, oldRegister, oldAudio, audioMethod
+
+	--[[ How loud a sound plays through this module: nil leaves it untouched, 0 mutes it.
+	Hit ding only wins over the list, so a listed projectile sound stays muted with it on. ]]
+	local function soundMultiplier(id)
+		if HitOnly and HitOnly.Enabled and projectileSounds[id] then
+			return 0
+		end
+		if trackedSounds[id] then
+			return (Volume and Volume.Value or 100) / 100
+		end
+	end
+
+	-- Sound fields hold an id, a list of ids, or (hitSounds) a list of lists.
+	local function addSounds(set, value)
+		if type(value) == 'string' then
+			if value ~= '' then
+				set[value] = true
+			end
+		elseif type(value) == 'table' then
+			for _, v in value do
+				addSounds(set, v)
+			end
+		end
+	end
+
+	--[[ Every projectile equip, draw, reload and fire sound in the game, built from the metas
+	the game's own controllers read them from rather than a fixed list: a bow skin carries its
+	own launch sound (projectileSourceOverrides), so naming NEW_BOW_FIRE alone left every
+	skinned bow audible.
+
+	  switching   GameSound.EQUIP_BOW -- inventory-effects-controller, on any hand change to
+	              an item with a projectileSource (swords get EQUIP_SWORD, the rest
+	              EQUIP_DEFAULT)
+	  draw        projectileSource.chargeBeginSound (BOW_DRAW) -- projectile-source-controller
+	  reload      projectileSource.reload.reloadSound (CROSSBOW_RELOAD) -- same controller
+	  fire        projectileSource.launchSound (NEW_BOW_FIRE) and launchOverlaySound --
+	              projectile-controller for yours, projectile-effects-controller for others'
+	  impact      ProjectileMeta[name].impactSound (NEW_ARROW_IMPACT) -- the thud where an
+	              arrow lands, for anyone's shot (Mute impacts)
+
+	The ding is what projectile-effects-controller plays when YOUR shot connects: the
+	projectile's (or skin's) hitSounds, falling back to GameSound.ARROW_HIT, plus
+	GameSound.HEADSHOT on a headshot. Those are kept even where an id is shared with a
+	muted list.
+
+	So is any id the game also uses for something other than firing. Throwables such as the
+	banana peel launch with SWORD_SWING_1, the sword controller's own swing sound, so every
+	*SWING* GameSound is kept, as is any id an item or skin meta holds outside its
+	projectile source. Impacts are limited to arrow projectiles for the same reason: the
+	rest share FORTIFY_BLOCK, TNT_EXPLODE_1 and FIREBALL_EXPLODE with blocks and TNT. ]]
+	local function addShared(set, value, skipKey, seen)
+		if type(value) == 'string' then
+			if value:find('rbxassetid://', 1, true) then
+				set[value] = true
+			end
+		elseif type(value) == 'table' and not seen[value] then
+			seen[value] = true
+			for k, v in value do
+				if k ~= skipKey then
+					addShared(set, v, skipKey, seen)
+				end
+			end
+		end
+	end
+
+	local function buildProjectileSounds()
+		table.clear(projectileSounds)
+		if not (HitOnly and HitOnly.Enabled) then return end
+
+		local sounds = bedwars.SoundList or {}
+		local keep, seen = {}, {}
+		local function addSource(source)
+			if type(source) ~= 'table' then return end
+			addSounds(projectileSounds, source.launchSound)
+			addSounds(projectileSounds, source.launchOverlaySound)
+			addSounds(projectileSounds, source.chargeBeginSound)
+			if type(source.reload) == 'table' then
+				addSounds(projectileSounds, source.reload.reloadSound)
+			end
+			addSounds(keep, source.hitSounds)
+		end
+
+		for _, meta in bedwars.ItemMeta or {} do
+			if type(meta) == 'table' then
+				addSource(meta.projectileSource)
+				addShared(keep, meta, 'projectileSource', seen)
+			end
+		end
+		local ok, skins = pcall(function()
+			return require(replicatedStorage.TS.games.bedwars['item-skin']['item-skin-meta']).ItemSkinMeta
+		end)
+		if ok and type(skins) == 'table' then
+			for _, skin in skins do
+				if type(skin) == 'table' then
+					addSource(skin.projectileSourceOverrides)
+					addShared(keep, skin, 'projectileSourceOverrides', seen)
+				end
+			end
+		end
+		for name, meta in bedwars.ProjectileMeta or {} do
+			if type(meta) == 'table' then
+				if MuteImpacts and MuteImpacts.Enabled
+					and type(name) == 'string' and name:find('arrow', 1, true) then
+					addSounds(projectileSounds, meta.impactSound)
+				end
+				addSounds(keep, meta.hitSounds)
+			end
+		end
+
+		for name, id in sounds do
+			if type(name) == 'string' and name:find('SWING', 1, true) then
+				addSounds(keep, id)
+			end
+		end
+		addSounds(keep, sounds.ARROW_HIT)
+		addSounds(keep, sounds.HEADSHOT)
+		for id in keep do
+			projectileSounds[id] = nil
+		end
+		-- The switch sound goes in last: nothing above may keep it.
+		addSounds(projectileSounds, sounds.EQUIP_BOW)
+	end
+
 	local function updateVolumes()
 		local volMultiplier = (Volume and Volume.Value or 100) / 100
 		for id, props in pairs(capturedRegistry) do
@@ -12936,76 +13044,118 @@ run(function()
 		end
 	end
 
+	--[[ The game plays everything through AudioManager now; SoundManager no longer exists in
+	it, so a hook on bedwars.SoundManager (resolveSoundManager's stand-in) never saw a game
+	sound -- which is why listed sounds kept playing. playAudio,
+	playRandomAudio and playAudioPlayer all end in internalPlayAudio(asset, config), so that
+	one hook sees every sound. Muting goes through the config's volumeMultiplier (0) rather
+	than skipping the call: callers keep the playback handle it returns (the equip sound
+	stops the previous one through it). Only string ids are touched -- a multiplier on a
+	caller-owned AudioPlayer instance would stick to that instance. ]]
+	local function audioHook(self, asset, config, ...)
+		local mult = type(asset) == 'string' and soundMultiplier(asset)
+		if not mult then
+			return oldAudio(self, asset, config, ...)
+		end
+		local props = {}
+		if type(config) == 'table' then
+			for k, v in config do
+				props[k] = v
+			end
+		end
+		props.volumeMultiplier = (props.volumeMultiplier or 1) * mult
+		local custom = customSounds[asset]
+		if custom then
+			-- Routing reads category/bus off the call config, and a custom id has no
+			-- registered config of its own to fall back on.
+			local base = type(self.audioAssetConfigs) == 'table' and self.audioAssetConfigs[asset]
+			if type(base) == 'table' then
+				if props.category == nil then props.category = base.category end
+				if props.bus == nil then props.bus = base.bus end
+			end
+			asset = custom
+		end
+		return oldAudio(self, asset, props, ...)
+	end
+
 	SoundChanger = vape.Legit:CreateModule({
 		Name = 'SoundChanger',
 		Function = function(callback)
 			if callback then
-				old = bedwars.SoundManager.playSound
-				bedwars.SoundManager.playSound = function(self, id, ...)
-					--[[ A sound nobody listed goes straight through, arguments untouched. Every
-					sound the game plays passes here, and every one used to be copied into a
-					table and unpacked back out -- dropping any argument after a nil on the
-					way -- only to reach the few that are listed. ]]
-					if not trackedSounds[id] then
-						return old(self, id, ...)
-					end
-					local args = {...}
-					local isTracked = trackedSounds[id]
-					
-					if isTracked then
-						if customSounds[id] then
-							id = customSounds[id]
+				buildProjectileSounds()
+
+				local audio = bedwars.AudioManager
+				audioMethod = type(audio) == 'table' and (
+					type(audio.internalPlayAudio) == 'function' and 'internalPlayAudio'
+					or type(audio.playAudio) == 'function' and 'playAudio'
+				) or nil
+				if audioMethod and audio[audioMethod] ~= audioHook then
+					oldAudio = audio[audioMethod]
+					audio[audioMethod] = audioHook
+				end
+
+				-- resolveSoundManager's stand-in forwards playSound to AudioManager, so the
+				-- script's own sounds already reach audioHook; hooking it too would scale a
+				-- listed sound twice. A real SoundManager (a build that still has one) is
+				-- hooked as before.
+				if bedwars.SoundManager.routesToAudioManager ~= true then
+					old = bedwars.SoundManager.playSound
+					bedwars.SoundManager.playSound = function(self, id, ...)
+						--[[ A sound nobody listed goes straight through, arguments untouched. Every
+						sound the game plays passes here, and every one used to be copied into a
+						table and unpacked back out -- dropping any argument after a nil on the
+						way -- only to reach the few that are listed. ]]
+						local mult = soundMultiplier(id)
+						if not mult then
+							return old(self, id, ...)
 						end
-						
-						local volMultiplier = (Volume and Volume.Value or 100) / 100
-						
+						local args = {...}
 						for i, v in ipairs(args) do
 							if type(v) == "table" then
 								local newProps = {}
 								for k, val in pairs(v) do newProps[k] = val end
 								local baseVol = newProps.volume or newProps.Volume or 1
-								newProps.volume = baseVol * volMultiplier
+								newProps.volume = baseVol * mult
 								newProps.Volume = newProps.volume
 								args[i] = newProps
 							end
 						end
-					end
-					
-					local result = old(self, id, table.unpack(args))
-					
-					if isTracked and result and typeof(result) == "Instance" and result:IsA("Sound") then
-						local volMultiplier = (Volume and Volume.Value or 100) / 100
-						result.Volume = result.Volume * volMultiplier
-					end
-					
-					return result
-				end
 
-				oldRegister = bedwars.SoundManager.registerSound
-				if oldRegister then
-					bedwars.SoundManager.registerSound = function(self, id, props)
-						capturedRegistry[id] = props
-						if type(props) == "table" then
-							if props._originalVolume == nil then
-								props._originalVolume = props.volume or props.Volume or 1
-							end
-							if trackedSounds[id] then
-								local volMultiplier = (Volume and Volume.Value or 100) / 100
-								props.volume = props._originalVolume * volMultiplier
-								props.Volume = props.volume
-							end
+						local result = old(self, customSounds[id] or id, table.unpack(args))
+
+						if result and typeof(result) == "Instance" and result:IsA("Sound") then
+							result.Volume = result.Volume * mult
 						end
-						return oldRegister(self, id, props)
-					end
-				end
 
-				if type(bedwars.SoundManager) == "table" then
-					for k, v in pairs(bedwars.SoundManager) do
-						if type(v) == "table" then
-							for rk, rv in pairs(v) do
-								if type(rk) == "string" and rk:find("rbxassetid://") and type(rv) == "table" then
-									if not capturedRegistry[rk] then
-										capturedRegistry[rk] = rv
+						return result
+					end
+
+					oldRegister = bedwars.SoundManager.registerSound
+					if oldRegister then
+						bedwars.SoundManager.registerSound = function(self, id, props)
+							capturedRegistry[id] = props
+							if type(props) == "table" then
+								if props._originalVolume == nil then
+									props._originalVolume = props.volume or props.Volume or 1
+								end
+								if trackedSounds[id] then
+									local volMultiplier = (Volume and Volume.Value or 100) / 100
+									props.volume = props._originalVolume * volMultiplier
+									props.Volume = props.volume
+								end
+							end
+							return oldRegister(self, id, props)
+						end
+					end
+
+					if type(bedwars.SoundManager) == "table" then
+						for k, v in pairs(bedwars.SoundManager) do
+							if type(v) == "table" then
+								for rk, rv in pairs(v) do
+									if type(rk) == "string" and rk:find("rbxassetid://") and type(rv) == "table" then
+										if not capturedRegistry[rk] then
+											capturedRegistry[rk] = rv
+										end
 									end
 								end
 							end
@@ -13015,6 +13165,10 @@ run(function()
 
 				updateVolumes()
 			else
+				if oldAudio then
+					bedwars.AudioManager[audioMethod] = oldAudio
+					oldAudio, audioMethod = nil, nil
+				end
 				if old then
 					bedwars.SoundManager.playSound = old
 					old = nil
@@ -13023,7 +13177,7 @@ run(function()
 					bedwars.SoundManager.registerSound = oldRegister
 					oldRegister = nil
 				end
-				
+
 				for id, props in pairs(capturedRegistry) do
 					if type(props) == "table" and props._originalVolume ~= nil then
 						props.volume = props._originalVolume
@@ -13034,7 +13188,7 @@ run(function()
 		end,
 		Tooltip = 'Swap ingame sounds for your own and set how loud they are.'
 	})
-	
+
 	List = SoundChanger:CreateTextList({
 		Name = 'Sounds',
 		Placeholder = '(EQUIP_DEFAULT or EQUIP_DEFAULT/custom.mp3)',
@@ -13043,14 +13197,20 @@ run(function()
 			table.clear(customSounds)
 			local soundTable = bedwars.SoundList or bedwars.GameSound or bedwars.Sounds or {}
 			for _, entry in ipairs(List.ListEnabled) do
-				local split = entry:split('/')
-				local name = split[1]
-				local id = soundTable[name]
-				
+				entry = entry:match('^%s*(.-)%s*$')
+				-- A raw rbxassetid is accepted too (a skin's sound with no GameSound name to
+				-- hand); it carries slashes of its own, so it is split off before the '/'.
+				local id, path = entry:match('^(rbxassetid://%d+)/?(.*)$')
+				if not id then
+					local name
+					name, path = entry:match('^([^/]+)/(.*)$')
+					name = name or entry
+					id = soundTable[name] or soundTable[name:upper()]
+				end
+
 				if id then
 					trackedSounds[id] = true
-					if #split > 1 and split[2] ~= "" then
-						local path = split[2]
+					if path and path ~= "" then
 						local custom = path:find('rbxasset') and path or isfile(path) and assetfunction(path) or nil
 						if custom then
 							customSounds[id] = custom
@@ -13061,7 +13221,7 @@ run(function()
 			updateVolumes()
 		end
 	})
-	
+
 	Volume = SoundChanger:CreateSlider({
 		Name = 'Volume',
 		Min = 0,
@@ -13072,6 +13232,32 @@ run(function()
 			updateVolumes()
 		end
 	})
+
+	HitOnly = SoundChanger:CreateToggle({
+		Name = 'Hit ding only',
+		Function = function(callback)
+			if MuteImpacts and MuteImpacts.Object then
+				MuteImpacts.Object.Visible = callback
+			end
+			buildProjectileSounds()
+		end,
+		Tooltip = 'Mutes every projectile switch, draw, reload and fire sound (skins included)\nand keeps the ding and headshot sound when your shot lands.'
+	})
+
+	MuteImpacts = SoundChanger:CreateToggle({
+		Name = 'Mute impacts',
+		Default = true,
+		Visible = false,
+		Darker = true,
+		Function = function()
+			buildProjectileSounds()
+		end,
+		Tooltip = 'Also mutes the thud where an arrow lands.'
+	})
+	-- Follow the saved state of Hit ding only; a toggle's Function only runs on a change.
+	if MuteImpacts.Object then
+		MuteImpacts.Object.Visible = HitOnly.Enabled
+	end
 end)
 	
 run(function()

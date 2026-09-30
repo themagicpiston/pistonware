@@ -1028,7 +1028,10 @@ local function anchorVapeButton(button)
 		end
 	end
 
-	apply()
+	--[[ Guarded like the loop below. This first call runs at the end of LoadGUI, and it reads
+	the client's own top bar: anything that throws in there escaped LoadGUI and failed the whole
+	menu on a phone, where the button already sits at the fallback and would have been fine. ]]
+	pcall(apply)
 
 	local thread = task.spawn(function()
 		while button.Parent do
@@ -1769,8 +1772,6 @@ function vape:LoadGUI()
 	gui.IgnoreGuiInset = true
 	
 	if vape.ThreadFix then
-		local holder = Instance.new('Folder')
-		holder.Parent = cloneref(game:GetService('CoreGui'))
 		--[[ Recent property; older clients throw on the assignment rather than ignoring it. ]]
 		pcall(function() gui.OnTopOfCoreBlur = true end)
 		--[[
@@ -1786,8 +1787,34 @@ function vape:LoadGUI()
 			nothing has been reported against it.
 		]]
 		local hidden = (not inputService.TouchEnabled) and gethui and select(2, pcall(gethui)) or nil
-		gui.Parent = (typeof(hidden) == 'Instance' and hidden) or cloneref(game:GetService('CoreGui'))
-		vape.holder = holder
+		--[[ A ScreenGui is no container for another ScreenGui. Some executors' gethui hands back
+		CoreGui.RobloxGui itself (projectreal documents exactly that), and a menu nested inside
+		another LayerCollector cannot be relied on to draw at all. CoreGui is what the old GUI
+		always used, and what touch devices use here. ]]
+		if typeof(hidden) ~= 'Instance' or hidden:IsA('LayerCollector') then
+			hidden = nil
+		end
+		--[[ Neither parent is guaranteed. CoreGui reads back nil below the executor's full
+		identity (Solara documents that), and a write into it can be refused outright; either one
+		used to throw right here, before anything was on screen, and take the whole GUI with it.
+		PlayerGui -- the path executors without setthreadidentity take -- always works. ]]
+		local parented = pcall(function()
+			gui.Parent = hidden or cloneref(game:GetService('CoreGui'))
+		end) and gui.Parent ~= nil
+		if not parented then
+			gui.Parent = cloneref(game:GetService('Players')).LocalPlayer.PlayerGui
+			gui.ResetOnSpawn = false
+		end
+		--[[ Nothing reads this folder; it is only removed again on uninject. It used to be the
+		FIRST write into CoreGui here, unguarded, so an executor that could not touch CoreGui
+		failed the whole load on it even where gethui would have worked. ]]
+		local holder = Instance.new('Folder')
+		if pcall(function() holder.Parent = cloneref(game:GetService('CoreGui')) end) then
+			vape.holder = holder
+		else
+			holder:Destroy()
+			vape.holder = gui
+		end
 	else
 		gui.Parent = cloneref(game:GetService('Players')).LocalPlayer.PlayerGui
 		gui.ResetOnSpawn = false
