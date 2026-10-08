@@ -22,6 +22,16 @@ local prediction = vape.Libraries.prediction
 local color = vape.Libraries.color
 local uipallet = vape.Libraries.uipallet
 local getcustomasset = vape.Libraries.getcustomasset
+-- Is Pistonware's own menu open; the plain field reads safely from any thread
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
 
 local clientData = require(replicatedStorage.modules.player.ClientData)
 local aiController = require(lplr.PlayerScripts.AIController)
@@ -155,7 +165,7 @@ run(function()
 				until not InfiniteStamina.Enabled
 			end
 		end,
-		Tooltip = 'Tiredless simulator'
+		Tooltip = 'Lets you run and act without running out of stamina.'
 	})
 end)
 
@@ -197,6 +207,9 @@ run(function()
 
 	Killaura = vape.Categories.Blatant:CreateModule({
 		Name = 'Killaura',
+		ExtraText = function()
+			return Range and tostring(Range.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -255,7 +268,7 @@ run(function()
 				block(false)
 			end
 		end,
-		Tooltip = 'Attack players around you\nwithout aiming at them.'
+		Tooltip = 'Attacks enemies around you without you aiming.\nHits players and mobs, and can show target boxes and particles.'
 	})
 	Targets = Killaura:CreateTargets({
 		Players = true,
@@ -294,7 +307,13 @@ run(function()
 						setthreadidentity(8)
 					end
 
+					-- hidden while the menu is open; the first tick after it closes draws them again
+					local hidden = clickGuiOpen()
 					for i, v in Boxes do
+						if hidden then
+							if v.Adornee then v.Adornee = nil end
+							continue
+						end
 						v.Adornee = attacked[i] and attacked[i].RootPart or nil
 						if v.Adornee then
 							v.Color3 = Color3.fromHSV(BoxAttackColor.Hue, BoxAttackColor.Sat, BoxAttackColor.Value)
@@ -347,7 +366,13 @@ run(function()
 						setthreadidentity(8)
 					end
 
+					-- hidden while the menu is open; the first tick after it closes draws them again
+					local hidden = clickGuiOpen()
 					for i, v in Particles do
+						if hidden then
+							if v.Parent then v.Parent = nil end
+							continue
+						end
 						v.Position = attacked[i] and attacked[i].RootPart.Position or Vector3.new(9e9, 9e9, 9e9)
 						v.Parent = attacked[i] and gameCamera or nil
 					end
@@ -359,7 +384,8 @@ run(function()
 					part.CanCollide = false
 					part.Transparency = 1
 					part.CanQuery = false
-					part.Parent = Killaura.Enabled and gameCamera or nil
+					-- a part made while the menu is open starts hidden
+					part.Parent = Killaura.Enabled and not clickGuiOpen() and gameCamera or nil
 					local particles = Instance.new('ParticleEmitter')
 					particles.Brightness = 1.5
 					particles.Size = NumberSequence.new(ParticleSize.Value)
@@ -512,7 +538,7 @@ run(function()
 		ExtraText = function() 
 			return 'TSG' 
 		end,
-		Tooltip = 'Increases your movement with various methods.'
+		Tooltip = 'Makes you move faster than normal.\nCan stop at walls so you do not clip into them.'
 	})
 	WallCheck = Speed:CreateToggle({
 		Name = 'Wall Check',
@@ -570,7 +596,7 @@ run(function()
 				until not AutoEat.Enabled
 			end
 		end,
-		Tooltip = 'Automatically eats healing items'
+		Tooltip = 'Eats food for you to keep your hunger full.\nCan also eat healing items when you are hurt.'
 	})
 	Health = AutoEat:CreateToggle({
 		Name = 'Eat Healing Items',
@@ -615,7 +641,7 @@ run(function()
 				table.clear(pickuptable)
 			end
 		end,
-		Tooltip = 'Picks up items within close range'
+		Tooltip = 'Picks up dropped items near you automatically.'
 	})
 end)
 	
@@ -657,6 +683,8 @@ run(function()
 			billboard.Adornee = part
 			billboard.MaxDistance = 100
 			billboard.AlwaysOnTop = true
+			-- a bar made while the menu is open starts hidden
+			billboard.Enabled = not clickGuiOpen()
 			billboard.Parent = part
 			BreakerUI = billboard
 			local holder = Instance.new('Frame')
@@ -668,14 +696,6 @@ run(function()
 			local corner = Instance.new('UICorner')
 			corner.CornerRadius = UDim.new(0, 5)
 			corner.Parent = holder
-			local blur = Instance.new('ImageLabel')
-			blur.Size = UDim2.new(1, 89, 1, 52)
-			blur.Position = UDim2.fromOffset(-48, -31)
-			blur.BackgroundTransparency = 1
-			blur.Image = getcustomasset('pistonware/assets/new/blur.png')
-			blur.ScaleType = Enum.ScaleType.Slice
-			blur.SliceCenter = Rect.new(52, 31, 261, 502)
-			blur.Parent = holder
 			local shadow = Instance.new('TextLabel')
 			shadow.Size = UDim2.fromOffset(145, 14)
 			shadow.Position = UDim2.fromOffset(13, 12)
@@ -797,6 +817,12 @@ run(function()
 						end
 					end
 	
+					-- the bar hides while the menu is open; the first tick after it closes shows it again
+					local show = not clickGuiOpen()
+					if BreakerUI and BreakerUI.Enabled ~= show then
+						BreakerUI.Enabled = show
+					end
+
 					task.wait(0.1)
 				until not Breaker.Enabled
 			else
@@ -804,7 +830,7 @@ run(function()
 				clean()
 			end
 		end,
-		Tooltip = 'Break resources around you automatically'
+		Tooltip = 'Mines and chops resources around you automatically.\nShows a health bar and can pause while you fight.'
 	})
 	BreakerDisable = Breaker:CreateToggle({
 		Name = 'Break while attacking',

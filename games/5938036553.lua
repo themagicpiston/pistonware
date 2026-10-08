@@ -69,6 +69,16 @@ if not drawingactor then return end
 local function notif(...)
 	return vape:CreateNotification(...)
 end
+-- Is Pistonware's own menu open; the plain field reads safely from any thread
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
 
 if not select(1, ...) and game.PlaceId == 5938036553 then
 	if run_on_actor and getactors then
@@ -111,19 +121,6 @@ if not select(1, ...) and game.PlaceId == 5938036553 then
 end
 
 local frontlines = {Functions = {}}
-
-local function addBlur(parent)
-	local blur = Instance.new('ImageLabel')
-	blur.Name = 'Blur'
-	blur.Size = UDim2.new(1, 89, 1, 52)
-	blur.Position = UDim2.fromOffset(-48, -31)
-	blur.BackgroundTransparency = 1
-	blur.Image = getcustomasset('pistonware/assets/new/blur.png')
-	blur.ScaleType = Enum.ScaleType.Slice
-	blur.SliceCenter = Rect.new(52, 31, 261, 502)
-	blur.Parent = parent
-	return blur
-end
 
 local function getTeam(plr)
 	return frontlines.Main.globals.cli_teams[table.find(frontlines.Main.globals.cli_names, plr.Name)]
@@ -418,16 +415,26 @@ run(function()
 	
 	AimAssist = vape.Categories.Combat:CreateModule({
 		Name = 'AimAssist',
+		ExtraText = function()
+			return Speed and tostring(Speed.Value) or nil
+		end,
 		Function = function(callback)
 			if CircleObject then
-				CircleObject.Visible = callback
+				CircleObject.Visible = callback and not clickGuiOpen()
 			end
 			if callback then 
 				repeat
 					local dt = task.wait()
 					if not AimAssist.Enabled then break end
 					if CircleObject then 
-						CircleObject.Position = inputService:GetMouseLocation() 
+						-- hidden while the menu is open; the first frame after it closes shows it again
+						local show = not clickGuiOpen()
+						if CircleObject.Visible ~= show then
+							CircleObject.Visible = show
+						end
+						if show then
+							CircleObject.Position = inputService:GetMouseLocation()
+						end
 					end
 	
 					if inputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then 
@@ -461,7 +468,7 @@ run(function()
 				until not AimAssist.Enabled
 			end
 		end,
-		Tooltip = 'Uses game functions to move the camera towards players'
+		Tooltip = 'Pulls your aim towards nearby enemies.\nWorks while you aim down sights, with an optional range circle.'
 	})
 	FOV = AimAssist:CreateSlider({
 		Name = 'FOV',
@@ -491,12 +498,14 @@ run(function()
 				CircleObject.Radius = FOV.Value
 				CircleObject.NumSides = 100
 				CircleObject.Transparency = 1 - CircleTransparency.Value
-				CircleObject.Visible = AimAssist.Enabled
+				CircleObject.Visible = AimAssist.Enabled and not clickGuiOpen()
 			else
 				pcall(function()
 					CircleObject.Visible = false
 					CircleObject:Remove()
 				end)
+				-- the loop reads Visible back, so it must not see the removed circle
+				CircleObject = nil
 			end
 			CircleColor.Object.Visible = callback
 			CircleTransparency.Object.Visible = callback
@@ -592,6 +601,9 @@ run(function()
 	
 	SilentAim = vape.Categories.Combat:CreateModule({
 		Name = 'SilentAim',
+		ExtraText = function()
+			return Mode and Mode.Value or nil
+		end,
 		Function = function(callback)
 			if CircleObject then
 				CircleObject.Visible = callback and Mode.Value == 'Mouse'
@@ -628,7 +640,15 @@ run(function()
 				local oldent
 				repeat
 					if CircleObject then
-						CircleObject.Position = inputService:GetMouseLocation()
+						-- hidden while the menu is open; the first frame after it closes shows it again
+						local hidden = clickGuiOpen()
+						local show = not hidden and Mode.Value == 'Mouse'
+						if CircleObject.Visible ~= show then
+							CircleObject.Visible = show
+						end
+						if not hidden then
+							CircleObject.Position = inputService:GetMouseLocation()
+						end
 					end
 					if AutoFire.Enabled then
 						local ent = entitylib['Entity'..Mode.Value]({
@@ -659,7 +679,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Silently adjusts your aim towards the enemy'
+		Tooltip = 'Makes your shots hit enemies without you aiming.\nSet hit chance, auto fire and wallbang.'
 	})
 	Target = SilentAim:CreateTargets({Players = true})
 	Mode = SilentAim:CreateDropdown({
@@ -667,7 +687,7 @@ run(function()
 		List = {'Mouse', 'Position'},
 		Function = function(val)
 			if CircleObject then
-				CircleObject.Visible = SilentAim.Enabled and val == 'Mouse'
+				CircleObject.Visible = SilentAim.Enabled and val == 'Mouse' and not clickGuiOpen()
 			end
 		end
 	})
@@ -705,12 +725,14 @@ run(function()
 				CircleObject.Radius = Range.Value
 				CircleObject.NumSides = 100
 				CircleObject.Transparency = 1 - CircleTransparency.Value
-				CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse'
+				CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse' and not clickGuiOpen()
 			else
 				pcall(function()
 					CircleObject.Visible = false
 					CircleObject:Remove()
 				end)
+				-- the loop reads Visible back, so it must not see the removed circle
+				CircleObject = nil
 			end
 			CircleColor.Object.Visible = callback
 			CircleTransparency.Object.Visible = callback
@@ -776,7 +798,7 @@ run(function()
 				until not Sprint.Enabled
 			end
 		end,
-		Tooltip = 'Holds the sprint button'
+		Tooltip = 'Automatically sprints for you.'
 	})
 end)
 	
@@ -817,7 +839,7 @@ run(function()
 				until not GrenadeTP.Enabled
 			end
 		end,
-		Tooltip = 'Teleports throwables near enemy players'
+		Tooltip = 'Moves your thrown grenades onto nearby enemies.\nSet how far from the grenade it looks.'
 	})
 	Range = GrenadeTP:CreateSlider({
 		Name = 'Range',
@@ -878,7 +900,7 @@ run(function()
 				until not GunModifications.Enabled
 			end
 		end,
-		Tooltip = 'Modifications to empower the firearm'
+		Tooltip = 'Improves how your guns handle and fire.\nCovers auto reload, no recoil, no spread, fire rate and full auto.'
 	})
 	Reload = GunModifications:CreateToggle({Name = 'Auto Reload'})
 	Recoil = GunModifications:CreateToggle({Name = 'No Recoil'})
@@ -925,6 +947,9 @@ run(function()
 	
 	Killaura = vape.Categories.Blatant:CreateModule({
 		Name = 'Killaura',
+		ExtraText = function()
+			return AttackRange and tostring(AttackRange.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -986,7 +1011,13 @@ run(function()
 						frontlines.Main.globals.ctrl_states.trigger = false
 					end
 	
+					-- hidden while the menu is open; the first frame after it closes draws them again
+					local hidden = clickGuiOpen()
 					for i, v in Boxes do
+						if hidden then
+							if v.Adornee then v.Adornee = nil end
+							continue
+						end
 						v.Adornee = attacked[i] and attacked[i].Entity.RootPart or nil
 						if v.Adornee then
 							v.Color3 = Color3.fromHSV(attacked[i].Check.Hue, attacked[i].Check.Sat, attacked[i].Check.Value)
@@ -995,6 +1026,10 @@ run(function()
 					end
 	
 					for i, v in Particles do
+						if hidden then
+							if v.Parent then v.Parent = nil end
+							continue
+						end
 						v.Position = attacked[i] and attacked[i].Entity.RootPart.Position or Vector3.new(9e9, 9e9, 9e9)
 						v.Parent = attacked[i] and gameCamera or nil
 					end
@@ -1010,7 +1045,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Attack players around you\nwithout aiming at them.'
+		Tooltip = 'Attacks enemies around you without you aiming.\nCan be limited to your knife and show your targets.'
 	})
 	Targets = Killaura:CreateTargets({Players = true})
 	SwingRange = Killaura:CreateSlider({
@@ -1097,7 +1132,8 @@ run(function()
 					part.CanCollide = false
 					part.Transparency = 1
 					part.CanQuery = false
-					part.Parent = Killaura.Enabled and gameCamera or nil
+					-- a part made while the menu is open starts hidden
+					part.Parent = Killaura.Enabled and not clickGuiOpen() and gameCamera or nil
 					local particles = Instance.new('ParticleEmitter')
 					particles.Brightness = 1.5
 					particles.Size = NumberSequence.new(ParticleSize.Value)
@@ -1202,7 +1238,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Lets you Phase/Clip through walls.'
+		Tooltip = 'Lets you walk through walls.'
 	})
 end)
 	
@@ -1251,7 +1287,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Rotates the character in a circle'
+		Tooltip = 'Makes your character spin around in circles.\nPick the speed, spin direction and pitch.'
 	})
 	Speed = SpinBot:CreateSlider({
 		Name = 'Speed',
@@ -1294,8 +1330,6 @@ run(function()
 		billboard.AlwaysOnTop = true
 		billboard.ClipsDescendants = false
 		billboard.Adornee = v.model.PrimaryPart
-		local blur = addBlur(billboard)
-		blur.Visible = Background.Enabled
 		local image = Instance.new('ImageLabel')
 		image.Size = UDim2.fromScale(1, 1)
 		image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
@@ -1327,13 +1361,32 @@ run(function()
 					addESP(frontlines.Throwables[id])
 					return res
 				end)
+				-- the folder leaves the gui while the menu is open, so its icons stop drawing
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				local scaled = vape.gui:FindFirstChild('ScaledGui')
+				local clickGui = scaled and scaled:FindFirstChild('ClickGui')
+				if clickGui then
+					Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					GrenadeESP:Clean(clickGui:GetPropertyChangedSignal('Visible'):Connect(function()
+						if vape.ThreadFix then
+							setthreadidentity(8)
+						end
+						Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					end))
+				end
 			else
 				hookfunction(frontlines.SpawnThrowable, old)
 				Folder:ClearAllChildren()
 				table.clear(Reference)
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				Folder.Parent = vape.gui
 			end
 		end,
-		Tooltip = 'ESP for grenades'
+		Tooltip = 'Shows frag grenades through walls with an icon.\nCan add a colored background.'
 	})
 	Background = GrenadeESP:CreateToggle({
 		Name = 'Background',
@@ -1343,7 +1396,6 @@ run(function()
 			end
 			for i, v in Reference do
 				v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
-				v.Blur.Visible = callback
 			end
 		end,
 		Default = true
@@ -1374,7 +1426,7 @@ run(function()
 				NoHurtCam:Clean(hookEvent('DISPLAY_SUPPRESSION_VIGNETTE', function() return true end))
 			end
 		end,
-		Tooltip = 'Removes camera flash after taking damage'
+		Tooltip = 'Removes the screen and sound effects from taking damage.\nAlso clears the dark edges from being suppressed.'
 	})
 end)
 	
@@ -1442,7 +1494,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'View your character in third person'
+		Tooltip = 'Shows your character in third person.\nSet how far back the camera sits.'
 	})
 	Distance = ThirdPerson:CreateSlider({
 		Name = 'Distance',
@@ -1466,7 +1518,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Automatically respawns after death'
+		Tooltip = 'Skips the killcam and respawns you right away.'
 	})
 end)
 	
@@ -1482,22 +1534,31 @@ run(function()
 		Name = 'ChatSpammer',
 		Function = function(callback)
 			if callback then
+				if #Lines.ListEnabled == 0 then
+					notif('ChatSpammer', 'Add a line to send first.', 5, 'warning')
+					ChatSpammer:Toggle(nil, true)
+					return
+				end
+
 				local ind = 1
 				repeat
-					local message = (#Lines.ListEnabled > 0 and Lines.ListEnabled[math.random(1, #Lines.ListEnabled)] or 'vxpe on top')
-					if Mode.Value == 'Order' and #Lines.ListEnabled > 0 then
-						message = Lines.ListEnabled[ind] or Lines.ListEnabled[1]
-						ind += 1
-						if ind > #Lines.ListEnabled then 
-							ind = 1 
+					-- Nothing is sent while the list is empty (it can be cleared mid-run).
+					if #Lines.ListEnabled > 0 then
+						local message = Lines.ListEnabled[math.random(1, #Lines.ListEnabled)]
+						if Mode.Value == 'Order' then
+							message = Lines.ListEnabled[ind] or Lines.ListEnabled[1]
+							ind += 1
+							if ind > #Lines.ListEnabled then
+								ind = 1
+							end
 						end
+						frontlines.Main.utils.net_msg_util.c_prep_net_msg(frontlines.Main.globals.null_net_msg_state, frontlines.Main.enums.c_net_msg.CHAT, message:sub(1, 100))
 					end
-					frontlines.Main.utils.net_msg_util.c_prep_net_msg(frontlines.Main.globals.null_net_msg_state, frontlines.Main.enums.c_net_msg.CHAT, message:sub(1, 100))
 					task.wait(1)
 				until not ChatSpammer.Enabled
 			end
 		end,
-		Tooltip = 'Automatically types in chat'
+		Tooltip = 'Sends your chosen messages in chat over and over.\nSends them in order or at random.'
 	})
 	Lines = ChatSpammer:CreateTextList({Name = 'Lines'})
 	Mode = ChatSpammer:CreateDropdown({
@@ -1533,7 +1594,7 @@ run(function()
 				until not PickupRange.Enabled
 			end
 		end,
-		Tooltip = 'Picks up ammo from dropped guns in the proximity'
+		Tooltip = 'Grabs ammo from dropped guns near you.\nSet how far away it reaches.'
 	})
 	Range = PickupRange:CreateSlider({
 		Name = 'Range',
@@ -1549,24 +1610,13 @@ run(function()
 	local Color
 	local Lifetime
 	local Fade
-	local DrawingToggle
-	local drawingobjs = {}
 	
 	BulletTracers = vape.Legit:CreateModule({
 		Name = 'BulletTracers',
 		Function = function(callback)
 			if callback then 
 				BulletTracers:Clean(hookEvent('SPAWN_FPV_SOL_BULLET', function(id, btype, origin, velocity)
-					if DrawingToggle.Enabled then 
-						local obj = Drawing.new('Line')
-						obj.Color = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-						drawingobjs[obj] = {origin, origin + (velocity.Unit * 1000), tick()}
-						task.delay(Lifetime.Value, function()
-							drawingobjs[obj] = nil
-							obj.Visible = false
-							obj:Remove()
-						end)
-					else
+					do
 						local obj = Instance.new('Part')
 						obj.Size = Vector3.new(0.05, 0.05, 1000)
 						obj.CFrame = CFrame.lookAt(origin + (velocity.Unit * 500), origin + (velocity.Unit * 1000))
@@ -1589,28 +1639,9 @@ run(function()
 						debrisService:AddItem(obj, Lifetime.Value)
 					end
 				end))
-	
-				if DrawingToggle.Enabled then
-					BulletTracers:Clean(runService.RenderStepped:Connect(function()
-						for obj, data in drawingobjs do 
-							local from, vis = gameCamera:WorldToViewportPoint(data[1])
-							local to, vis2 = gameCamera:WorldToViewportPoint(data[2])
-							if vis and vis2 then
-								obj.Visible = true
-								obj.From = Vector2.new(from.X, from.Y)
-								obj.To = Vector2.new(to.X, to.Y)
-								if Fade.Enabled then 
-									obj.Transparency = Color.Opacity * (1 - math.clamp((tick() - data[3]) / Lifetime.Value, 0, 1))
-								end
-							else
-								obj.Visible = false
-							end
-						end
-					end))
-				end
 			end
 		end,
-		Tooltip = 'Replacement tracers for bullets'
+		Tooltip = 'Draws a custom trail behind the bullets you fire.\nPick the color, material, lifetime and fade.'
 	})
 	local materials = {'SmoothPlastic'}
 	for _, v in Enum.Material:GetEnumItems() do
@@ -1636,14 +1667,5 @@ run(function()
 	Fade = BulletTracers:CreateToggle({
 		Name = 'Fade',
 		Default = true
-	})
-	DrawingToggle = BulletTracers:CreateToggle({
-		Name = 'Drawing',
-		Function = function()
-			if BulletTracers.Enabled then 
-				BulletTracers:Toggle()
-				BulletTracers:Toggle()
-			end
-		end
 	})
 end)

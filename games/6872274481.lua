@@ -64,7 +64,10 @@ the whole file is written to survive that, so this is the same yield, taken only
 frame is actually spent: a boot that fits in a frame is exactly as fast as before. ]]
 local FRAME_BUDGET = 0.012
 local lastBootYield = os.clock()
+-- A reinject replaces shared.vape; the blocks of the boot it superseded then stop building.
+local bootVape = shared.vape
 local run = function(func)
+	if shared.vape ~= bootVape then return end
 	if shared.VapeSmoothBoot or os.clock() - lastBootYield > FRAME_BUDGET then
 		task.wait()
 		lastBootYield = os.clock()
@@ -136,6 +139,17 @@ local whitelist = vape.Libraries.whitelist
 local prediction = vape.Libraries.prediction
 local getfontsize = vape.Libraries.getfontsize
 local getcustomasset = vape.Libraries.getcustomasset
+
+-- Is Pistonware's menu open: newgui's field (safe from any thread), the Instance only as fallback.
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
 
 local function priorityRank(entity, mode)
 	local isPlayer = entity and entity.Player ~= nil
@@ -273,25 +287,85 @@ store.enchants = setmetatable({}, {
 	end
 })
 
-local function addBlur(parent)
-	local blur = Instance.new('ImageLabel')
-	blur.Name = 'Blur'
-	blur.Size = UDim2.new(1, 89, 1, 52)
-	blur.Position = UDim2.fromOffset(-48, -31)
-	blur.BackgroundTransparency = 1
-	--[[ No blur rather than an error. getcustomasset is missing or refuses on some executors,
-	and the GUI only downloads this asset where it uses assets itself -- never on a touch
-	device -- so there the file is not there to load. Unguarded, that threw inside every
-	caller after it had already parented its billboard: KitESP's came out empty and its loop
-	died with it. ]]
-	local ok, image = pcall(function()
-		return getcustomasset('pistonware/assets/new/blur.png')
-	end)
-	blur.Image = ok and type(image) == 'string' and image or ''
-	blur.ScaleType = Enum.ScaleType.Slice
-	blur.SliceCenter = Rect.new(52, 31, 261, 502)
-	blur.Parent = parent
-	return blur
+--[[ Fly and TestFly's Heatseeker both stop your balloons popping while they fly. Each used to
+save and put back deflateBalloon on its own, so with both on, whichever turned off last put the
+other's no-op back and balloons stayed unpoppable until rejoin. They share one counted hold:
+the first takes the original, the last gives it back. ]]
+do
+	local holds, original = 0, nil
+	local function noPop() end
+
+	function store.holdBalloons(hold)
+		local controller = bedwars.BalloonController
+		if not controller then return end
+		if hold then
+			if holds == 0 then
+				original = controller.deflateBalloon
+				controller.deflateBalloon = noPop
+			end
+			holds += 1
+		elseif holds > 0 then
+			holds -= 1
+			if holds == 0 then
+				controller.deflateBalloon = original
+				original = nil
+			end
+		end
+	end
+end
+
+--[[ The loader's look, for what this file draws on the HUD and in the world, as the TP Down bar
+and the AutoBank box already are: the loader window's near-black with a tenth of its orange
+through it, part see-through, a soft orange border and rounded corners. Text is the menu's Inter
+in the loader's light grey, labels in its secondary grey. ]]
+local loaderStyle = {
+	Orange = Color3.fromRGB(240, 122, 31),
+	Text = Color3.fromRGB(230, 230, 230),
+	SubText = Color3.fromRGB(163, 161, 157),
+	-- What a button or a slot sits on inside a box, and its border: the loader's own buttons.
+	Button = Color3.fromRGB(18, 18, 18),
+	ButtonBorder = Color3.fromRGB(60, 60, 60),
+	Transparency = 0.3
+}
+loaderStyle.Background = Color3.fromRGB(10, 10, 10):Lerp(loaderStyle.Orange, 0.1)
+-- The background as colour-slider defaults, so a box with a colour option starts on it.
+loaderStyle.Hue, loaderStyle.Sat, loaderStyle.Value = loaderStyle.Background:ToHSV()
+loaderStyle.SubHex = '#'..loaderStyle.SubText:ToHex()
+
+function loaderStyle.corner(obj, radius)
+	local corner = Instance.new('UICorner')
+	corner.CornerRadius = typeof(radius) == 'UDim' and radius or UDim.new(0, radius or 8)
+	corner.Parent = obj
+	return corner
+end
+
+function loaderStyle.stroke(obj, strokeColor, transparency, thickness)
+	local stroke = Instance.new('UIStroke')
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Color = strokeColor or loaderStyle.Orange
+	stroke.Thickness = thickness or 1
+	stroke.Transparency = transparency or 0.55
+	stroke.Parent = obj
+	return stroke
+end
+
+function loaderStyle.box(obj, radius)
+	obj.BackgroundColor3 = loaderStyle.Background
+	obj.BackgroundTransparency = loaderStyle.Transparency
+	obj.BorderSizePixel = 0
+	loaderStyle.corner(obj, radius)
+	return loaderStyle.stroke(obj)
+end
+
+-- Inter through the font registry, so the label follows it if it finishes loading late.
+function loaderStyle.text(label, role, textColor)
+	label.TextColor3 = textColor or loaderStyle.Text
+	label.TextStrokeTransparency = 1
+	local fonts = vape.Libraries.fonts
+	if fonts and fonts.track then
+		fonts.track(label, role or 'Medium')
+	end
+	return label
 end
 
 local function collection(tags, module, customadd, customremove)
@@ -2834,6 +2908,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	geometry, so a ray reports chunk parts instead of the block the store hands back and
 	cannot tell a target apart from whatever covers it.
 
+	The march carries on past that first block to the spot, adding up the hits every block
+	on the line will take, so clearShot can tell a line with one wool block left in it from
+	one through end stone. The first block is still what gets returned.
+
 	t runs 0 at the player to 1 at the dig spot: next* is the t at which the march crosses
 	into the following cell on that axis, delta* is the t one whole cell costs there, and an
 	axis the line does not move along never comes up for its turn. ]]
@@ -2846,7 +2924,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 
 	local function frontOf(worldpos)
-		if not entitylib.isAlive then return worldpos end
+		if not entitylib.isAlive then return worldpos, false, 0 end
 
 		--[[ From the head, not the root: it is the eye line that decides what is reachable, and
 		a root at foot height reads a floor block as cover when nothing is in the way. ]]
@@ -2862,6 +2940,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 
 		--[[ 30 studs of reach is ten cells, and a diagonal line crosses at most one boundary per
 		axis per cell, so this cannot run out before the spot does. ]]
+		local first, cost = nil, 0
 		for _ = 1, 40 do
 			--[[ every axis past its last boundary: the spot itself is the next thing on the line ]]
 			if nextx > 1 and nexty > 1 and nextz > 1 then break end
@@ -2879,17 +2958,39 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 
 			local block = getPlacedBlock(cell * 3)
 			if block then
-				--[[ Something unbreakable on the line means there is no shot at this spot at
-				all, and naming it would only send the break at a block that never yields.
-				Hand the spot back unchanged, and say so: 'nothing in the way' and 'no way
-				through' arrive as the same spot otherwise, and the caller has to tell a
-				clear shot from a sealed one. ]]
-				if isProtectedBlock(block, cell * 3) then return worldpos, true end
-				return cell * 3
+				--[[ Something unbreakable on the line, in front or behind the first block,
+				means this line never clears, and naming its first block would only send the
+				break at cover with no way past it. Hand the spot back unchanged, and say so:
+				'nothing in the way' and 'no way through' arrive as the same spot otherwise,
+				and the caller has to tell a clear shot from a sealed one. ]]
+				if isProtectedBlock(block, cell * 3) then return worldpos, true, math.huge end
+				first = first or cell * 3
+				--[[ Guarded: this prices every block on the line now, not only blocks the
+				path search reached, and a block with no health to read must cost something
+				rather than throw out of the whole break. ]]
+				local ok, hits = pcall(getBlockHits, block, cell * 3)
+				cost += (ok and type(hits) == 'number') and hits or 1
 			end
 		end
 
-		return worldpos
+		return first or worldpos, false, cost
+	end
+
+	--[[ The points inside a cell a line from the player is tried against, as clearShot below
+	describes. ]]
+	local function aimOffsets(origin, pos)
+		local toward = origin - pos
+		local offsets = {Vector3.zero, Vector3.new(0, 1.4, 0)}
+		if math.abs(toward.X) > 0.01 then
+			table.insert(offsets, Vector3.new(math.sign(toward.X) * 1.4, 0, 0))
+		end
+		if math.abs(toward.Z) > 0.01 then
+			table.insert(offsets, Vector3.new(0, 0, math.sign(toward.Z) * 1.4))
+		end
+		if toward.Y < 0 then
+			table.insert(offsets, Vector3.new(0, -1.4, 0))
+		end
+		return offsets
 	end
 
 	--[[ Is there a clear line onto this cell from ANY of its visible faces?
@@ -2901,37 +3002,66 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	player are each tried, kept 1.4 studs in so every point still lies inside the same cell;
 	any one of them with nothing in the way means the target itself can be hit.
 
-	Returns the spot to strike and whether the way is sealed, the same pair frontOf returns,
-	and falls back to frontOf's answer for the centre when every line is blocked. ]]
+	Returns the spot to strike and whether the way is sealed. When every line is blocked, the
+	way in is the line that takes the fewest hits to clear, and its first block is what gets
+	struck. The centre line used to decide alone: grazing the end stone over a hole it sent
+	six hits there while the line onto the near face had one wool block left in it, and with
+	a map wall on it it called the spot sealed though the top was only behind wool. Fewest
+	hits also keeps a block that is part-way broken in front, it being the cheaper one. A
+	line with anything unbreakable on it never clears and does not count; only when that is
+	every line is the way sealed. ]]
 	local function clearShot(pos)
 		if not entitylib.isAlive then return pos, false end
 		local head = entitylib.character.Head
 		local origin = (head and head.Position) or entitylib.character.RootPart.Position
-		local toward = origin - pos
+		local offsets = aimOffsets(origin, pos)
 
-		local offsets = {Vector3.zero, Vector3.new(0, 1.4, 0)}
-		if math.abs(toward.X) > 0.01 then
-			table.insert(offsets, Vector3.new(math.sign(toward.X) * 1.4, 0, 0))
-		end
-		if math.abs(toward.Z) > 0.01 then
-			table.insert(offsets, Vector3.new(0, 0, math.sign(toward.Z) * 1.4))
-		end
-		if toward.Y < 0 then
-			table.insert(offsets, Vector3.new(0, -1.4, 0))
-		end
-
-		local firstFront, firstSealed
+		local front, sealed, best
 		for i, offset in offsets do
 			local point = pos + offset
-			local front, sealed = frontOf(point)
-			if front == point and not sealed then
+			local first, blocked, cost = frontOf(point)
+			if first == point and not blocked then
 				return pos, false
 			end
 			if i == 1 then
-				firstFront, firstSealed = front, sealed
+				front, sealed = first, blocked
+			end
+			if not blocked and (not best or cost < best) then
+				front, sealed, best = first, false, cost
 			end
 		end
-		return firstFront, firstSealed
+		return front, sealed
+	end
+
+	--[[ Does any of the lines clearShot tries onto pos pass through this cell, or within
+	`margin` studs of it? A slab test against the cell's cube grown by the margin; the margin
+	is what lets a line that wobbles off the cell's edge with the head still count. ]]
+	local AXES = {'X', 'Y', 'Z'}
+	local function inTheWay(cell, pos, margin)
+		local head = entitylib.character.Head
+		local origin = (head and head.Position) or entitylib.character.RootPart.Position
+		local center, half = cell * 3, 1.5 + margin
+		for _, offset in aimOffsets(origin, pos) do
+			local point = pos + offset
+			local tmin, tmax = 0, 1
+			for _, axis in AXES do
+				local from, delta = origin[axis], point[axis] - origin[axis]
+				local lo, hi = center[axis] - half, center[axis] + half
+				if math.abs(delta) < 1e-6 then
+					if from < lo or from > hi then
+						tmin = math.huge
+						break
+					end
+				else
+					local t1, t2 = (lo - from) / delta, (hi - from) / delta
+					if t1 > t2 then t1, t2 = t2, t1 end
+					tmin, tmax = math.max(tmin, t1), math.min(tmax, t2)
+					if tmin > tmax then break end
+				end
+			end
+			if tmin <= tmax then return true end
+		end
+		return false
 	end
 
 	--[[ Suppressing the place-block animation has to be re-entrancy safe.
@@ -3006,8 +3136,14 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	  instead of equipping it directly. The correct tool is equipped either way -- this
 	  only decides which route gets used.
 	The ranking matters: picking purely by hit count can settle on a spot on the far side
-	of the block, and the 30-stud guard below then aborts the break outright. ]]
-	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method, autotool)
+	of the block, and the 30-stud guard below then aborts the break outright.
+	pin: a table the caller keeps from one call to the next. The cell a hit lands on is
+	  remembered in it and struck again next call while it still stands, can still be hit
+	  and the block asked for has not come open itself, so the hits go into one block until
+	  it comes out. nil picks afresh each call as before.
+	Returns pos, path, target when effects is set, and a fourth value, true, whenever a hit
+	  was actually sent, so a caller can tell a swing from a call that found nothing to hit. ]]
+	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method, autotool, pin)
 		if lplr:GetAttribute('DenyBlockBreak') or not entitylib.isAlive then return end
 		local handler = bedwars.BlockController:getHandlerRegistry():getHandler(block.Name)
 		local cost, pos, target, path = math.huge
@@ -3056,6 +3192,37 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			end
 		end
 
+		--[[ Finish what was started. With Block Check the spot is often out of sight, and what
+		gets hit is whatever stands in front of it -- which changes with every bob of the head
+		and every step, so the hits got spread over the blocks round a hole with none of them
+		coming out. So the block last struck stays the target while it is still there, nothing
+		protects it, it is in reach, it can be hit directly, and it is still in the way of the
+		spot, give or take a stud for the head moving. A spot that can be hit directly is taken
+		over it: those hits are never wasted, the spot is on the way in. So is a spot that has
+		moved off it altogether -- a cheaper way in through a hole just made, you walking round
+		to another side. The block asked for coming open ends it too. ]]
+		local pinned = false
+		if pin then
+			if pin.block == block and pin.cell and pos and not (open and direct) then
+				local spot = pin.cell * 3
+				local part = getPlacedBlock(spot)
+				if part and part == pin.part and not isProtectedBlock(part, spot)
+					and (entitylib.character.RootPart.Position - spot).Magnitude <= 30
+					and (spot == pos or (not open and inTheWay(pin.cell, pos, 0.75))) then
+					local front, sealed = spot, false
+					if blockcheck then
+						front, sealed = clearShot(spot)
+					end
+					if not sealed and front == spot then
+						pos, path, pinned = spot, nil, true
+					end
+				end
+			end
+			if not pinned then
+				pin.block, pin.cell, pin.part = nil, nil, nil
+			end
+		end
+
 		--[[ Block Check. The spot chosen above is picked by the selected metric, but it can sit
 		behind the cover (an air face under the bed, or one on its far side, or a cell up on
 		top of a mound) and hitting it there is what reads as mining straight through the
@@ -3069,7 +3236,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		wall. There is nothing to lose by asking every time: a spot already at the front of
 		the line is what the march meets first, so it hands back exactly that spot. An open
 		bed you can see is hit; the same bed with wool in front of it gets the wool stripped. ]]
-		if blockcheck and pos then
+		if blockcheck and pos and not pinned then
 			local front, sealed = clearShot(pos)
 			--[[ Something that must not be broken -- our own bed, a NoBreak block -- stands in
 			every line. There is no shot, and hitting the spot anyway is swinging through it. ]]
@@ -3152,12 +3319,23 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 				blockhealthbar.breakingBlockPosition = dpos
 			end
 
+			if pin then
+				pin.block, pin.cell, pin.part = block, dpos, dblock
+			end
+
 			bedwars.ClientDamageBlock:Get('DamageBlock'):CallServerAsync({
 				blockRef = {blockPosition = dpos},
 				hitPosition = pos,
 				hitNormal = Vector3.FromNormalId(Enum.NormalId.Top)
 			}):andThen(function(result)
+				-- The answer can land after a reinject tore this session down (bedwars emptied).
+				if vape.Loaded == nil or not bedwars.BlockController then return end
 				if result then
+					--[[ The server would not take a hit there: stop coming back to it. ]]
+					if pin and pin.cell == dpos and (result == 'cancelled' or result == 'failed') then
+						pin.block, pin.cell, pin.part = nil, nil, nil
+					end
+
 					if result == 'cancelled' then
 						store.damageBlockFail = os.clock() + 1
 						return
@@ -3191,10 +3369,15 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			end)
 
 			if effects then
-				return pos, path, target
+				return pos, path, target, true
 			end
+			return nil, nil, nil, true
 		end
 	end
+
+	--[[ Tells a caller this breakBlock reports a sent hit as its fourth value; one from before
+	that returns nothing there whether it swung or not. ]]
+	bedwars.breakBlockReportsHit = true
 
 	for _, v in Enum.NormalId:GetEnumItems() do
 		table.insert(sides, Vector3.FromNormalId(v) * 3)
@@ -3792,6 +3975,11 @@ run(function()
 
 	AimAssist = vape.Categories.Combat:CreateModule({
 		Name = 'AimAssist',
+		ExtraText = function()
+			if not AimSpeed then return nil end
+			local low, high = AimSpeed.ValueMin, AimSpeed.ValueMax
+			return low == high and tostring(low) or low..'-'..high
+		end,
 		Function = function(callback)
 			if not callback then
 				--[[ nothing is going to strip it back off once we stop writing the camera,
@@ -3809,7 +3997,7 @@ run(function()
 					-- launcher; a phone has no held button to read, so it always counts there.
 					local projectile
 					if store.hand.toolType == 'sword' then
-						if ClickAim.Enabled and (os.clock() - bedwars.SwordController.lastSwing) >= 0.4 then return end
+						if ClickAim.Enabled and (tick() - bedwars.SwordController.lastSwing) >= 0.4 then return end
 					else
 						projectile = Projectiles.Enabled and heldProjectile()
 						if not projectile then return end
@@ -3847,17 +4035,28 @@ run(function()
 					end))
 				end
 			end,
-		Tooltip = 'Smoothly pulls your aim onto the closest target while you have a sword out,\nand with Projectiles on, onto where your shot will land'
+		Tooltip = 'Pulls your aim towards nearby enemies.\nWorks with swords, plus bows and launchers if turned on.'
 	})
-	Targets = AimAssist:CreateTargets({
-		Players = true,
-		Walls = true
+	AimAssist:CreateDivider({Text = 'Aim'})
+	AimSpeed = AimAssist:CreateTwoSlider({
+		Name = 'Aim Speed',
+		DisplayName = 'Horizontal speed',
+		Min = 1,
+		Max = 20,
+		DefaultMin = 6,
+		DefaultMax = 6,
+		Tooltip = 'How hard it pulls. Set a range and the pull varies within it.'
 	})
-	TargetPriority = AimAssist:CreateDropdown({
-		Name = 'Target Priority',
-		List = {'Players first', 'NPCs first', 'Closest'},
-		Default = 'Players first'
+	Shake = AimAssist:CreateSlider({
+		Name = 'Shake',
+		DisplayName = 'Randomization',
+		Min = 0,
+		Max = 100,
+		Default = 0,
+		Suffix = '%',
+		Tooltip = 'Adds a bit of random wobble to your aim.\n0 is dead centre, 100 is a full 5 degrees off.'
 	})
+	AimAssist:CreateDivider({Text = 'Target'})
 	local methods = {'Damage', 'Distance'}
 	for i in sortmethods do
 		if not table.find(methods, i) then
@@ -3866,18 +4065,12 @@ run(function()
 	end
 	Sort = AimAssist:CreateDropdown({
 		Name = 'Target Mode',
+		DisplayName = 'Sort by',
 		List = methods
-	})
-	AimSpeed = AimAssist:CreateTwoSlider({
-		Name = 'Aim Speed',
-		Min = 1,
-		Max = 20,
-		DefaultMin = 6,
-		DefaultMax = 6,
-		Tooltip = 'How hard it pulls. Set a range and the pull varies within it.'
 	})
 	Distance = AimAssist:CreateSlider({
 		Name = 'Distance',
+		DisplayName = 'Range',
 		Min = 1,
 		Max = 30,
 		Default = 30,
@@ -3888,21 +4081,26 @@ run(function()
 	})
 	AngleSlider = AimAssist:CreateSlider({
 		Name = 'Max angle',
+		DisplayName = 'FOV',
 		Min = 1,
 		Max = 360,
 		Default = 70
 	})
-	Shake = AimAssist:CreateSlider({
-		Name = 'Shake',
-		Min = 0,
-		Max = 100,
-		Default = 0,
-		Suffix = '%',
-		Tooltip = 'Adds a bit of random wobble to your aim.\n0 is dead centre, 100 is a full 5 degrees off.'
-	})
+	AimAssist:CreateDivider({Text = 'Conditions'})
 	ClickAim = AimAssist:CreateToggle({
 		Name = 'Click Aim',
+		DisplayName = 'Mouse pressed',
 		Default = true
+	})
+	Targets = AimAssist:CreateTargets({
+		Players = true,
+		Walls = true
+	})
+	AimAssist:CreateDivider({Text = 'Extras'})
+	TargetPriority = AimAssist:CreateDropdown({
+		Name = 'Target Priority',
+		List = {'Players first', 'NPCs first', 'Closest'},
+		Default = 'Players first'
 	})
 	KillauraTarget = AimAssist:CreateToggle({
 		Name = 'Use killaura target'
@@ -3939,18 +4137,19 @@ run(function()
 	
 	vape.Categories.Combat:CreateModule({
 		Name = 'NoClickDelay',
+		DisplayName = 'No Hit Delay',
 		Function = function(callback)
 			if callback then
 				old = bedwars.SwordController.isClickingTooFast
 				bedwars.SwordController.isClickingTooFast = function(self)
-					self.lastSwing = os.clock()
+					self.lastSwing = tick()
 					return false
 				end
 			else
 				bedwars.SwordController.isClickingTooFast = old
 			end
 		end,
-		Tooltip = 'Takes the CPS cap off'
+		Tooltip = 'Lets you swing your sword as fast as you click.'
 	})
 end)
 	
@@ -4095,6 +4294,9 @@ run(function()
 
 	Reach = vape.Categories.Combat:CreateModule({
 		Name = 'Reach',
+		ExtraText = function()
+			return Value and tostring(Value.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				originalSwordReach = originalSwordReach or bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE
@@ -4109,10 +4311,11 @@ run(function()
 				stopPlaceReach()
 			end
 		end,
-		Tooltip = 'Lets you hit from further away'
+		Tooltip = 'Lets you hit enemies from further away.\nCan also extend how far away you can place blocks.'
 	})
 	Value = Reach:CreateSlider({
 		Name = 'Range',
+		DisplayName = 'Distance',
 		Min = 0,
 		Max = 18,
 		Default = 18,
@@ -4125,6 +4328,7 @@ run(function()
 			return val == 1 and 'stud' or 'studs'
 		end
 	})
+	Reach:CreateDivider({Text = 'Extras'})
 	AirChance = Reach:CreateTwoSlider({
 		Name = 'Air Hit Chance',
 		Min = 0,
@@ -4307,6 +4511,7 @@ run(function()
 
 	NightmareEmote = vape.Categories.Utility:CreateModule({
 		Name = 'NightmareEmote',
+		Tab = 'Visual',
 		Function = function(callback)
 			if not callback then return end
 
@@ -4318,11 +4523,11 @@ run(function()
 			toggle. ]]
 			task.defer(function()
 				if NightmareEmote.Enabled then
-					NightmareEmote:Toggle()
+					NightmareEmote:Toggle(nil, true)
 				end
 			end)
 		end,
-		Tooltip = 'Plays the Nightmare emote on your own client. Move to stop it.'
+		Tooltip = 'Plays the Nightmare emote until you move.'
 	})
 
 	vape:Clean(function() stopEmote() end)
@@ -4334,6 +4539,7 @@ run(function()
 	
 	Sprint = vape.Categories.Combat:CreateModule({
 		Name = 'Sprint',
+		Tab = 'Move',
 		Function = function(callback)
 			if callback then
 				old = bedwars.SprintController.stopSprinting
@@ -4353,7 +4559,7 @@ run(function()
 				bedwars.SprintController:stopSprinting()
 			end
 		end,
-		Tooltip = 'Keeps you sprinting without holding the key.'
+		Tooltip = 'Automatically sprints for you.'
 	})
 end)
 	
@@ -4365,6 +4571,11 @@ run(function()
 
 	TriggerBot = vape.Categories.Combat:CreateModule({
 		Name = 'TriggerBot',
+		ExtraText = function()
+			if not CPS then return nil end
+			local low, high = CPS.ValueMin, CPS.ValueMax
+			return (low == high and tostring(low) or low..'-'..high)..' cps'
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -4406,7 +4617,7 @@ run(function()
 				until not TriggerBot.Enabled
 			end
 		end,
-		Tooltip = 'Swings on its own when your cursor is over someone'
+		Tooltip = 'Swings your sword for you when an enemy is in reach.\nSet the click speed, and pause it while you are AFK.'
 	})
 	CPS = TriggerBot:CreateTwoSlider({
 		Name = 'CPS',
@@ -4432,6 +4643,10 @@ run(function()
 
 	Velocity = vape.Categories.Combat:CreateModule({
 		Name = 'Velocity',
+		ExtraText = function()
+			if not (Horizontal and Vertical) then return nil end
+			return Horizontal.Value..'% '..Vertical.Value..'%'
+		end,
 		Function = function(callback)
 			if callback then
 				old = bedwars.KnockbackUtil.applyKnockback
@@ -4465,21 +4680,7 @@ run(function()
 				bedwars.KnockbackUtil.applyKnockback = old
 			end
 		end,
-		Tooltip = 'Takes some of the knockback off you'
-	})
-	Horizontal = Velocity:CreateSlider({
-		Name = 'Horizontal',
-		Min = 0,
-		Max = 100,
-		Default = 0,
-		Suffix = function(val) return '%' end
-	})
-	Vertical = Velocity:CreateSlider({
-		Name = 'Vertical',
-		Min = 0,
-		Max = 100,
-		Default = 0,
-		Suffix = function(val) return '%' end
+		Tooltip = 'Reduces the amount of knockback you take.'
 	})
 	Chance = Velocity:CreateTwoSlider({
 		Name = 'Chance',
@@ -4488,6 +4689,22 @@ run(function()
 		DefaultMin = 100,
 		DefaultMax = 100,
 		Tooltip = 'Percent of hits whose knockback gets reduced. Each hit rolls its chance from this range.'
+	})
+	Horizontal = Velocity:CreateSlider({
+		Name = 'Horizontal',
+		DisplayName = 'Reduce to',
+		Min = 0,
+		Max = 100,
+		Default = 0,
+		Suffix = function(val) return '%' end
+	})
+	Velocity:CreateDivider({Text = 'Extras'})
+	Vertical = Velocity:CreateSlider({
+		Name = 'Vertical',
+		Min = 0,
+		Max = 100,
+		Default = 0,
+		Suffix = function(val) return '%' end
 	})
 	TargetCheck = Velocity:CreateToggle({Name = 'Only when targeting'})
 	AFKCheck = Velocity:CreateToggle({
@@ -4558,7 +4775,7 @@ run(function()
 			end)
 			NoFall:Clean(groundHitConnection)
 		end,
-		Tooltip = 'Reports a low landing velocity before fall damage is applied.'
+		Tooltip = 'Prevents you from taking fall damage.'
 	})
 end)
 ]]
@@ -4610,6 +4827,9 @@ run(function()
 
 	AntiFall = vape.Categories.Blatant:CreateModule({
 		Name = 'AntiFall',
+		ExtraText = function()
+			return Mode and Mode.Value or nil
+		end,
 		Function = function(callback)
 			if callback then
 				repeat task.wait(0.1) until store.matchState ~= 0 or (not AntiFall.Enabled)
@@ -4696,7 +4916,7 @@ run(function()
 				clearAutoWinAntiFallPriority()
 			end
 		end,
-		Tooltip = 'Helps you with your Parkinsons.\nCatches you before you go into the void.'
+		Tooltip = 'Catches you before you fall into the void.\nCan guide you back to land, bounce you up or act as a floor.'
 	})
 	Mode = AntiFall:CreateDropdown({
 		Name = 'Move Mode',
@@ -4808,6 +5028,13 @@ run(function()
 
 	FastBreak = vape.Categories.Blatant:CreateModule({
 		Name = 'FastBreak',
+		ExtraText = function()
+			if not Time then return nil end
+			if Time.Value <= 0 then return 'Instant' end
+			return string.format('%.2fx', VANILLA_COOLDOWN / Time.Value)
+		end,
+		DisplayName = 'Fast Mine',
+		Tab = 'Block',
 		Function = function(callback)
 			if callback then
 				repeat
@@ -4828,7 +5055,7 @@ run(function()
 				bedwars.BlockBreakController.blockBreaker:setCooldown(VANILLA_COOLDOWN)
 			end
 		end,
-		Tooltip = 'Cuts down the cooldown between block hits'
+		Tooltip = 'Increases block mining speed.\nCan leave beds, ores, hives and crops at normal speed.'
 	})
 	Time = FastBreak:CreateSlider({
 		Name = 'Break speed',
@@ -4838,6 +5065,7 @@ run(function()
 		Decimal = 100,
 		Suffix = function(val) return 's' end
 	})
+	FastBreak:CreateDivider({Text = 'Extras'})
 	BlacklistBeds = FastBreak:CreateToggle({
 		Name = 'Blacklist Bed',
 		Tooltip = 'Leaves beds at normal breaking speed'
@@ -4990,7 +5218,7 @@ run(function()
 
 	local function zephyrReady()
 		local controller = bedwars.WindWalkerController
-		return store.equippedKit == 'wind_walker'
+		return store.hasKit('wind_walker')
 			and controller ~= nil
 			and controller.doubleJumpActive == true
 	end
@@ -5075,7 +5303,7 @@ run(function()
 				0
 			))
 		end,
-		Tooltip = 'Uses a Zephyr air jump just before TPDown Air Time expires'
+		Tooltip = 'Uses Zephyr air jumps to keep you in the air longer.\nTimes each jump for just before TPDown air time ends.'
 	})
 
 	LeadTime = AutoZephyr:CreateSlider({
@@ -5104,8 +5332,9 @@ run(function()
 			frictionTable.Fly = callback or nil
 			updateVelocity()
 			if callback then
-				up, down, old = 0, 0, bedwars.BalloonController.deflateBalloon
-				bedwars.BalloonController.deflateBalloon = function() end
+				up, down = 0, 0
+				old = true
+				store.holdBalloons(true)
 
 				if lplr.Character and (lplr.Character:GetAttribute('InflatedBalloons') or 0) == 0 and getItem('balloon') then
 					bedwars.BalloonController:inflateBalloon()
@@ -5168,7 +5397,10 @@ run(function()
 					end)
 				end
 			else
-				bedwars.BalloonController.deflateBalloon = old
+				if old then
+					old = nil
+					store.holdBalloons(false)
+				end
 				if PopBalloons.Enabled and entitylib.isAlive and (lplr.Character:GetAttribute('InflatedBalloons') or 0) > 0 then
 					for _ = 1, 3 do
 						bedwars.BalloonController:deflateBalloon()
@@ -5179,7 +5411,7 @@ run(function()
 		ExtraText = function()
 			return 'Heatseeker'
 		end,
-		Tooltip = 'Moves you faster than your walk speed allows'
+		Tooltip = 'Lets you fly around freely.\nRise with jump and sink with Shift; can use and pop your balloon.'
 	})
 
 	Value = Fly:CreateSlider({
@@ -5389,8 +5621,8 @@ run(function()
 
 	local function startFlightMode(context)
 		up, down = 0, 0
-		context.State.oldDeflate = bedwars.BalloonController.deflateBalloon
-		bedwars.BalloonController.deflateBalloon = function() end
+		context.State.oldDeflate = true
+		store.holdBalloons(true)
 
 		if lplr.Character and (lplr.Character:GetAttribute('InflatedBalloons') or 0) == 0 and getItem('balloon') then
 			bedwars.BalloonController:inflateBalloon()
@@ -5404,9 +5636,9 @@ run(function()
 	end
 
 	local function endFlightMode(context, reason)
-		local oldDeflate = context.State and context.State.oldDeflate
-		if oldDeflate then
-			bedwars.BalloonController.deflateBalloon = oldDeflate
+		if context.State and context.State.oldDeflate then
+			context.State.oldDeflate = nil
+			store.holdBalloons(false)
 		end
 
 		if reason == 'disable' and PopBalloons.Enabled and entitylib.isAlive and lplr.Character and (lplr.Character:GetAttribute('InflatedBalloons') or 0) > 0 then
@@ -5830,7 +6062,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Copy of Fly for testing custom flight modes and lifecycle hooks'
+		Tooltip = 'Lets you fly using experimental flight modes.\nChoose Heatseeker, bounce, vertical clip or jump flight.'
 	})
 
 	ModeContext.Module = TestFly
@@ -6122,6 +6354,11 @@ run(function()
 	
 	HitBoxes = vape.Categories.Blatant:CreateModule({
 		Name = 'HitBoxes',
+		ExtraText = function()
+			return Expand and tostring(Expand.Value) or nil
+		end,
+		DisplayName = 'Hitboxes',
+		Tab = 'Combat',
 		Function = function(callback)
 			if callback then
 				if Mode.Value == 'Sword' then
@@ -6150,21 +6387,11 @@ run(function()
 				table.clear(objects)
 			end
 		end,
-		Tooltip = 'Grows the hitbox you attack into'
-	})
-	Mode = HitBoxes:CreateDropdown({
-		Name = 'Mode',
-		List = {'Sword', 'Player'},
-		Function = function()
-			if HitBoxes.Enabled then
-				HitBoxes:Toggle()
-				HitBoxes:Toggle()
-			end
-		end,
-		Tooltip = 'Sword - widens the range you can hit people from\nPlayer - grows the players own hitboxes'
+		Tooltip = 'Makes other players easier to hit.\nEither widens your sword swing or grows their hitboxes.'
 	})
 	Expand = HitBoxes:CreateSlider({
 		Name = 'Expand amount',
+		DisplayName = 'Expand',
 		Min = 0,
 		Max = 14.4,
 		Default = 14.4,
@@ -6184,6 +6411,18 @@ run(function()
 			return val == 1 and 'stud' or 'studs'
 		end
 	})
+	HitBoxes:CreateDivider({Text = 'Extras'})
+	Mode = HitBoxes:CreateDropdown({
+		Name = 'Mode',
+		List = {'Sword', 'Player'},
+		Function = function()
+			if HitBoxes.Enabled then
+				HitBoxes:Toggle(nil, true)
+				HitBoxes:Toggle(nil, true)
+			end
+		end,
+		Tooltip = 'Sword - widens the range you can hit people from\nPlayer - grows the players own hitboxes'
+	})
 end)
 	
 	
@@ -6194,7 +6433,7 @@ run(function()
 			debug.setconstant(bedwars.SprintController.startSprinting, 5, callback and 'blockSprinting' or 'blockSprint')
 			bedwars.SprintController:stopSprinting()
 		end,
-		Tooltip = 'Lets you keep sprinting while a speed potion is up.'
+		Tooltip = 'Keeps your sprint speed when attacking players.'
 	})
 end)
 
@@ -6206,6 +6445,7 @@ run(function()
 	
 	SafeWalk = vape.Categories.World:CreateModule({
 		Name = 'SafeWalk',
+		Tab = 'Move',
 		Function = function(callback)
 			if callback then
 				if not module then
@@ -6238,7 +6478,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Stops you walking off the edge of a block'
+		Tooltip = 'Prevents you from walking off ledges.'
 	})
 end)
 
@@ -6247,6 +6487,7 @@ run(function()
 	
 	vape.Categories.Blatant:CreateModule({
 		Name = 'NoSlowdown',
+		DisplayName = 'No Slow',
 		Function = function(callback)
 			local modifier = bedwars.SprintController:getMovementStatusModifier()
 			if callback then
@@ -6268,7 +6509,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Keeps you at full speed while youre using items.'
+		Tooltip = 'Removes slowdown while using items.'
 	})
 end)
 	
@@ -6358,7 +6599,7 @@ run(function()
 		ExtraText = function()
 			return 'Heatseeker'
 		end,
-		Tooltip = 'Speeds you up. Pick whichever method works best for you.'
+		Tooltip = 'Makes you move faster than normal.\nCan also jump for you while you fight, or all the time.'
 	})
 	--[[ First in the list because it changes what the slider below is measured against. ]]
 	Mode = Speed:CreateDropdown({
@@ -6411,6 +6652,7 @@ run(function()
 	local Distance
 	local DistanceLimit
 	local Reference = {}
+	local menuHidden = false
 
 	--[[ Drawn with the Drawing library, like ESP, rather than adornments in Pistonware's GUI:
 	nothing is parented anywhere, so there is no GUI permission for an executor to refuse, and
@@ -6624,6 +6866,17 @@ run(function()
 	end
 
 	local function render()
+		-- Hidden once while the menu is open; the first frame after it closes draws them again.
+		if clickGuiOpen() then
+			if not menuHidden then
+				for _, ref in Reference do
+					pcall(hide, ref)
+				end
+				menuHidden = true
+			end
+			return
+		end
+		menuHidden = false
 		local camera = workspace.CurrentCamera
 		local rootPos = entitylib.isAlive and entitylib.character.RootPart.Position
 		local now = os.clock()
@@ -6727,13 +6980,14 @@ run(function()
 
 	local function restart()
 		if BedESP.Enabled then
-			BedESP:Toggle()
-			BedESP:Toggle()
+			BedESP:Toggle(nil, true)
+			BedESP:Toggle(nil, true)
 		end
 	end
 
 	BedESP = vape.Categories.Render:CreateModule({
 		Name = 'BedESP',
+		DisplayName = 'Block ESP',
 		Function = function(callback)
 			if callback then
 				-- Checked by use, not by type: some executors hand Drawing over as userdata.
@@ -6776,7 +7030,38 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Shows beds through walls, with their team and how much health is left'
+		Tooltip = 'Shows beds through walls with their team and health.\nPick a 2D or 3D box, colors, labels and range.'
+	})
+	Distance = BedESP:CreateToggle({
+		Name = 'Distance Check',
+		Function = function(callback)
+			DistanceLimit.Object.Visible = callback
+		end
+	})
+	DistanceLimit = BedESP:CreateTwoSlider({
+		Name = 'Bed Distance',
+		DisplayName = 'Range',
+		Min = 0,
+		Max = 1024,
+		DefaultMin = 0,
+		DefaultMax = 512,
+		Darker = true,
+		Visible = false
+	})
+	Color = BedESP:CreateColorSlider({
+		Name = 'Bed Color',
+		Function = function()
+			recolor()
+		end
+	})
+	BedESP:CreateDivider({Text = 'Extras'})
+	TeamColor = BedESP:CreateToggle({
+		Name = 'Team Color',
+		Default = true,
+		Function = function()
+			recolor()
+		end,
+		Tooltip = 'Draws each bed in its team colour instead of Bed Color'
 	})
 	Method = BedESP:CreateDropdown({
 		Name = 'Mode',
@@ -6786,20 +7071,6 @@ run(function()
 			BoundingBox.Object.Visible = val == '2D'
 			Filled.Object.Visible = val == '2D' and BoundingBox.Enabled
 		end
-	})
-	Color = BedESP:CreateColorSlider({
-		Name = 'Bed Color',
-		Function = function()
-			recolor()
-		end
-	})
-	TeamColor = BedESP:CreateToggle({
-		Name = 'Team Color',
-		Default = true,
-		Function = function()
-			recolor()
-		end,
-		Tooltip = 'Draws each bed in its team colour instead of Bed Color'
 	})
 	BoundingBox = BedESP:CreateToggle({
 		Name = 'Bounding Box',
@@ -6846,21 +7117,6 @@ run(function()
 		Default = true,
 		Tooltip = 'Hides your own team\'s bed'
 	})
-	Distance = BedESP:CreateToggle({
-		Name = 'Distance Check',
-		Function = function(callback)
-			DistanceLimit.Object.Visible = callback
-		end
-	})
-	DistanceLimit = BedESP:CreateTwoSlider({
-		Name = 'Bed Distance',
-		Min = 0,
-		Max = 1024,
-		DefaultMin = 0,
-		DefaultMax = 512,
-		Darker = true,
-		Visible = false
-	})
 	-- Their Functions fire at creation, before the options they show and hide exist.
 	BoundingBox.Object.Visible = Method.Value == '2D'
 	Filled.Object.Visible = Method.Value == '2D' and BoundingBox.Enabled
@@ -6876,25 +7132,113 @@ end)
 	
 run(function()
 	local Health
-	
+	-- Others drawn just under the crosshair, which this moves below rather than writing over.
+	local CROWD = {'ScaffoldCount', 'PistonwareFlyStatus'}
+
+	-- The menu's green above half, its yellow down to a fifth, its red below, as Target Info.
+	local function healthColor(percent)
+		local theme = vape.Libraries.theme or {}
+		if percent > 0.5 then
+			return theme.Green or Color3.fromRGB(82, 196, 106)
+		elseif percent >= 0.2 then
+			return theme.Yellow or Color3.fromRGB(245, 190, 60)
+		end
+		return theme.Red or Color3.fromRGB(221, 70, 71)
+	end
+
+	local function healthText()
+		local character = entitylib.isAlive and lplr.Character
+		local health = character and tonumber(character:GetAttribute('Health'))
+		if not health then return '' end
+		local maxHealth = tonumber(character:GetAttribute('MaxHealth')) or 100
+		local percent = maxHealth > 0 and math.clamp(health / maxHealth, 0, 1) or 0
+		return math.round(health)..' <font color="#'..healthColor(percent):ToHex()..'">\u{2665}</font>'
+	end
+
+	-- The screen y a label's text actually covers: a zero-size label draws its text centred on its position.
+	local function extent(obj)
+		local top, bottom = obj.AbsolutePosition.Y, obj.AbsolutePosition.Y + obj.AbsoluteSize.Y
+		if obj:IsA('TextLabel') and obj.Text ~= '' then
+			local middle = obj.AbsolutePosition.Y + obj.AbsoluteSize.Y / 2
+			top = math.min(top, middle - obj.TextBounds.Y / 2)
+			bottom = math.max(bottom, middle + obj.TextBounds.Y / 2)
+		end
+		return top, bottom
+	end
+
+	--[[ 30 px under the crosshair, moved down past the Scaffold card or the fly status while either
+	is up there. A short screen has no room under it, so there it sits beside the crosshair. ]]
+	local function place(label)
+		local camera = workspace.CurrentCamera
+		if camera and camera.ViewportSize.Y > 0 and camera.ViewportSize.Y < 450 then
+			label.AnchorPoint = Vector2.new(0, 0.5)
+			label.Position = UDim2.new(0.5, 34, 0.5, 0)
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			return
+		end
+		local centre = vape.gui.AbsolutePosition.Y + vape.gui.AbsoluteSize.Y / 2
+		local offset = 30
+		for _ = 1, 2 do
+			for _, name in CROWD do
+				local other = vape.gui:FindFirstChild(name)
+				if other and other:IsA('GuiObject') and other.Visible then
+					local top, bottom = extent(other)
+					if top < centre + offset + label.AbsoluteSize.Y and bottom > centre + offset then
+						offset = math.ceil(bottom - centre) + 4
+					end
+				end
+			end
+		end
+		label.AnchorPoint = Vector2.new(0.5, 0)
+		label.Position = UDim2.new(0.5, 0, 0.5, offset)
+		label.TextXAlignment = Enum.TextXAlignment.Center
+	end
+
 	Health = vape.Categories.Render:CreateModule({
 		Name = 'Health',
 		Function = function(callback)
 			if callback then
 				local label = Instance.new('TextLabel')
 				label.Size = UDim2.fromOffset(100, 20)
-				label.Position = UDim2.new(0.5, 6, 0.5, 30)
-				label.BackgroundTransparency = 1
+				label.Position = UDim2.new(0.5, 0, 0.5, 30)
 				label.AnchorPoint = Vector2.new(0.5, 0)
-				label.Text = entitylib.isAlive and math.round(lplr.Character:GetAttribute('Health'))..' ❤️' or ''
-				label.TextColor3 = entitylib.isAlive and Color3.fromHSV((lplr.Character:GetAttribute('Health') / lplr.Character:GetAttribute('MaxHealth')) / 2.8, 0.86, 1) or Color3.new()
+				label.BackgroundTransparency = 1
+				label.RichText = true
+				label.Text = healthText()
 				label.TextSize = 18
-				label.Font = Enum.Font.Arial
+				loaderStyle.text(label, 'SemiBold')
+				-- Over the world with no box behind it, so a soft outline keeps it readable.
+				label.TextStrokeColor3 = Color3.new()
+				label.TextStrokeTransparency = 0.6
+				label.Visible = not clickGuiOpen()
 				label.Parent = vape.gui
 				Health:Clean(label)
+				pcall(place, label)
+				Health:Clean(task.spawn(function()
+					if vape.ThreadFix then
+						pcall(setthreadidentity, 8)
+					end
+					repeat
+						task.wait(0.25)
+						pcall(place, label)
+					until not label.Parent
+				end))
+				-- Out of the way while the menu is open, back when it closes.
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				local scaledGui = vape.gui:FindFirstChild('ScaledGui')
+				local clickGui = scaledGui and scaledGui:FindFirstChild('ClickGui')
+				if clickGui then
+					Health:Clean(clickGui:GetPropertyChangedSignal('Visible'):Connect(function()
+						if vape.ThreadFix then
+							setthreadidentity(8)
+						end
+						label.Visible = not clickGui.Visible
+					end))
+				end
 				Health:Clean(vapeEvents.AttributeChanged.Event:Connect(function()
-					label.Text = entitylib.isAlive and math.round(lplr.Character:GetAttribute('Health'))..' ❤️' or ''
-					label.TextColor3 = entitylib.isAlive and Color3.fromHSV((lplr.Character:GetAttribute('Health') / lplr.Character:GetAttribute('MaxHealth')) / 2.8, 0.86, 1) or Color3.new()
+					label.Text = healthText()
 				end))
 			end
 		end,
@@ -6908,6 +7252,8 @@ run(function()
 	local Color = {}
 	local Scale
 	local Reference = {}
+	local Pending = {}
+	local Removing = {}
 	local connections = {}
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
@@ -6923,98 +7269,169 @@ run(function()
 		star_collector = {'stars', 'crit_star'}
 	}
 
-	local function Added(ent, icon)
-		-- Searched deep: a skinned model keeps its parts nested.
-		local part = ent:IsA('BasePart') and ent or ent:IsA('Model') and (ent.PrimaryPart or ent:FindFirstChild('Root') or ent:FindFirstChildWhichIsA('BasePart', true))
-		if not part or Reference[ent] then return end
+	--[[ Every GUI write happens on this module's own thread, never on the tag signals.
 
-		local billboard = Instance.new('BillboardGui')
-		billboard.Name = icon
-		billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
-		billboard.Size = UDim2.fromOffset(36 * Scale.Value, 36 * Scale.Value)
-		billboard.AlwaysOnTop = true
-		billboard.ClipsDescendants = false
-		billboard.Adornee = part
-		billboard.Parent = Folder
-		local blur = addBlur(billboard)
-		blur.Size = UDim2.new(1, 89 * Scale.Value, 1, 52 * Scale.Value)
-		blur.Position = UDim2.fromOffset(-48 * Scale.Value, -31 * Scale.Value)
-		blur.Visible = Background.Enabled
-		local image = Instance.new('ImageLabel')
-		image.Size = UDim2.fromOffset(36 * Scale.Value, 36 * Scale.Value)
-		image.Position = UDim2.fromScale(0.5, 0.5)
-		image.AnchorPoint = Vector2.new(0.5, 0.5)
-		image.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-		image.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
-		image.BorderSizePixel = 0
-		-- An icon the item meta cannot resolve still gets its marker, just without the picture.
-		local iconOk, iconImage = pcall(bedwars.getIcon, {itemType = icon}, true)
-		image.Image = iconOk and type(iconImage) == 'string' and iconImage or ''
-		image.Parent = billboard
-		local uicorner = Instance.new('UICorner')
-		uicorner.CornerRadius = UDim.new(0, 4)
-		uicorner.Parent = image
-		Reference[ent] = billboard
+	The tags are added by the game, on the game's thread (identity 2): an eldertree orb is
+	tagged inside EldertreeController's spawn handler. vape.gui sits in CoreGui or gethui on
+	executors with a settable identity, and a billboard parented there from the game's thread
+	fails. So the signals only note what came and went, and the loop below builds and removes.
+
+	The raise is guarded. vape.ThreadFix only says setthreadidentity exists; on an executor whose
+	ceiling is below 8 an unguarded setthreadidentity(8) throws, and it used to be the first line
+	of the loop, so KitESP stopped before drawing anything. ]]
+	local function raiseIdentity()
+		if not vape.ThreadFix then return end
+		if not pcall(setthreadidentity, 8) then
+			pcall(setthreadidentity, 7)
+		end
+	end
+
+	local function Added(ent, icon)
+		if Reference[ent] or not ent.Parent then return end
+		-- A model streamed in before its parts has nothing to hang the icon on yet; the sweep
+		-- picks it up once one arrives. Searched deep: a skinned model keeps its parts nested.
+		local part = ent:IsA('BasePart') and ent or ent:IsA('Model') and (ent.PrimaryPart or ent:FindFirstChild('Root') or ent:FindFirstChildWhichIsA('BasePart', true))
+		if not part then return end
+
+		local billboard
+		local ok = pcall(function()
+			billboard = Instance.new('BillboardGui')
+			billboard.Name = icon
+			billboard.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+			local size = Scale and Scale.Value or 1
+			billboard.Size = UDim2.fromOffset(36 * size, 36 * size)
+			billboard.AlwaysOnTop = true
+			billboard.ClipsDescendants = false
+			billboard.Adornee = part
+			-- Built hidden while the menu is open; the loop shows it once the menu closes.
+			billboard.Enabled = not clickGuiOpen()
+			billboard.Parent = Folder
+			-- The plate is the loader's box, scaled with the billboard; the icon sits inset in it.
+			local plate = Instance.new('Frame')
+			plate.Name = 'Plate'
+			plate.Size = UDim2.fromScale(1, 1)
+			plate.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+			plate.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
+			plate.BorderSizePixel = 0
+			plate.Parent = billboard
+			loaderStyle.corner(plate, 6)
+			loaderStyle.stroke(plate).Enabled = Background.Enabled
+			local image = Instance.new('ImageLabel')
+			image.Name = 'Icon'
+			image.Size = Background.Enabled and UDim2.fromScale(0.8, 0.8) or UDim2.fromScale(1, 1)
+			image.Position = UDim2.fromScale(0.5, 0.5)
+			image.AnchorPoint = Vector2.new(0.5, 0.5)
+			image.BackgroundTransparency = 1
+			image.BorderSizePixel = 0
+			-- An icon the item meta cannot resolve still gets its marker, just without the picture.
+			local iconOk, iconImage = pcall(bedwars.getIcon, {itemType = icon}, true)
+			image.Image = iconOk and type(iconImage) == 'string' and iconImage or ''
+			image.Parent = plate
+		end)
+		if ok then
+			Reference[ent] = billboard
+		elseif billboard then
+			-- Half built: gone, so the next sweep can try again.
+			pcall(function() billboard:Destroy() end)
+		end
+	end
+
+	local function Removed(ent)
+		local billboard = Reference[ent]
+		Reference[ent] = nil
+		if billboard then
+			pcall(function() billboard:Destroy() end)
+		end
+	end
+
+	local function clearAll()
+		for _, v in connections do
+			v:Disconnect()
+		end
+		table.clear(connections)
+		table.clear(Reference)
+		table.clear(Pending)
+		table.clear(Removing)
+		pcall(function() Folder:ClearAllChildren() end)
 	end
 
 	KitESP = vape.Categories.Render:CreateModule({
 		Name = 'KitESP',
 		Function = function(callback)
+			raiseIdentity()
 			if callback then
-				local current
+				local current, lastHidden
+				local nextSweep = 0
 				repeat
-					-- Every kit you are playing: Kit Fusion's second kit has its own things to find.
-					local kits = store.activeKits()
-					local key = table.concat(kits, ',')
-					if key ~= current then
-						current = key
-						for _, v in connections do
-							v:Disconnect()
+					local now = os.clock()
+					if now >= nextSweep then
+						nextSweep = now + 1
+						-- Every kit you are playing: Kit Fusion's second kit has its own things to find.
+						local kits = store.activeKits()
+						local key = table.concat(kits, ',')
+						if key ~= current then
+							current = key
+							clearAll()
+							for _, name in kits do
+								local kit = ESPKits[name]
+								if kit then
+									table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
+										Removing[ent] = nil
+										Pending[ent] = kit[2]
+									end))
+									table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
+										Pending[ent] = nil
+										Removing[ent] = true
+									end))
+								end
+							end
 						end
-						table.clear(connections)
-						table.clear(Reference)
-						Folder:ClearAllChildren()
-
+						--[[ Once a second, everything tagged that still has no billboard: the whole
+						set on a kit change, models whose parts had not streamed in when they were
+						tagged, and anything a failed build left out. ]]
 						for _, name in kits do
 							local kit = ESPKits[name]
 							if kit then
-								table.insert(connections, collectionService:GetInstanceAddedSignal(kit[1]):Connect(function(ent)
-									Added(ent, kit[2])
-								end))
-								table.insert(connections, collectionService:GetInstanceRemovedSignal(kit[1]):Connect(function(ent)
-									if Reference[ent] then
-										Reference[ent]:Destroy()
-										Reference[ent] = nil
-									end
-								end))
 								for _, v in collectionService:GetTagged(kit[1]) do
-									Added(v, kit[2])
+									if not Reference[v] then
+										Pending[v] = kit[2]
+									end
 								end
 							end
 						end
 					end
-					task.wait(1)
+					for ent in Removing do
+						Removing[ent] = nil
+						Removed(ent)
+					end
+					for ent, icon in Pending do
+						Pending[ent] = nil
+						Added(ent, icon)
+					end
+					-- Hidden while the menu is open; written only when that changes.
+					local hidden = clickGuiOpen()
+					if hidden ~= lastHidden then
+						lastHidden = hidden
+						for _, billboard in Reference do
+							pcall(function() billboard.Enabled = not hidden end)
+						end
+					end
+					task.wait(0.1)
 				until not KitESP.Enabled
 			else
-				for _, v in connections do
-					v:Disconnect()
-				end
-				table.clear(connections)
-				table.clear(Reference)
-				Folder:ClearAllChildren()
+				clearAll()
 			end
 		end,
-		Tooltip = 'Marks the things your kit collects, like bees, orbs and hidden metal'
+		Tooltip = 'Highlights things your kit collects, like bees and orbs.'
 	})
 
 	Scale = KitESP:CreateSlider({
 		Name = 'Scale',
 		Function = function(val)
 			for _, v in Reference do
-				v.Size = UDim2.fromOffset(36 * val, 36 * val)
-				v.ImageLabel.Size = UDim2.fromOffset(36 * val, 36 * val)
-				v.Blur.Size = UDim2.new(1, 89 * val, 1, 52 * val)
-				v.Blur.Position = UDim2.fromOffset(-48 * val, -31 * val)
+				pcall(function()
+					v.Size = UDim2.fromOffset(36 * val, 36 * val)
+				end)
 			end
 		end,
 		Default = 1,
@@ -7029,20 +7446,27 @@ run(function()
 				Color.Object.Visible = callback
 			end
 			for _, v in Reference do
-				v.ImageLabel.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
-				v.Blur.Visible = callback
+				pcall(function()
+					v.Plate.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
+					v.Plate.UIStroke.Enabled = callback
+					v.Plate.Icon.Size = callback and UDim2.fromScale(0.8, 0.8) or UDim2.fromScale(1, 1)
+				end)
 			end
 		end,
 		Default = true
 	})
 	Color = KitESP:CreateColorSlider({
 		Name = 'Background Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
+		DefaultHue = loaderStyle.Hue,
+		DefaultSat = loaderStyle.Sat,
+		DefaultValue = loaderStyle.Value,
+		DefaultOpacity = 1 - loaderStyle.Transparency,
 		Function = function(hue, sat, val, opacity)
 			for _, v in Reference do
-				v.ImageLabel.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-				v.ImageLabel.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
+				pcall(function()
+					v.Plate.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+					v.Plate.BackgroundTransparency = 1 - (Background.Enabled and opacity or 0)
+				end)
 			end
 		end,
 		Darker = true
@@ -7117,7 +7541,7 @@ run(function()
 	local Rank
 	local Enchant
 	local Device
-	local DrawingToggle
+	local OverrideTarget
 	local Scale
 	local FontOption
 	local Teammates
@@ -7149,6 +7573,49 @@ run(function()
 	--[[ assigned once the Updated table below exists; lets the rank fetch redraw a tag when
 	the division finally lands ]]
 	local refreshTag
+
+	--[[ Drawn like the mod overlay's lines: the tag's own text is hidden and two layers carry it, a
+	dark copy one pixel down and right with the coloured text over it -- layers, because a child
+	always draws over its parent's own text. Both follow the tag's text, colour and size. ]]
+	local function shadeTag(nametag)
+		local shadow = Instance.new('TextLabel')
+		shadow.Name = 'TextShadow'
+		shadow.BackgroundTransparency = 1
+		shadow.Position = UDim2.fromOffset(1, 1)
+		shadow.Size = UDim2.fromScale(1, 1)
+		shadow.TextColor3 = Color3.new()
+		shadow.TextTransparency = 0.35
+		local front = Instance.new('TextLabel')
+		front.Name = 'TextFront'
+		front.BackgroundTransparency = 1
+		front.RichText = true
+		front.Size = UDim2.fromScale(1, 1)
+		front.TextColor3 = nametag.TextColor3
+		for _, layer in {shadow, front} do
+			layer.FontFace = nametag.FontFace
+			layer.TextSize = nametag.TextSize
+			layer.Parent = nametag
+		end
+		--[[ Colour emoji (the device icons) draw in colour whatever TextColor3 says, so in the shadow
+		they are kept for their width but not drawn. ]]
+		shadow.RichText = true
+		local function sync()
+			front.Text = nametag.Text
+			local plain = removeTags(nametag.Text):gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
+			shadow.Text = plain:gsub('[\128-\255]+', function(run)
+				if run == '\u{2665}' then
+					return run
+				end
+				return '<font transparency="1">'..run..'</font>'
+			end)
+		end
+		sync()
+		nametag.TextTransparency = 1
+		nametag:GetPropertyChangedSignal('Text'):Connect(sync)
+		nametag:GetPropertyChangedSignal('TextColor3'):Connect(function()
+			front.TextColor3 = nametag.TextColor3
+		end)
+	end
 
 	local RankMeta = (function()
 		local suc, res = pcall(function()
@@ -7184,6 +7651,7 @@ run(function()
 	stranded up in the equipment strip a whole row above the name. These sit INLINE with the
 	text instead, which is what the rest of this row has always done. ]]
 	local rightIcons = {'Kit', 'RankIcon', 'EnchantIcon'}
+	local equipmentIcons = {'Hand', 'Helmet', 'Chestplate', 'Boots'}
 
 	--[[ `height` is the nametag's own pixel height, so the icons scale with the tag instead
 	of staying pinned at 30px. That was the other half of the mismatch: the text follows the
@@ -7203,6 +7671,27 @@ run(function()
 					offset += iconSize
 				end
 			end
+		end
+
+		--[[ The equipment row sits above the tag, centred on it: what they hold first, then their
+		armour, only the slots with something in them, at the tag's own height. It used to start one
+		icon left of the tag's edge with every slot kept, so a weapon alone hung off the tag's
+		corner, and at a fixed 30px per Scale it outgrew the tag. Centred on the tag's middle, the
+		row stays centred as the distance changes the tag's width. ]]
+		local carried = {}
+		for _, name in equipmentIcons do
+			local icon = nametag:FindFirstChild(name)
+			if icon then
+				local shown = icon.Image ~= ''
+				icon.Visible = shown
+				if shown then
+					table.insert(carried, icon)
+				end
+			end
+		end
+		for index, icon in carried do
+			icon.Size = UDim2.fromOffset(iconSize, iconSize)
+			icon.Position = UDim2.new(0.5, (index - 1 - #carried / 2) * iconSize, 0, -iconSize)
 		end
 	end
 
@@ -7272,6 +7761,10 @@ run(function()
 
 	Falling back to full health draws a tag that is briefly the wrong colour; the next update
 	corrects it. A missing tag does not correct itself. ]]
+	local TAG_GREEN, TAG_YELLOW, TAG_RED = Color3.fromRGB(85, 255, 85), Color3.fromRGB(255, 255, 85), Color3.fromRGB(255, 85, 85)
+
+	--[[ Green above half health, yellow at half or less, red under a fifth -- the 20 health of 100
+	that ten hearts come to. ]]
 	local function tagHealthColor(ent)
 		local maxHealth = ent.MaxHealth
 		local fraction = 1
@@ -7280,12 +7773,90 @@ run(function()
 			fraction = (ent.Health or maxHealth) / maxHealth
 		end
 
-		-- clamp does not tame a nan, and Color3.fromHSV throws on one
+		-- a nan compares false with everything, which would land it in red
 		if fraction ~= fraction then
 			fraction = 1
 		end
 
-		return Color3.fromHSV(math.clamp(fraction, 0, 1) / 2.5, 0.89, 0.75)
+		if fraction > 0.5 then
+			return TAG_GREEN
+		elseif fraction >= 0.2 then
+			return TAG_YELLOW
+		end
+		return TAG_RED
+	end
+
+	-- The same three for how far away they are: green past 30 studs, yellow from 10, red closer.
+	local function distanceText(studs)
+		local colour = studs > 30 and TAG_GREEN or studs >= 10 and TAG_YELLOW or TAG_RED
+		return '<font color="#'..colour:ToHex()..'">'..studs..'m</font>'
+	end
+
+	--[[ A team's name and colour for this match, from its queue meta, as the Block ESP names beds;
+	the colour falls back to the team colour Roblox holds for the player, if there is one. Nothing
+	in the lobby. ]]
+	local function teamOf(teamId, plr)
+		local name, colour
+		if teamId ~= nil then
+			pcall(function()
+				local meta = bedwars.QueueMeta[store.queueType]
+				for _, team in (meta and meta.teams or {}) do
+					if tostring(team.id) == tostring(teamId) then
+						name = team.displayName
+						local hex = tonumber(team.colorHex)
+						if hex then
+							colour = Color3.fromRGB(hex // 65536 % 256, hex // 256 % 256, hex % 256)
+						end
+						break
+					end
+				end
+			end)
+		end
+		if not colour and plr and plr.Team and plr.TeamColor then
+			colour = plr.TeamColor.Color
+		end
+		return type(name) == 'string' and name ~= '' and name or nil, colour
+	end
+
+	-- A black team's colour is lifted toward grey: the tag's own background is black.
+	local function readable(colour)
+		local _, _, value = colour:ToHSV()
+		return value < 0.3 and colour:Lerp(Color3.fromRGB(150, 150, 150), 0.6) or colour
+	end
+
+	-- Their team's first letter in the team's colour: W for White.
+	local function teamLetter(plr)
+		local name, colour = teamOf(plr:GetAttribute('Team'), plr)
+		if not name then return nil end
+		colour = readable(colour or Color3.new(1, 1, 1))
+		return '<b><font color="#'..colour:ToHex()..'">'..name:sub(1, 1):upper()..'</font></b>'
+	end
+
+	--[[ A name's colour, as Player ESP picks a box's: the target colour for everyone with Override
+	target color on; otherwise a friend's in the Friends colour (Recolor visuals), and everyone
+	else's in their team's own colour -- a drone's from its owner, a team monster's from its own
+	Team attribute. No team, no colour of its own: white. ]]
+	local function tagColor(ent)
+		if OverrideTarget.Enabled then
+			return Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+		end
+		local plr = ent.Player
+		if plr and isFriend(plr, true) then
+			local friends = vape.Categories.Friends.Options['Friends color']
+			return Color3.fromHSV(friends.Hue, friends.Sat, friends.Value)
+		end
+		local teamId
+		pcall(function()
+			if plr then
+				teamId = plr:GetAttribute('Team')
+			elseif ent.Character then
+				local ownerId = ent.Character:GetAttribute('PlayerUserId')
+				local owner = ownerId and playersService:GetPlayerByUserId(ownerId)
+				teamId = owner and owner:GetAttribute('Team') or ent.Character:GetAttribute('Team')
+			end
+		end)
+		local _, colour = teamOf(teamId, plr)
+		return colour and readable(colour) or Color3.new(1, 1, 1)
 	end
 
 	--[[ NameHider, applied before the name is ever drawn.
@@ -7362,6 +7933,33 @@ run(function()
 		return true
 	end
 
+	--[[ The tag's text: health with its heart, the device, the team letter right against the name,
+	then the distance -- left as %s, filled with distanceText whenever it changes. ]]
+	local function tagText(ent)
+		local text = hideNames(ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name)
+		-- The team letter, Slinky's W, where the name no longer says the team: Override target color on.
+		if OverrideTarget.Enabled and ent.Player then
+			local letter = teamLetter(ent.Player)
+			if letter then
+				text = letter..' '..text
+			end
+		end
+		if Device.Enabled and ent.Player then
+			local emoji = getDeviceEmoji(ent.Player)
+			if emoji then
+				text = emoji..' '..text
+			end
+		end
+		if Health.Enabled then
+			text = '<font color="#'..tagHealthColor(ent):ToHex()..'">'..math.round(ent.Health or 0)..'\u{2665}</font> '..text
+		end
+		if Distance.Enabled then
+			-- A % typed into NameHider's replacement would be read by string.format as an option.
+			text = text:gsub('%%', '%%%%')..' %s'
+		end
+		return text
+	end
+
 	local Added = {
 		Normal = function(ent)
 			local token = {}
@@ -7371,35 +7969,19 @@ run(function()
 				Building[ent] = token
 
 				local nametag = Instance.new('TextLabel')
-				Strings[ent] = hideNames(ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name)
-
-				if Device.Enabled and ent.Player then
-					local emoji = getDeviceEmoji(ent.Player)
-					if emoji then
-						Strings[ent] = emoji..' '..Strings[ent]
-					end
-				end
-
-				if Health.Enabled then
-					local healthColor = tagHealthColor(ent)
-					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health or 0)..'</font>'
-				end
-
-				if Distance.Enabled then
-					Strings[ent] = '<font color="rgb(85, 255, 85)">[</font><font color="rgb(255, 255, 255)">%s</font><font color="rgb(85, 255, 85)">]</font> '..Strings[ent]
-				end
+				Strings[ent] = tagText(ent)
 
 				--[[ Kit is no longer one of these. It is not equipment -- it does not change
 				as they swap items -- and it now has its own toggle and its own slot beside the
-				name. The four that are left keep the exact offsets they always had. ]]
+				name. The four that are left are sized and placed by positionIcons, in one row centred
+				above the tag: the held item first, then the armour. ]]
 				if Equipment.Enabled then
-					for i, v in {'Hand', 'Helmet', 'Chestplate', 'Boots'} do
+					for _, v in equipmentIcons do
 						local Icon = Instance.new('ImageLabel')
 						Icon.Name = v
-						Icon.Size = UDim2.fromOffset(30, 30)
-						Icon.Position = UDim2.fromOffset(-60 + (i * 30), -30)
 						Icon.BackgroundTransparency = 1
 						Icon.Image = ''
+						Icon.Visible = false
 						Icon.Parent = nametag
 					end
 				end
@@ -7465,8 +8047,9 @@ run(function()
 				nametag.BorderSizePixel = 0
 				nametag.Visible = false
 				nametag.Text = Strings[ent]
-				nametag.TextColor3 = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+				nametag.TextColor3 = tagColor(ent)
 				nametag.RichText = true
+				shadeTag(nametag)
 				if Building[ent] ~= token then
 					nametag:Destroy()
 					return
@@ -7481,46 +8064,6 @@ run(function()
 			if Building[ent] == token then
 				Building[ent] = nil
 			end
-		end,
-		Drawing = function(ent)
-			pcall(function()
-				if not passesFilter(ent) then return end
-				if Reference[ent] then return end
-
-				local nametag = {}
-				nametag.BG = Drawing.new('Square')
-				nametag.BG.Filled = true
-				nametag.BG.Transparency = 1 - Background.Value
-				nametag.BG.Color = Color3.new()
-				nametag.BG.ZIndex = 1
-				nametag.Text = Drawing.new('Text')
-				nametag.Text.Size = 15 * Scale.Value
-				nametag.Text.Font = 0
-				nametag.Text.ZIndex = 2
-				Strings[ent] = hideNames(ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name)
-
-				--[[ Drawing text only; the rank icon needs an ImageLabel, which this render
-				path has no equivalent for ]]
-				if Device.Enabled and ent.Player then
-					local emoji = getDeviceEmoji(ent.Player)
-					if emoji then
-						Strings[ent] = emoji..' '..Strings[ent]
-					end
-				end
-
-				if Health.Enabled then
-					Strings[ent] = Strings[ent]..' '..math.round(ent.Health or 0)
-				end
-
-				if Distance.Enabled then
-					Strings[ent] = '[%s] '..Strings[ent]
-				end
-
-				nametag.Text.Text = Strings[ent]
-				nametag.Text.Color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-				nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
-				Reference[ent] = nametag
-			end)
 		end
 	}
 	
@@ -7540,25 +8083,6 @@ run(function()
 					Reference[ent] = nil
 					Strings[ent] = nil
 					Sizes[ent] = nil
-				end
-			end)
-		end,
-		Drawing = function(ent)
-			pcall(function()
-				--[[ the Drawing path never creates the watcher, but Removed runs for
-				entities whose tag was built under the other method too ]]
-				unwatchEnchant(ent)
-				local v = Reference[ent]
-				if v then
-					Reference[ent] = nil
-					Strings[ent] = nil
-					Sizes[ent] = nil
-					for _, obj in v do
-						pcall(function()
-							obj.Visible = false
-							obj:Remove()
-						end)
-					end
 				end
 			end)
 		end
@@ -7664,26 +8188,18 @@ run(function()
 				local gen = (UpdateGen[ent] or 0) + 1
 				UpdateGen[ent] = gen
 
-				Strings[ent] = hideNames(ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name)
-
-				if Device.Enabled and ent.Player then
-					local emoji = getDeviceEmoji(ent.Player)
-					if emoji then
-						Strings[ent] = emoji..' '..Strings[ent]
-					end
-				end
-
-				if Health.Enabled then
-					local healthColor = tagHealthColor(ent)
-					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health or 0)..'</font>'
+				Strings[ent] = tagText(ent)
+				-- Teams are given out after the tag is built, and the override can change: the colour follows.
+				local nameColor = tagColor(ent)
+				if nametag.TextColor3 ~= nameColor then
+					nametag.TextColor3 = nameColor
 				end
 
 				if Distance.Enabled then
-					Strings[ent] = '<font color="rgb(85, 255, 85)">[</font><font color="rgb(255, 255, 255)">%s</font><font color="rgb(85, 255, 85)">]</font> '..Strings[ent]
 					local selfRoot = entitylib.isAlive and entitylib.character.RootPart
 					local root = ent.RootPart
 					local mag = (selfRoot and root) and math.floor((selfRoot.Position - root.Position).Magnitude) or 0
-					nametag.Text = string.format(Strings[ent], mag)
+					nametag.Text = string.format(Strings[ent], distanceText(mag))
 					Sizes[ent] = mag
 				else
 					nametag.Text = Strings[ent]
@@ -7737,57 +8253,6 @@ run(function()
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 				positionIcons(nametag, size.X, size.Y + 7)
 			end)
-		end,
-		Drawing = function(ent)
-			pcall(function()
-				--[[ The filter is re-asked here, which the upstream module has no need to do.
-
-				Targetable now genuinely CHANGES during a round -- addPlayer refreshes it when
-				the Team attribute lands and fires this very event -- so a tag can become owed
-				to somebody who was correctly skipped a moment ago, and owed by somebody who
-				was correctly given one. Both directions are handled from the same place the
-				change is announced, which is why the retry sweep that used to sit in the
-				module loop is gone. ]]
-				if not passesFilter(ent) then
-					if Reference[ent] then
-						Removed['Drawing'](ent)
-					end
-					return
-				end
-
-				local nametag = Reference[ent]
-				if not nametag then
-					rebuildTag(ent, 'Drawing')
-					return
-				end
-				
-				if vape.ThreadFix then
-					setthreadidentity(8)
-				end
-				Sizes[ent] = nil
-				Strings[ent] = hideNames(ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name)
-
-				if Device.Enabled and ent.Player then
-					local emoji = getDeviceEmoji(ent.Player)
-					if emoji then
-						Strings[ent] = emoji..' '..Strings[ent]
-					end
-				end
-
-				if Health.Enabled then
-					Strings[ent] = Strings[ent]..' '..math.round(ent.Health or 0)
-				end
-
-				if Distance.Enabled then
-					Strings[ent] = '[%s] '..Strings[ent]
-					nametag.Text.Text = entitylib.isAlive and string.format(Strings[ent], math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude)) or Strings[ent]
-				else
-					nametag.Text.Text = Strings[ent]
-				end
-
-				nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
-				nametag.Text.Color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-			end)
 		end
 	}
 	
@@ -7798,22 +8263,11 @@ run(function()
 	end
 
 	local ColorFunc = {
-		Normal = function(hue, sat, val)
+		Normal = function()
 			pcall(function()
-				local color = Color3.fromHSV(hue, sat, val)
 				for i, v in Reference do
 					if v and v.Parent then
-						v.TextColor3 = entitylib.getEntityColor(i) or color
-					end
-				end
-			end)
-		end,
-		Drawing = function(hue, sat, val)
-			pcall(function()
-				local color = Color3.fromHSV(hue, sat, val)
-				for i, v in Reference do
-					if v and v.Text then
-						v.Text.Color = entitylib.getEntityColor(i) or color
+						v.TextColor3 = tagColor(i)
 					end
 				end
 			end)
@@ -7881,7 +8335,7 @@ run(function()
 		if Distance.Enabled then
 			local mag = selfPos and math.floor((selfPos - rootPos).Magnitude) or 0
 			if Sizes[ent] ~= mag then
-				nametag.Text = string.format(Strings[ent], mag)
+				nametag.Text = string.format(Strings[ent], distanceText(mag))
 				local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 				positionIcons(nametag, size.X, size.Y + 7)
@@ -7903,52 +8357,20 @@ run(function()
 				--[[ Local player's position is identical for every nametag this frame;
 				resolve the property chain once instead of per-entity. ]]
 				local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
+				-- Hidden while the menu is open; paintTag shows them again the frame after it closes.
+				local hidden = clickGuiOpen()
 				for ent, nametag in Reference do
 					if not nametag or not nametag.Parent then
 						Reference[ent] = nil
 						continue
 					end
+					if hidden then
+						if nametag.Visible then
+							nametag.Visible = false
+						end
+						continue
+					end
 					drawTag(ent, nametag, selfPos)
-				end
-			end)
-		end,
-		Drawing = function()
-			pcall(function()
-				--[[ Local player's position is identical for every nametag this frame;
-				resolve the property chain once instead of per-entity. ]]
-				local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
-				for ent, nametag in Reference do
-					if not nametag or not nametag.Text or not nametag.BG then
-						Reference[ent] = nil
-						continue
-					end
-
-					if DistanceCheck.Enabled then
-						local distance = selfPos and (selfPos - ent.RootPart.Position).Magnitude or math.huge
-						if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-							nametag.Text.Visible = false
-							nametag.BG.Visible = false
-							continue
-						end
-					end
-
-					local headPos, headVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position + Vector3.new(0, ent.HipHeight + 1, 0))
-					nametag.Text.Visible = headVis
-					nametag.BG.Visible = headVis
-					if not headVis then
-						continue
-					end
-
-					if Distance.Enabled then
-						local mag = selfPos and math.floor((selfPos - ent.RootPart.Position).Magnitude) or 0
-						if Sizes[ent] ~= mag then
-							nametag.Text.Text = string.format(Strings[ent], mag)
-							nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
-							Sizes[ent] = mag
-						end
-					end
-					nametag.BG.Position = Vector2.new(headPos.X - (nametag.BG.Size.X / 2), headPos.Y - nametag.BG.Size.Y)
-					nametag.Text.Position = nametag.BG.Position + Vector2.new(4, 3)
 				end
 			end)
 		end
@@ -8019,7 +8441,7 @@ run(function()
 				--[[ The game's own nametags are left alone. NameTags used to switch them off while it
 				was on, and that broke them (including your own) after a late join. ]]
 
-				methodused = DrawingToggle.Enabled and 'Drawing' or 'Normal'
+				methodused = 'Normal'
 				if Removed[methodused] then
 					NameTags:Clean(entitylib.Events.EntityRemoved:Connect(Removed[methodused]))
 				end
@@ -8130,161 +8552,20 @@ run(function()
 				dropSetup()
 			end
 		end,
-		Tooltip = 'Draws nametags through walls.'
-	})
-	Targets = NameTags:CreateTargets({
-		Players = true,
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
-	})
-	NameTags:CreateDropdown({
-		Name = 'Target Priority',
-		List = {'Players first', 'NPCs first', 'Closest'},
-		Default = 'Players first'
-	})
-	FontOption = NameTags:CreateFont({
-		Name = 'Font',
-		Blacklist = 'Arial',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
-	})
-	Color = NameTags:CreateColorSlider({
-		Name = 'Player Color',
-		Function = function(hue, sat, val)
-			if NameTags.Enabled and ColorFunc[methodused] then
-				ColorFunc[methodused](hue, sat, val)
-			end
-		end
+		Tooltip = 'Shows clear name tags above other players.\nCan add health, distance, gear, kit, rank and device.'
 	})
 	Scale = NameTags:CreateSlider({
 		Name = 'Scale',
 		Function = function()
 			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
 			end
 		end,
 		Default = 1,
 		Min = 0.1,
 		Max = 1.5,
 		Decimal = 10
-	})
-	Background = NameTags:CreateSlider({
-		Name = 'Transparency',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Default = 0.5,
-		Min = 0,
-		Max = 1,
-		Decimal = 10
-	})
-	Health = NameTags:CreateToggle({
-		Name = 'Health',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
-	})
-	Distance = NameTags:CreateToggle({
-		Name = 'Distance',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
-	})
-	Equipment = NameTags:CreateToggle({
-		Name = 'Equipment',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
-	})
-	ShowKit = NameTags:CreateToggle({
-		Name = 'Show Kit',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Tooltip = 'Puts their kit icon next to the nametag'
-	})
-	Rank = NameTags:CreateToggle({
-		Name = 'Show Rank',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Tooltip = 'Puts their ranked division icon above the nametag'
-	})
-	Enchant = NameTags:CreateToggle({
-		Name = 'Show Enchant',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Tooltip = 'Puts their active enchant above the nametag. Drawing mode doesnt have the icons.'
-	})
-	Device = NameTags:CreateToggle({
-		Name = 'Show Device',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Tooltip = 'Shows 🎮 / 🖥️ / 📱 depending on what theyre playing on'
-	})
-	DisplayName = NameTags:CreateToggle({
-		Name = 'Use Displayname',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Default = true
-	})
-	Teammates = NameTags:CreateToggle({
-		Name = 'Priority Only',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Default = true
-	})
-	DrawingToggle = NameTags:CreateToggle({
-		Name = 'Drawing',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
 	})
 	DistanceCheck = NameTags:CreateToggle({
 		Name = 'Distance Check',
@@ -8294,12 +8575,164 @@ run(function()
 	})
 	DistanceLimit = NameTags:CreateTwoSlider({
 		Name = 'Player Distance',
+		DisplayName = 'Range',
 		Min = 0,
 		Max = 256,
 		DefaultMin = 0,
 		DefaultMax = 64,
 		Darker = true,
 		Visible = false
+	})
+	NameTags:CreateDivider({Text = 'Extra info'})
+	Health = NameTags:CreateToggle({
+		Name = 'Health',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end
+	})
+	Distance = NameTags:CreateToggle({
+		Name = 'Distance',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end
+	})
+	Equipment = NameTags:CreateToggle({
+		Name = 'Equipment',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end
+	})
+	Enchant = NameTags:CreateToggle({
+		Name = 'Show Enchant',
+		DisplayName = 'Enchantments',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end,
+		Tooltip = 'Puts their active enchant next to the name.'
+	})
+	NameTags:CreateDivider({Text = 'Extras'})
+	Targets = NameTags:CreateTargets({
+		Players = true,
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end
+	})
+	FontOption = NameTags:CreateFont({
+		Name = 'Font',
+		Blacklist = 'Arial',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end
+	})
+	Background = NameTags:CreateSlider({
+		Name = 'Transparency',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end,
+		Default = 0.5,
+		Min = 0,
+		Max = 1,
+		Decimal = 10
+	})
+	ShowKit = NameTags:CreateToggle({
+		Name = 'Show Kit',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end,
+		Tooltip = 'Puts their kit icon next to the nametag'
+	})
+	Rank = NameTags:CreateToggle({
+		Name = 'Show Rank',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end,
+		Tooltip = 'Puts their ranked division icon next to the name'
+	})
+	--[[ Off, every name is in its team's colour; on, all of them are in the target colour below, with
+	the team letter in front. Every tag is rebuilt in place for the letter, without restarting. ]]
+	OverrideTarget = NameTags:CreateToggle({
+		Name = 'Override target color',
+		Function = function(callback)
+			if Color then
+				Color.Object.Visible = callback
+			end
+			if NameTags.Enabled and Updated[methodused] then
+				task.spawn(function()
+					for ent in Reference do
+						pcall(Updated[methodused], ent)
+					end
+				end)
+			end
+		end,
+		Tooltip = 'Every name uses the colour below instead of its team colour, with the team letter in front.'
+	})
+	-- Saved under its old name, so the colour chosen before carries over.
+	Color = NameTags:CreateColorSlider({
+		Name = 'Player Color',
+		DisplayName = 'Target color',
+		Function = function()
+			if NameTags.Enabled and ColorFunc[methodused] then
+				ColorFunc[methodused]()
+			end
+		end,
+		Visible = false
+	})
+	Device = NameTags:CreateToggle({
+		Name = 'Show Device',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end,
+		Tooltip = 'Shows 🎮 / 🖥️ / 📱 depending on what they\'re playing on'
+	})
+	DisplayName = NameTags:CreateToggle({
+		Name = 'Use Displayname',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end,
+		Default = true
+	})
+	Teammates = NameTags:CreateToggle({
+		Name = 'Priority Only',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle(nil, true)
+				NameTags:Toggle(nil, true)
+			end
+		end,
+		Default = true
 	})
 end)
 	
@@ -8344,7 +8777,7 @@ run(function()
 	
 		local chestitems = chest and chest:GetChildren() or {}
 		for _, obj in v.Frame:GetChildren() do
-			if obj:IsA('ImageLabel') and obj.Name ~= 'Blur' then
+			if obj:IsA('ImageLabel') then
 				obj:Destroy()
 			end
 		end
@@ -8381,10 +8814,10 @@ run(function()
 					amount.Text = tostring(amounts[item.Name])
 					amount.TextXAlignment = Enum.TextXAlignment.Right
 					amount.TextSize = 14
-					amount.TextColor3 = uipallet.Text
+					loaderStyle.text(amount, 'Bold')
+					-- Drawn over the icon, so it keeps an outline to read against it.
 					amount.TextStrokeColor3 = Color3.new()
 					amount.TextStrokeTransparency = 0.4
-					amount.FontFace = uipallet.Font
 					amount.Parent = blockimage
 				end
 			end
@@ -8425,13 +8858,14 @@ run(function()
 			billboard.AlwaysOnTop = true
 			billboard.ClipsDescendants = false
 			billboard.Adornee = v
-			local blur = addBlur(billboard)
-			blur.Visible = Background.Enabled
+			-- The loader's box, its border shown with the background.
 			local frame = Instance.new('Frame')
 			frame.Size = UDim2.fromScale(1, 1)
 			frame.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 			frame.BackgroundTransparency = 1 - (Background.Enabled and Color.Opacity or 0)
+			frame.BorderSizePixel = 0
 			frame.Parent = billboard
+			loaderStyle.stroke(frame).Enabled = Background.Enabled
 			local layout = Instance.new('UIListLayout')
 			layout.FillDirection = Enum.FillDirection.Horizontal
 			layout.Padding = UDim.new(0, 4)
@@ -8446,9 +8880,7 @@ run(function()
 				end)
 			end)
 			layout.Parent = frame
-			local corner = Instance.new('UICorner')
-			corner.CornerRadius = UDim.new(0, 4)
-			corner.Parent = frame
+			loaderStyle.corner(frame, 6)
 			billboard.Parent = Folder
 		end)
 		if not ok then
@@ -8473,12 +8905,25 @@ run(function()
 	
 	StorageESP = vape.Categories.Render:CreateModule({
 		Name = 'StorageESP',
+		DisplayName = 'Chest ESP',
 		Function = function(callback)
 			-- Both ways: switching off clears the folder, which is in the GUI as well.
 			if vape.ThreadFix then
 				setthreadidentity(8)
 			end
 			if callback then
+				-- The folder leaves the GUI while the menu is open, so its billboards stop drawing.
+				local scaledGui = vape.gui:FindFirstChild('ScaledGui')
+				local clickGui = scaledGui and scaledGui:FindFirstChild('ClickGui')
+				if clickGui then
+					Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					StorageESP:Clean(clickGui:GetPropertyChangedSignal('Visible'):Connect(function()
+						if vape.ThreadFix then
+							setthreadidentity(8)
+						end
+						Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					end))
+				end
 				StorageESP:Clean(collectionService:GetInstanceAddedSignal('chest'):Connect(Added))
 				-- A broken chest used to leave its icons hanging in the air where it stood.
 				StorageESP:Clean(collectionService:GetInstanceRemovedSignal('chest'):Connect(function(v)
@@ -8520,10 +8965,13 @@ run(function()
 				table.clear(Reference)
 				table.clear(Pending)
 				Folder:ClearAllChildren()
+				-- Switched off with the menu open: back in the GUI for the next enable.
+				Folder.Parent = vape.gui
 			end
 		end,
-		Tooltip = 'Shows you whats in a chest without opening it'
+		Tooltip = 'Shows which chests hold the items on your list.\nAdds an icon for each item, and the amount if you want.'
 	})
+	StorageESP:CreateDivider({Text = 'Extras'})
 	List = StorageESP:CreateTextList({
 		Name = 'Item',
 		Function = function()
@@ -8552,7 +9000,7 @@ run(function()
 			for _, v in Reference do
 				pcall(function()
 					v.Frame.BackgroundTransparency = 1 - (callback and Color.Opacity or 0)
-					v.Blur.Visible = callback
+					v.Frame.UIStroke.Enabled = callback
 				end)
 			end
 		end,
@@ -8560,8 +9008,10 @@ run(function()
 	})
 	Color = StorageESP:CreateColorSlider({
 		Name = 'Background Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
+		DefaultHue = loaderStyle.Hue,
+		DefaultSat = loaderStyle.Sat,
+		DefaultValue = loaderStyle.Value,
+		DefaultOpacity = 1 - loaderStyle.Transparency,
 		Function = function(hue, sat, val, opacity)
 			if vape.ThreadFix then
 				setthreadidentity(8)
@@ -8583,6 +9033,7 @@ run(function()
 	
 	AutoBalloon = vape.Categories.Utility:CreateModule({
 		Name = 'AutoBalloon',
+		Tab = 'Move',
 		Function = function(callback)
 			if callback then
 				repeat task.wait(0.1) until store.matchState ~= 0 or (not AutoBalloon.Enabled)
@@ -8612,7 +9063,7 @@ run(function()
 				until not AutoBalloon.Enabled
 			end
 		end,
-		Tooltip = 'Inflates when you go over the edge'
+		Tooltip = 'Inflates balloons to save you when you fall off the map.'
 	})
 end)
 	
@@ -8670,6 +9121,7 @@ run(function()
 	
 	AutoKit = vape.Categories.Utility:CreateModule({
 		Name = 'AutoKit',
+		Tab = 'Kits',
 		Function = function(callback)
 			if callback then
 				--[[ Every kit loop below touches Instances and fires remotes, and this
@@ -8679,8 +9131,10 @@ run(function()
 				takes the whole kit loop with it, since nothing here is pcall'd. Set
 				once for the thread rather than inside the loops: it persists across
 				task.wait, and every kit function runs on this same thread. ]]
-				if vape.ThreadFix then
-					setthreadidentity(8)
+				-- Guarded: on an executor whose ceiling is below 8 a bare setthreadidentity(8)
+				-- throws, and AutoKit never started at all.
+				if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+					pcall(setthreadidentity, 7)
 				end
 				repeat task.wait(0.1) until store.equippedKit ~= '' and store.matchState ~= 0 or (not AutoKit.Enabled)
 				if not AutoKit.Enabled then return end
@@ -8696,8 +9150,8 @@ run(function()
 				for index, kit in kits do
 					if index < #kits then
 						task.spawn(function()
-							if vape.ThreadFix then
-								setthreadidentity(8)
+							if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+								pcall(setthreadidentity, 7)
 							end
 							AutoKitFunctions[kit]()
 						end)
@@ -8707,7 +9161,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Uses your kit abilities for you.'
+		Tooltip = 'Uses your kit abilities for you.\nPick which kits it plays and whether to use legit range.'
 	})
 	Legit = AutoKit:CreateToggle({Name = 'Legit Range'})
 	local sortTable = {}
@@ -8761,7 +9215,7 @@ run(function()
 				AutoPlay:Clean(vapeEvents.MatchEndEvent.Event:Connect(joinQueue))
 			end
 		end,
-		Tooltip = 'Queues you up again once the match ends.'
+		Tooltip = 'Queues you up again once the match ends.\nCan join a random mode instead of the same one.'
 	})
 	Random = AutoPlay:CreateToggle({
 		Name = 'Random',
@@ -8824,7 +9278,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Fires off a quick chat message after certain things happen'
+		Tooltip = 'Sends chat messages after kills and when a game ends.'
 	})
 	GG = AutoToxic:CreateToggle({
 		Name = 'AutoGG',
@@ -8916,7 +9370,7 @@ run(function()
 										})
 	
 										if item then
-											item:SetAttribute('ClientDropTime', os.clock() + 100)
+											item:SetAttribute('ClientDropTime', tick() + 100)
 										end
 									end
 								end
@@ -8932,7 +9386,7 @@ run(function()
 				until not AutoVoidDrop.Enabled
 			end
 		end,
-		Tooltip = 'Dumps your resources if you fall into the void'
+		Tooltip = 'Drops your resources when you fall into the void.\nCan hold off during an owl rescue and reset you after.'
 	})
 	OwlCheck = AutoVoidDrop:CreateToggle({
 		Name = 'Owl check',
@@ -8951,9 +9405,10 @@ run(function()
 	
 	MissileTP = vape.Categories.Utility:CreateModule({
 		Name = 'MissileTP',
+		Tab = 'Combat',
 		Function = function(callback)
 			if callback then
-				MissileTP:Toggle()
+				MissileTP:Toggle(nil, true)
 				local plr = entitylib.EntityMouse({
 					Range = 1000,
 					Players = true,
@@ -8983,7 +9438,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Spawns a missile and sends it at whoever is\nnearest your mouse.'
+		Tooltip = 'Sends a missile at the player nearest your mouse.'
 	})
 end)
 
@@ -9000,6 +9455,9 @@ run(function()
 
 	PickupRange = vape.Categories.Utility:CreateModule({
 		Name = 'PickupRange',
+		ExtraText = function()
+			return Range and tostring(Range.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				local items = collection('ItemDrop', PickupRange)
@@ -9007,6 +9465,11 @@ run(function()
 					if entitylib.isAlive then
 						local localPosition = entitylib.character.RootPart.Position
 						for _, v in items do
+							--[[ A stack the bank is holding for you carries PistonwareBankOwner (set on this
+							client only), and is never grabbed here, whatever its ClientDropTime says: once
+							that marker was missing, Network TP pulled the parked stack down to your feet
+							every pass and picked it up, un-banking it behind the bank's back. ]]
+							if v:GetAttribute('PistonwareBankOwner') ~= nil then continue end
 							if tick() - (v:GetAttribute('ClientDropTime') or 0) < 2 then continue end
 							if (Network.Enabled and isnetworkowner(v)) and (entitylib.character.Humanoid.Health > 0) then 
 								v.CFrame = CFrame.new(localPosition - Vector3.new(0, 3, 0)) 
@@ -9052,7 +9515,7 @@ run(function()
 				table.clear(pickups)
 			end
 		end,
-		Tooltip = 'Grabs items from further away'
+		Tooltip = 'Picks up dropped items from further away.\nCan pull drops to you and skip ones below your feet.'
 	})
 	Range = PickupRange:CreateSlider({
 		Name = 'Range',
@@ -9084,9 +9547,10 @@ run(function()
 	
 	RavenTP = vape.Categories.Utility:CreateModule({
 		Name = 'RavenTP',
+		Tab = 'Combat',
 		Function = function(callback)
 			if callback then
-				RavenTP:Toggle()
+				RavenTP:Toggle(nil, true)
 				local plr = entitylib.EntityMouse({
 					Range = 1000,
 					Players = true,
@@ -9117,7 +9581,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Spawns a raven and sends it at whoever is\nnearest your mouse.'
+		Tooltip = 'Sends a raven at the player nearest your mouse.'
 	})
 end)
 	
@@ -9182,7 +9646,7 @@ run(function()
 					if v.Enabled then
 						v:Toggle()
 					end
-					v:SetBind('')
+					if v.Bind then v.Bind:SetBind({}) end
 				end
 			end
 		end
@@ -9332,7 +9796,7 @@ run(function()
 				matchRunningSince = nil
 			end
 		end,
-		Tooltip = 'Lets you know when someone with a staff rank is in the server'
+		Tooltip = 'Warns you when staff are in your server.\nCan also unload, requeue, swap profile or turn modules off.'
 	})
 	Mode = StaffDetector:CreateDropdown({
 		Name = 'Mode',
@@ -9372,7 +9836,7 @@ end)
 run(function()
 	TrapDisabler = vape.Categories.Utility:CreateModule({
 		Name = 'TrapDisabler',
-		Tooltip = 'Drops the report your client sends when you walk into a trap, so it never goes off on you.'
+		Tooltip = 'Stops enemy traps from going off on you.\nCovers snap traps, landmines, teleport blocks and void portals.'
 	})
 	-- Each of these is a trap whose controller reports YOU stepping on it, through one remote
 	-- each (snap-trap, invisible-landmine, teleport-block and void-teleport-portal controllers).
@@ -9399,6 +9863,7 @@ end)
 run(function()
 	vape.Categories.World:CreateModule({
 		Name = 'Anti-AFK',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				for _, v in getconnections(lplr.Idled) do
@@ -9419,7 +9884,7 @@ run(function()
 				})
 			end
 		end,
-		Tooltip = 'Keeps you in the game instead of getting kicked for idling'
+		Tooltip = 'Prevents you from getting kicked for being idle.'
 	})
 end)
 	
@@ -9480,7 +9945,7 @@ run(function()
 				until not AutoSuffocate.Enabled
 			end
 		end,
-		Tooltip = 'Boxes in anyone stuck nearby'
+		Tooltip = 'Boxes in nearby players who are already half walled in.\nUses the block you hold, or your wool if allowed.'
 	})
 	Range = AutoSuffocate:CreateSlider({
 		Name = 'Range',
@@ -9563,10 +10028,11 @@ run(function()
 				previous, switchedTo = nil, nil
 			end
 		end,
-		Tooltip = 'Grabs the right tool for you'
+		Tooltip = 'Selects the best tool when digging.\nCan switch back to what you held once you stop mining.'
 	})
 	SwitchBack = AutoTool:CreateToggle({
 		Name = 'Switch back',
+		DisplayName = 'Switch back when done',
 		Tooltip = 'Puts back what you were holding once you stop mining.'
 	})
 end)
@@ -10441,6 +10907,10 @@ run(function()
 
 	ChestSteal = vape.Categories.World:CreateModule({
 		Name = 'ChestSteal',
+		ExtraText = function()
+			return Delay and math.round(Delay.Value * 1000)..'ms' or nil
+		end,
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				local chests = collection('chest', ChestSteal)
@@ -10512,7 +10982,7 @@ run(function()
 				depositing = false
 			end
 		end,
-		Tooltip = 'Pulls items out of the chests near you.'
+		Tooltip = 'Pulls items out of the chests near you.\nCan also loot enemy crates and stash loot in your own chest.'
 	})
 	Range = ChestSteal:CreateSlider({
 		Name = 'Range',
@@ -10612,8 +11082,8 @@ run(function()
 		Name = 'Only Skywars',
 		Function = function()
 			if ChestSteal.Enabled then
-				ChestSteal:Toggle()
-				ChestSteal:Toggle()
+				ChestSteal:Toggle(nil, true)
+				ChestSteal:Toggle(nil, true)
 			end
 		end,
 		Default = true,
@@ -10800,7 +11270,7 @@ run(function()
 	
 				if Mode.Value == 'Save' then
 					save()
-					Schematica:Toggle()
+					Schematica:Toggle(nil, true)
 				else
 					local suc, read = pcall(function() 
 						return isfile(File.Value) and httpService:JSONDecode(readfile(File.Value)) 
@@ -10820,7 +11290,7 @@ run(function()
 				table.clear(parts)
 			end
 		end,
-		Tooltip = 'Save your builds and drop them back down later'
+		Tooltip = 'Saves your builds to a file and rebuilds them for you.\nShows a see-through preview while it places the blocks.'
 	})
 	File = Schematica:CreateTextBox({
 		Name = 'File',
@@ -10885,7 +11355,7 @@ run(function()
 						task.wait(0.1)
 					until not ArmorSwitch.Enabled
 				else
-					ArmorSwitch:Toggle()
+					ArmorSwitch:Toggle(nil, true)
 					for i = 0, 2 do
 						bedwars.Store:dispatch({
 							type = 'InventorySetArmorItem',
@@ -10897,7 +11367,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Swaps your armor on and off for baiting.'
+		Tooltip = 'Swaps your armor on and off for baiting.\nWears it only near enemies, or flips it with a keybind.'
 	})
 	Mode = ArmorSwitch:CreateDropdown({
 		Name = 'Mode',
@@ -10981,6 +11451,25 @@ run(function()
 		'diamond_pickaxe'
 	}
 	
+	--[[ The sword line as your shop sells it: the wood one you spawn with, then from stone each
+	sword's nextTier, read with your kit applied (getShopItem with the player runs the game's
+	shop overrides). Ice Queen, Ember and Lumen get their kit sword straight after iron -- the
+	override sets iron's nextTier to it -- and nothing after it. The fixed list put the kit
+	sword in the emerald slot, after a diamond sword those kits are never offered, and with
+	Tier Check on AutoBuy stopped at that diamond sword for good. ]]
+	local function swordLine()
+		local dao = store.hasKit('dasher')
+		local line = {dao and 'wood_dao' or 'wood_sword'}
+		local itemType, seen = dao and 'stone_dao' or 'stone_sword', {}
+		while itemType and not seen[itemType] and #line < 10 do
+			seen[itemType] = true
+			table.insert(line, itemType)
+			local ok, item = pcall(bedwars.Shop.getShopItem, itemType, lplr)
+			itemType = ok and type(item) == 'table' and item.nextTier or nil
+		end
+		return line
+	end
+
 	local function getShopNPC()
 		local shop, items, upgrades, newid = nil, false, false, nil
 		if entitylib.isAlive then
@@ -11186,7 +11675,7 @@ run(function()
 				npctick = tick()
 			end
 		end,
-		Tooltip = 'Buys your items for you when you walk up to the shop'
+		Tooltip = 'Buys gear and upgrades when you are near a shop.\nCovers swords, armor, tools, team upgrades and your own list.'
 	})
 	Sword = AutoBuy:CreateToggle({
 		Name = 'Buy Sword',
@@ -11194,24 +11683,7 @@ run(function()
 			npctick = tick()
 			Functions[2] = callback and function(currencytable, shop)
 				if not shop then return end
-	
-				if store.hasKit('dasher') then
-					swords = {
-						[1] = 'wood_dao',
-						[2] = 'stone_dao',
-						[3] = 'iron_dao',
-						[4] = 'diamond_dao',
-						[5] = 'emerald_dao'
-					}
-				elseif store.hasKit('ice_queen') then
-					swords[5] = 'ice_sword'
-				elseif store.hasKit('ember') then
-					swords[5] = 'infernal_saber'
-				elseif store.hasKit('lumen') then
-					swords[5] = 'light_sword'
-				end
-	
-				return buyTool(store.tools.sword, swords, currencytable)
+				return buyTool(store.tools.sword, swordLine(), currencytable)
 			end or nil
 		end
 	})
@@ -11280,8 +11752,8 @@ run(function()
 		Name = 'Only Bedwars',
 		Function = function()
 			if AutoBuy.Enabled then
-				AutoBuy:Toggle()
-				AutoBuy:Toggle()
+				AutoBuy:Toggle(nil, true)
+				AutoBuy:Toggle(nil, true)
 			end
 		end,
 		Default = true
@@ -11372,6 +11844,9 @@ run(function()
 	
 	AutoConsume = vape.Categories.Inventory:CreateModule({
 		Name = 'AutoConsume',
+		ExtraText = function()
+			return Health and Health.Value..'%' or nil
+		end,
 		Function = function(callback)
 			if callback then
 				AutoConsume:Clean(vapeEvents.InventoryAmountChanged.Event:Connect(consumeCheck))
@@ -11383,7 +11858,7 @@ run(function()
 				consumeCheck()
 			end
 		end,
-		Tooltip = 'Heals you once your health or shield drops under the threshold.'
+		Tooltip = 'Uses healing items and potions when you need them.\nCovers apples, speed potions and shield potions.'
 	})
 	Health = AutoConsume:CreateSlider({
 		Name = 'Health Percent',
@@ -11413,221 +11888,355 @@ run(function()
 	local List
 	local Active
 	
+	--[[ The hotbar editor and the list it opens from, in the loader's look: the editor is one of its
+	boxes with the loader's buttons for slots and items, and the list is a column of those boxes
+	inside the module's card. ]]
+	local function slotBox(obj, radius)
+		obj.BackgroundColor3 = loaderStyle.Button
+		obj.BackgroundTransparency = 0
+		obj.BorderSizePixel = 0
+		loaderStyle.corner(obj, radius or 6)
+		return loaderStyle.stroke(obj, loaderStyle.ButtonBorder, 0)
+	end
+
+	-- A menu icon where the menu's helper is there, its character where it is not.
+	local function icon(parent, name, size, glyph, isButton, props)
+		local ui = vape.Libraries.ui
+		local holder
+		if ui and ui.icon then
+			holder = ui.icon(nil, name, size, {Class = isButton and 'TextButton' or nil, Color = loaderStyle.SubText})
+		else
+			holder = Instance.new(isButton and 'TextButton' or 'TextLabel')
+			holder.BackgroundTransparency = 1
+			holder.Size = UDim2.fromOffset(size + 4, size + 4)
+			holder.Text = glyph
+			holder.TextSize = size
+			if isButton then
+				holder.AutoButtonColor = false
+			end
+			loaderStyle.text(holder, 'Bold', loaderStyle.SubText)
+		end
+		for key, value in props or {} do
+			holder[key] = value
+		end
+		holder.Parent = parent
+		return holder
+	end
+
+	-- An item the meta no longer knows shows an empty slot rather than failing the list.
+	local function itemIcon(id)
+		if not id then return '' end
+		local ok, image = pcall(bedwars.getIcon, {itemType = id}, true)
+		return ok and type(image) == 'string' and image or ''
+	end
+
+	local function requestSave()
+		if vape.RequestSave then
+			vape:RequestSave()
+		end
+	end
+
 	local function CreateWindow(self)
 		local selectedslot = 1
+		local hovered = {}
 		local window = Instance.new('Frame')
 		window.Name = 'HotbarGUI'
-		window.Size = UDim2.fromOffset(660, 465)
+		window.Size = UDim2.fromOffset(600, 322)
 		window.Position = UDim2.fromScale(0.5, 0.5)
-		window.BackgroundColor3 = uipallet.Main
 		window.AnchorPoint = Vector2.new(0.5, 0.5)
 		window.Visible = false
 		window.Parent = vape.gui.ScaledGui
-		local title = Instance.new('TextLabel')
-		title.Name = 'Title'
-		title.Size = UDim2.new(1, -10, 0, 20)
-		title.Position = UDim2.fromOffset(math.abs(title.Size.X.Offset), 12)
-		title.BackgroundTransparency = 1
-		title.Text = 'AutoHotbar'
-		title.TextXAlignment = Enum.TextXAlignment.Left
-		title.TextColor3 = uipallet.Text
-		title.TextSize = 13
-		title.FontFace = uipallet.Font
-		title.Parent = window
-		local divider = Instance.new('Frame')
-		divider.Name = 'Divider'
-		divider.Size = UDim2.new(1, 0, 0, 1)
-		divider.Position = UDim2.fromOffset(0, 40)
-		divider.BackgroundColor3 = color.Light(uipallet.Main, 0.04)
-		divider.BorderSizePixel = 0
-		divider.Parent = window
-		addBlur(window)
+		loaderStyle.box(window)
+		-- Nearly solid: a window to work in, not a readout over the game.
+		window.BackgroundTransparency = 0.1
+		local zoom = Instance.new('UIScale')
+		zoom.Parent = window
 		local modal = Instance.new('TextButton')
 		modal.Text = ''
 		modal.BackgroundTransparency = 1
 		modal.Modal = true
 		modal.Parent = window
-		local corner = Instance.new('UICorner')
-		corner.CornerRadius = UDim.new(0, 5)
-		corner.Parent = window
-		local close = Instance.new('ImageButton')
-		close.Name = 'Close'
-		close.Size = UDim2.fromOffset(24, 24)
-		close.Position = UDim2.new(1, -35, 0, 9)
-		close.BackgroundColor3 = Color3.new(1, 1, 1)
-		close.BackgroundTransparency = 1
-		close.Image = getcustomasset('pistonware/assets/new/close.png')
-		close.ImageColor3 = color.Light(uipallet.Text, 0.2)
-		close.ImageTransparency = 0.5
-		close.AutoButtonColor = false
-		close.Parent = window
+		local title = Instance.new('TextLabel')
+		title.Name = 'Title'
+		title.Size = UDim2.new(1, -60, 0, 20)
+		title.Position = UDim2.fromOffset(14, 10)
+		title.BackgroundTransparency = 1
+		title.Text = 'Inv Manager'
+		title.TextSize = 15
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		loaderStyle.text(title, 'SemiBold')
+		title.Parent = window
+		local hint = Instance.new('TextLabel')
+		hint.Name = 'Hint'
+		hint.Size = UDim2.new(1, -60, 0, 14)
+		hint.Position = UDim2.fromOffset(14, 31)
+		hint.BackgroundTransparency = 1
+		hint.Text = 'Pick a slot below, then the item for it. Clear slot empties it.'
+		hint.TextSize = 12
+		hint.TextXAlignment = Enum.TextXAlignment.Left
+		hint.TextTruncate = Enum.TextTruncate.AtEnd
+		loaderStyle.text(hint, 'Medium', loaderStyle.SubText)
+		hint.Parent = window
+		local divider = Instance.new('Frame')
+		divider.Name = 'Divider'
+		divider.Size = UDim2.new(1, -28, 0, 1)
+		divider.Position = UDim2.fromOffset(14, 54)
+		divider.BackgroundColor3 = loaderStyle.Orange
+		divider.BackgroundTransparency = 0.8
+		divider.BorderSizePixel = 0
+		divider.Parent = window
+		local close = icon(window, 'x', 16, '\u{00D7}', true, {
+			Name = 'Close',
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -10, 0, 10),
+			Size = UDim2.fromOffset(26, 26)
+		})
 		close.MouseEnter:Connect(function()
-			close.ImageTransparency = 0.3
-			tween:Tween(close, TweenInfo.new(0.2), {
-				BackgroundTransparency = 0.6
-			})
+			close.TextColor3 = loaderStyle.Text
 		end)
 		close.MouseLeave:Connect(function()
-			close.ImageTransparency = 0.5
-			tween:Tween(close, TweenInfo.new(0.2), {
-				BackgroundTransparency = 1
-			})
+			close.TextColor3 = loaderStyle.SubText
 		end)
 		close.MouseButton1Click:Connect(function()
 			window.Visible = false
 			vape.gui.ScaledGui.ClickGui.Visible = true
 		end)
-		local closecorner = Instance.new('UICorner')
-		closecorner.CornerRadius = UDim.new(1, 0)
-		closecorner.Parent = close
+		-- The selected slot, large, with its number and a way to empty it that works by touch too.
 		local bigslot = Instance.new('Frame')
-		bigslot.Size = UDim2.fromOffset(110, 111)
-		bigslot.Position = UDim2.fromOffset(11, 71)
-		bigslot.BackgroundColor3 = color.Dark(uipallet.Main, 0.02)
+		bigslot.Name = 'Selected'
+		bigslot.Size = UDim2.fromOffset(100, 100)
+		bigslot.Position = UDim2.fromOffset(14, 66)
 		bigslot.Parent = window
-		local bigslotcorner = Instance.new('UICorner')
-		bigslotcorner.CornerRadius = UDim.new(0, 4)
-		bigslotcorner.Parent = bigslot
-		local bigslotstroke = Instance.new('UIStroke')
-		bigslotstroke.Color = color.Light(uipallet.Main, 0.034)
-		bigslotstroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-		bigslotstroke.Parent = bigslot
+		slotBox(bigslot, 8)
+		local bigimage = Instance.new('ImageLabel')
+		bigimage.Size = UDim2.fromScale(0.64, 0.64)
+		bigimage.Position = UDim2.fromScale(0.5, 0.5)
+		bigimage.AnchorPoint = Vector2.new(0.5, 0.5)
+		bigimage.BackgroundTransparency = 1
+		bigimage.Image = ''
+		bigimage.Parent = bigslot
 		local slotnum = Instance.new('TextLabel')
-		slotnum.Size = UDim2.fromOffset(80, 20)
-		slotnum.Position = UDim2.fromOffset(25, 200)
+		slotnum.Size = UDim2.fromOffset(100, 16)
+		slotnum.Position = UDim2.fromOffset(14, 174)
 		slotnum.BackgroundTransparency = 1
+		slotnum.RichText = true
 		slotnum.Text = 'SLOT 1'
-		slotnum.TextColor3 = color.Dark(uipallet.Text, 0.1)
 		slotnum.TextSize = 12
-		slotnum.FontFace = uipallet.Font
+		loaderStyle.text(slotnum, 'Bold', loaderStyle.SubText)
 		slotnum.Parent = window
+		local clear = Instance.new('TextButton')
+		clear.Name = 'Clear'
+		clear.Size = UDim2.fromOffset(100, 28)
+		clear.Position = UDim2.fromOffset(14, 198)
+		clear.Text = 'Clear slot'
+		clear.TextSize = 13
+		clear.AutoButtonColor = false
+		loaderStyle.text(clear, 'Medium', loaderStyle.SubText)
+		local clearstroke = slotBox(clear, UDim.new(1, 0))
+		clear.Parent = window
+		clear.MouseEnter:Connect(function()
+			clearstroke.Color = loaderStyle.Orange
+			clear.TextColor3 = loaderStyle.Text
+		end)
+		clear.MouseLeave:Connect(function()
+			clearstroke.Color = loaderStyle.ButtonBorder
+			clear.TextColor3 = loaderStyle.SubText
+		end)
+
+		local function paintSlot(i)
+			local slot = window:FindFirstChild('Slot'..i)
+			local stroke = slot and slot:FindFirstChildOfClass('UIStroke')
+			if not stroke then return end
+			local selected = i == selectedslot
+			stroke.Color = (selected or hovered[i]) and loaderStyle.Orange or loaderStyle.ButtonBorder
+			stroke.Thickness = selected and 2 or 1
+			stroke.Transparency = (hovered[i] and not selected) and 0.3 or 0
+		end
+
+		local function refreshSelected()
+			slotnum.Text = 'SLOT <font color="#'..loaderStyle.Orange:ToHex()..'">'..selectedslot..'</font>'
+			bigimage.Image = window['Slot'..selectedslot].ImageLabel.Image
+		end
+
+		-- Writes one slot of the hotbar being edited, here and in its row in the list; nil empties it.
+		local function setSlot(i, id, image)
+			local obj = self.Hotbars[self.Selected]
+			if not obj then return end
+			window['Slot'..i].ImageLabel.Image = image
+			obj.Hotbar[tostring(i)] = id
+			obj.Object['Slot'..i].Image = image
+			if i == selectedslot then
+				refreshSelected()
+			end
+			requestSave()
+		end
+
+		clear.MouseButton1Click:Connect(function()
+			setSlot(selectedslot, nil, '')
+		end)
+
 		for i = 1, 9 do
 			local slotbkg = Instance.new('TextButton')
 			slotbkg.Name = 'Slot'..i
-			slotbkg.Size = UDim2.fromOffset(51, 52)
-			slotbkg.Position = UDim2.fromOffset(89 + (i * 55), 382)
-			slotbkg.BackgroundColor3 = color.Dark(uipallet.Main, 0.02)
+			slotbkg.Size = UDim2.fromOffset(46, 46)
+			slotbkg.Position = UDim2.fromOffset(130 + (i - 1) * 51, 262)
 			slotbkg.Text = ''
 			slotbkg.AutoButtonColor = false
+			slotBox(slotbkg)
 			slotbkg.Parent = window
 			local slotimage = Instance.new('ImageLabel')
-			slotimage.Size = UDim2.fromOffset(32, 32)
-			slotimage.Position = UDim2.new(0.5, -16, 0.5, -16)
+			slotimage.Size = UDim2.fromOffset(30, 30)
+			slotimage.Position = UDim2.fromScale(0.5, 0.5)
+			slotimage.AnchorPoint = Vector2.new(0.5, 0.5)
 			slotimage.BackgroundTransparency = 1
 			slotimage.Image = ''
 			slotimage.Parent = slotbkg
-			local slotcorner = Instance.new('UICorner')
-			slotcorner.CornerRadius = UDim.new(0, 4)
-			slotcorner.Parent = slotbkg
-			local slotstroke = Instance.new('UIStroke')
-			slotstroke.Color = color.Light(uipallet.Main, 0.04)
-			slotstroke.Thickness = 2
-			slotstroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-			slotstroke.Enabled = i == selectedslot
-			slotstroke.Parent = slotbkg
+			local index = Instance.new('TextLabel')
+			index.Name = 'Index'
+			index.Size = UDim2.fromOffset(12, 12)
+			index.Position = UDim2.fromOffset(4, 2)
+			index.BackgroundTransparency = 1
+			index.Text = tostring(i)
+			index.TextSize = 10
+			index.TextXAlignment = Enum.TextXAlignment.Left
+			loaderStyle.text(index, 'SemiBold', loaderStyle.SubText)
+			index.Parent = slotbkg
+			paintSlot(i)
 			slotbkg.MouseEnter:Connect(function()
-				slotbkg.BackgroundColor3 = color.Light(uipallet.Main, 0.034)
+				hovered[i] = true
+				paintSlot(i)
 			end)
 			slotbkg.MouseLeave:Connect(function()
-				slotbkg.BackgroundColor3 = color.Dark(uipallet.Main, 0.02)
+				hovered[i] = nil
+				paintSlot(i)
 			end)
 			slotbkg.MouseButton1Click:Connect(function()
-				window['Slot'..selectedslot].UIStroke.Enabled = false
+				local previous = selectedslot
 				selectedslot = i
-				slotstroke.Enabled = true
-				slotnum.Text = 'SLOT '..selectedslot
+				paintSlot(previous)
+				paintSlot(i)
+				refreshSelected()
 			end)
 			slotbkg.MouseButton2Click:Connect(function()
-				local obj = self.Hotbars[self.Selected]
-				if obj then
-					window['Slot'..i].ImageLabel.Image = ''
-					obj.Hotbar[tostring(i)] = nil
-					obj.Object['Slot'..i].Image = '	'
-				end
+				setSlot(i, nil, '')
 			end)
 		end
 		local searchbkg = Instance.new('Frame')
-		searchbkg.Size = UDim2.fromOffset(496, 31)
-		searchbkg.Position = UDim2.fromOffset(142, 80)
-		searchbkg.BackgroundColor3 = color.Light(uipallet.Main, 0.034)
+		searchbkg.Name = 'Search'
+		searchbkg.Size = UDim2.new(1, -142, 0, 30)
+		searchbkg.Position = UDim2.fromOffset(128, 66)
+		local searchstroke = slotBox(searchbkg, UDim.new(1, 0))
 		searchbkg.Parent = window
 		local search = Instance.new('TextBox')
-		search.Size = UDim2.new(1, -10, 0, 31)
-		search.Position = UDim2.fromOffset(10, 0)
+		search.Size = UDim2.new(1, -46, 1, 0)
+		search.Position = UDim2.fromOffset(14, 0)
 		search.BackgroundTransparency = 1
 		search.Text = ''
-		search.PlaceholderText = ''
+		search.PlaceholderText = 'Search items'
+		search.PlaceholderColor3 = Color3.fromRGB(110, 110, 110)
 		search.TextXAlignment = Enum.TextXAlignment.Left
-		search.TextColor3 = uipallet.Text
-		search.TextSize = 12
-		search.FontFace = uipallet.Font
+		search.TextSize = 13
 		search.ClearTextOnFocus = false
+		loaderStyle.text(search, 'Medium')
 		search.Parent = searchbkg
-		local searchcorner = Instance.new('UICorner')
-		searchcorner.CornerRadius = UDim.new(0, 4)
-		searchcorner.Parent = searchbkg
-		local searchicon = Instance.new('ImageLabel')
-		searchicon.Size = UDim2.fromOffset(14, 14)
-		searchicon.Position = UDim2.new(1, -26, 0, 8)
-		searchicon.BackgroundTransparency = 1
-		searchicon.Image = getcustomasset('pistonware/assets/new/search.png')
-		searchicon.ImageColor3 = color.Light(uipallet.Main, 0.37)
-		searchicon.Parent = searchbkg
+		local searchicon = icon(searchbkg, 'search', 14, '', false, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -10, 0.5, 0)
+		})
+		--[[ Where the image cannot be shown its stand-in is a '?', and the placeholder already says it:
+		only the character is hidden, so an image that lands later still shows. ]]
+		searchicon.TextTransparency = 1
+		search.Focused:Connect(function()
+			searchstroke.Color = loaderStyle.Orange
+		end)
+		search.FocusLost:Connect(function()
+			searchstroke.Color = loaderStyle.ButtonBorder
+		end)
 		local children = Instance.new('ScrollingFrame')
 		children.Name = 'Children'
-		children.Size = UDim2.fromOffset(500, 240)
-		children.Position = UDim2.fromOffset(144, 122)
+		children.Size = UDim2.new(1, -142, 0, 152)
+		children.Position = UDim2.fromOffset(128, 102)
 		children.BackgroundTransparency = 1
 		children.BorderSizePixel = 0
-		children.ScrollBarThickness = 2
-		children.ScrollBarImageTransparency = 0.75
+		children.ScrollBarThickness = 3
+		children.ScrollBarImageColor3 = loaderStyle.Orange
+		children.ScrollBarImageTransparency = 0.4
+		children.ScrollingDirection = Enum.ScrollingDirection.Y
 		children.CanvasSize = UDim2.new()
 		children.Parent = window
+		-- Room for the cells' borders, which the frame would otherwise clip.
+		local childpadding = Instance.new('UIPadding')
+		childpadding.PaddingLeft = UDim.new(0, 2)
+		childpadding.PaddingTop = UDim.new(0, 2)
+		childpadding.Parent = children
 		local windowlist = Instance.new('UIGridLayout')
 		windowlist.SortOrder = Enum.SortOrder.LayoutOrder
 		windowlist.FillDirectionMaxCells = 9
-		windowlist.CellSize = UDim2.fromOffset(51, 52)
-		windowlist.CellPadding = UDim2.fromOffset(4, 3)
+		windowlist.CellSize = UDim2.fromOffset(46, 46)
+		windowlist.CellPadding = UDim2.fromOffset(5, 5)
 		windowlist.Parent = children
-		windowlist:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
-			children.CanvasSize = UDim2.fromOffset(0, windowlist.AbsoluteContentSize.Y / vape.guiscale.Scale)
-		end)
 		table.insert(vape.Windows, window)
-	
+
+		--[[ On a phone the HUD's scale leaves this a third of the screen with 5 px text. Sized like
+		the menu window instead: to fit the screen under the top bar, up to 0.85 of full size and never
+		below the HUD's scale, while Auto rescale is on. A full-size screen keeps it at 1:1. ]]
+		local function fit()
+			if vape.ThreadFix then
+				pcall(setthreadidentity, 8)
+			end
+			local s = math.max(vape.guiscale and vape.guiscale.Scale or 1, 0.05)
+			local camera = workspace.CurrentCamera
+			local view = camera and camera.ViewportSize or Vector2.zero
+			local inset = 0
+			pcall(function()
+				inset = guiService:GetGuiInset().Y
+			end)
+			local factor = 1
+			if vape.Scale and vape.Scale.Enabled and view.X > 0 and view.Y > 0 then
+				factor = math.max(s, math.min((view.X - 16) / 600, (view.Y - inset - 16) / 322, 0.85)) / s
+			end
+			zoom.Scale = factor
+			-- Centred in the screen below the top bar.
+			window.Position = UDim2.new(0.5, 0, 0.5, inset / 2 / s)
+		end
+		window:GetPropertyChangedSignal('Visible'):Connect(function()
+			if window.Visible then
+				fit()
+			end
+		end)
+		if vape.guiscale then
+			vape.guiscale:GetPropertyChangedSignal('Scale'):Connect(fit)
+		end
+		if gameCamera then
+			vape:Clean(gameCamera:GetPropertyChangedSignal('ViewportSize'):Connect(fit))
+		end
+
 		local function createitem(id, image)
 			local slotbkg = Instance.new('TextButton')
-			slotbkg.BackgroundColor3 = color.Light(uipallet.Main, 0.02)
 			slotbkg.Text = ''
 			slotbkg.AutoButtonColor = false
+			local stroke = slotBox(slotbkg)
 			slotbkg.Parent = children
 			local slotimage = Instance.new('ImageLabel')
-			slotimage.Size = UDim2.fromOffset(32, 32)
-			slotimage.Position = UDim2.new(0.5, -16, 0.5, -16)
+			slotimage.Size = UDim2.fromOffset(30, 30)
+			slotimage.Position = UDim2.fromScale(0.5, 0.5)
+			slotimage.AnchorPoint = Vector2.new(0.5, 0.5)
 			slotimage.BackgroundTransparency = 1
 			slotimage.Image = image
 			slotimage.Parent = slotbkg
-			local slotcorner = Instance.new('UICorner')
-			slotcorner.CornerRadius = UDim.new(0, 4)
-			slotcorner.Parent = slotbkg
 			slotbkg.MouseEnter:Connect(function()
-				slotbkg.BackgroundColor3 = color.Light(uipallet.Main, 0.04)
+				stroke.Color = loaderStyle.Orange
+				stroke.Transparency = 0.3
 			end)
 			slotbkg.MouseLeave:Connect(function()
-				slotbkg.BackgroundColor3 = color.Light(uipallet.Main, 0.02)
+				stroke.Color = loaderStyle.ButtonBorder
+				stroke.Transparency = 0
 			end)
 			slotbkg.MouseButton1Click:Connect(function()
-				local obj = self.Hotbars[self.Selected]
-				if obj then
-					window['Slot'..selectedslot].ImageLabel.Image = image
-					obj.Hotbar[tostring(selectedslot)] = id
-					obj.Object['Slot'..selectedslot].Image = image
-				end
+				setSlot(selectedslot, id, image)
 			end)
 		end
-	
+
 		local function indexSearch(text)
 			for _, v in children:GetChildren() do
 				if v:IsA('TextButton') then
@@ -11635,30 +12244,48 @@ run(function()
 					v:Destroy()
 				end
 			end
-	
+
+			local count = 0
 			if text == '' then
 				for _, v in {'diamond_sword', 'diamond_pickaxe', 'diamond_axe', 'shears', 'wood_bow', 'wool_white', 'fireball', 'apple', 'iron', 'gold', 'diamond', 'emerald'} do
-					createitem(v, bedwars.ItemMeta[v].image)
+					local meta = bedwars.ItemMeta[v]
+					if meta and meta.image then
+						createitem(v, meta.image)
+						count += 1
+					end
 				end
-				return
-			end
-	
-			for i, v in bedwars.ItemMeta do
-				if text:lower() == i:lower():sub(1, text:len()) then
-					if not v.image then continue end
-					createitem(i, v.image)
+			else
+				for i, v in bedwars.ItemMeta do
+					if text:lower() == i:lower():sub(1, text:len()) then
+						if not v.image then continue end
+						createitem(i, v.image)
+						count += 1
+					end
 				end
 			end
+			-- Counted in rows, not read off the layout: the layout reports pixels after both scales.
+			local rows = math.ceil(count / 9)
+			children.CanvasSize = UDim2.fromOffset(0, rows > 0 and rows * 51 - 1 or 0)
 		end
-	
+
 		search:GetPropertyChangedSignal('Text'):Connect(function()
 			indexSearch(search.Text)
 		end)
 		indexSearch('')
-	
+
+		-- The hotbar being edited, put into the slots when the editor opens.
+		function self:RefreshWindow()
+			local obj = self.Hotbars[self.Selected]
+			for i = 1, 9 do
+				window['Slot'..i].ImageLabel.Image = itemIcon(obj and obj.Hotbar[tostring(i)])
+			end
+			refreshSelected()
+		end
+		refreshSelected()
+
 		return window
 	end
-	
+
 	vape.Components.HotbarList = function(optionsettings, children, api)
 		if vape.ThreadFix then
 			setthreadidentity(8)
@@ -11668,73 +12295,108 @@ run(function()
 			Hotbars = {},
 			Selected = 1
 		}
-		local hotbarlist = Instance.new('TextButton')
+		-- As wide as the card, growing with the hotbars in it.
+		local hotbarlist = Instance.new('Frame')
 		hotbarlist.Name = 'HotbarList'
-		hotbarlist.Size = UDim2.fromOffset(220, 40)
-		hotbarlist.BackgroundColor3 = optionsettings.Darker and (children.BackgroundColor3 == color.Dark(uipallet.Main, 0.02) and color.Dark(uipallet.Main, 0.04) or color.Dark(uipallet.Main, 0.02)) or children.BackgroundColor3
-		hotbarlist.Text = ''
-		hotbarlist.BorderSizePixel = 0
-		hotbarlist.AutoButtonColor = false
+		hotbarlist.AutomaticSize = Enum.AutomaticSize.Y
+		hotbarlist.Size = UDim2.new(1, 0, 0, 0)
+		hotbarlist.BackgroundTransparency = 1
+		hotbarlist.LayoutOrder = optionsettings.LayoutOrder or 0
 		hotbarlist.Parent = children
-		local textbkg = Instance.new('Frame')
-		textbkg.Name = 'BKG'
-		textbkg.Size = UDim2.new(1, -20, 0, 31)
-		textbkg.Position = UDim2.fromOffset(10, 4)
-		textbkg.BackgroundColor3 = color.Light(uipallet.Main, 0.034)
-		textbkg.Parent = hotbarlist
-		local textbkgcorner = Instance.new('UICorner')
-		textbkgcorner.CornerRadius = UDim.new(0, 4)
-		textbkgcorner.Parent = textbkg
-		local textbutton = Instance.new('TextButton')
-		textbutton.Name = 'HotbarList'
-		textbutton.Size = UDim2.new(1, -2, 1, -2)
-		textbutton.Position = UDim2.fromOffset(1, 1)
-		textbutton.BackgroundColor3 = uipallet.Main
-		textbutton.Text = ''
-		textbutton.AutoButtonColor = false
-		textbutton.Parent = textbkg
-		textbutton.MouseEnter:Connect(function()
-			tween:Tween(textbkg, TweenInfo.new(0.2), {
-				BackgroundColor3 = color.Light(uipallet.Main, 0.14)
-			})
+		optionapi.Object = hotbarlist
+		local listpadding = Instance.new('UIPadding')
+		listpadding.PaddingLeft = UDim.new(0, 12)
+		listpadding.PaddingRight = UDim.new(0, 12)
+		listpadding.PaddingTop = UDim.new(0, 4)
+		listpadding.PaddingBottom = UDim.new(0, 8)
+		listpadding.Parent = hotbarlist
+		local listlayout = Instance.new('UIListLayout')
+		listlayout.SortOrder = Enum.SortOrder.LayoutOrder
+		listlayout.Padding = UDim.new(0, 6)
+		listlayout.Parent = hotbarlist
+		local add = Instance.new('TextButton')
+		add.Name = 'Add'
+		add.LayoutOrder = 1
+		add.Size = UDim2.new(1, 0, 0, 30)
+		add.Text = ''
+		add.AutoButtonColor = false
+		local addstroke = loaderStyle.box(add, UDim.new(1, 0))
+		add.Parent = hotbarlist
+		local addrow = Instance.new('Frame')
+		addrow.Size = UDim2.fromScale(1, 1)
+		addrow.BackgroundTransparency = 1
+		addrow.Parent = add
+		local addlayout = Instance.new('UIListLayout')
+		addlayout.FillDirection = Enum.FillDirection.Horizontal
+		addlayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		addlayout.VerticalAlignment = Enum.VerticalAlignment.Center
+		addlayout.SortOrder = Enum.SortOrder.LayoutOrder
+		addlayout.Padding = UDim.new(0, 4)
+		addlayout.Parent = addrow
+		icon(addrow, 'plus', 14, '+', false, {LayoutOrder = 1, TextColor3 = loaderStyle.Orange})
+		local addlabel = Instance.new('TextLabel')
+		addlabel.LayoutOrder = 2
+		addlabel.AutomaticSize = Enum.AutomaticSize.X
+		addlabel.Size = UDim2.fromOffset(0, 18)
+		addlabel.BackgroundTransparency = 1
+		addlabel.Text = 'New hotbar'
+		addlabel.TextSize = 14
+		loaderStyle.text(addlabel, 'Medium')
+		addlabel.Parent = addrow
+		add.MouseEnter:Connect(function()
+			addstroke.Transparency = 0.2
 		end)
-		textbutton.MouseLeave:Connect(function()
-			tween:Tween(textbkg, TweenInfo.new(0.2), {
-				BackgroundColor3 = color.Light(uipallet.Main, 0.034)
-			})
+		add.MouseLeave:Connect(function()
+			addstroke.Transparency = 0.55
 		end)
-		local textbuttoncorner = Instance.new('UICorner')
-		textbuttoncorner.CornerRadius = UDim.new(0, 4)
-		textbuttoncorner.Parent = textbutton
-		local textbuttonicon = Instance.new('ImageLabel')
-		textbuttonicon.Size = UDim2.fromOffset(12, 12)
-		textbuttonicon.Position = UDim2.fromScale(0.5, 0.5)
-		textbuttonicon.AnchorPoint = Vector2.new(0.5, 0.5)
-		textbuttonicon.BackgroundTransparency = 1
-		textbuttonicon.Image = getcustomasset('pistonware/assets/new/add.png')
-		textbuttonicon.ImageColor3 = Color3.fromHSV(0.46, 0.96, 0.52)
-		textbuttonicon.Parent = textbutton
+		local hint = Instance.new('TextLabel')
+		hint.Name = 'Hint'
+		hint.LayoutOrder = 2
+		hint.Size = UDim2.new(1, 0, 0, 14)
+		hint.BackgroundTransparency = 1
+		hint.Text = (inputService.TouchEnabled and 'Tap' or 'Click')..' a hotbar to use it, and again to edit its slots.'
+		hint.TextSize = 12
+		hint.TextXAlignment = Enum.TextXAlignment.Left
+		hint.TextTruncate = Enum.TextTruncate.AtEnd
+		hint.Visible = false
+		loaderStyle.text(hint, 'Medium', loaderStyle.SubText)
+		hint.Parent = hotbarlist
 		local childrenlist = Instance.new('Frame')
-		childrenlist.Size = UDim2.new(1, 0, 1, -40)
-		childrenlist.Position = UDim2.fromOffset(0, 40)
+		childrenlist.Name = 'Hotbars'
+		childrenlist.LayoutOrder = 3
+		childrenlist.AutomaticSize = Enum.AutomaticSize.Y
+		childrenlist.Size = UDim2.new(1, 0, 0, 0)
 		childrenlist.BackgroundTransparency = 1
 		childrenlist.Parent = hotbarlist
 		local windowlist = Instance.new('UIListLayout')
 		windowlist.SortOrder = Enum.SortOrder.LayoutOrder
-		windowlist.HorizontalAlignment = Enum.HorizontalAlignment.Center
-		windowlist.Padding = UDim.new(0, 3)
+		windowlist.Padding = UDim.new(0, 4)
 		windowlist.Parent = childrenlist
-		windowlist:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
-			hotbarlist.Size = UDim2.fromOffset(220, math.min(43 + windowlist.AbsoluteContentSize.Y / vape.guiscale.Scale, 603))
-		end)
-		textbutton.MouseButton1Click:Connect(function()
+		add.MouseButton1Click:Connect(function()
 			optionapi:AddHotbar()
+			requestSave()
 		end)
 		optionapi.Window = CreateWindow(optionapi)
-	
+
+		-- The selected hotbar, the one AutoHotbar sorts to, is lit with its border at full strength.
+		function optionapi:Repaint()
+			for index, entry in self.Hotbars do
+				local selected = index == self.Selected
+				local object = entry.Object
+				object.LayoutOrder = index
+				object.BackgroundColor3 = selected and Color3.fromRGB(10, 10, 10):Lerp(loaderStyle.Orange, 0.22) or loaderStyle.Background
+				local stroke = object:FindFirstChildOfClass('UIStroke')
+				if stroke then
+					stroke.Transparency = selected and 0 or 0.55
+				end
+				local active = object:FindFirstChild('Active')
+				if active then
+					active.Visible = selected
+				end
+			end
+			hint.Visible = #self.Hotbars > 0
+		end
+
 		function optionapi:Save(savetab)
 			local hotbars = {}
 			for _, v in self.Hotbars do
@@ -11745,7 +12407,7 @@ run(function()
 				Hotbars = hotbars
 			}
 		end
-	
+
 		function optionapi:Load(savetab)
 			for _, v in self.Hotbars do
 				v.Object:ClearAllChildren()
@@ -11759,89 +12421,83 @@ run(function()
 				self:AddHotbar(v)
 			end
 			self.Selected = savetab.Selected or 1
+			-- The rows were painted against the selection before this one.
+			self:Repaint()
 		end
-	
+
 		function optionapi:AddHotbar(data)
 			local hotbardata = {Hotbar = data or {}}
 			table.insert(self.Hotbars, hotbardata)
 			local hotbar = Instance.new('TextButton')
-			hotbar.Size = UDim2.fromOffset(200, 27)
-			hotbar.BackgroundColor3 = table.find(self.Hotbars, hotbardata) == self.Selected and color.Light(uipallet.Main, 0.034) or uipallet.Main
+			hotbar.Name = 'Hotbar'
+			hotbar.Size = UDim2.new(1, 0, 0, 32)
 			hotbar.Text = ''
 			hotbar.AutoButtonColor = false
+			loaderStyle.box(hotbar)
 			hotbar.Parent = childrenlist
 			hotbardata.Object = hotbar
-			local hotbarcorner = Instance.new('UICorner')
-			hotbarcorner.CornerRadius = UDim.new(0, 4)
-			hotbarcorner.Parent = hotbar
 			for i = 1, 9 do
 				local slot = Instance.new('ImageLabel')
 				slot.Name = 'Slot'..i
-				slot.Size = UDim2.fromOffset(17, 18)
-				slot.Position = UDim2.fromOffset(-7 + (i * 18), 5)
-				slot.BackgroundColor3 = color.Dark(uipallet.Main, 0.02)
-				slot.Image = hotbardata.Hotbar[tostring(i)] and bedwars.getIcon({itemType = hotbardata.Hotbar[tostring(i)]}, true) or ''
+				slot.Size = UDim2.fromOffset(22, 22)
+				slot.Position = UDim2.fromOffset(5 + (i - 1) * 25, 5)
+				slot.BackgroundColor3 = loaderStyle.Button
 				slot.BorderSizePixel = 0
+				slot.Image = itemIcon(hotbardata.Hotbar[tostring(i)])
 				slot.Parent = hotbar
+				loaderStyle.corner(slot, 4)
 			end
+			local active = Instance.new('TextLabel')
+			active.Name = 'Active'
+			active.AnchorPoint = Vector2.new(1, 0.5)
+			active.Position = UDim2.new(1, -34, 0.5, 0)
+			active.Size = UDim2.fromOffset(60, 16)
+			active.BackgroundTransparency = 1
+			active.Text = 'IN USE'
+			active.TextSize = 11
+			active.TextXAlignment = Enum.TextXAlignment.Right
+			active.Visible = false
+			loaderStyle.text(active, 'Bold', loaderStyle.Orange)
+			active.Parent = hotbar
 			hotbar.MouseButton1Click:Connect(function()
 				local ind = table.find(optionapi.Hotbars, hotbardata)
 				if ind == optionapi.Selected then
 					vape.gui.ScaledGui.ClickGui.Visible = false
 					optionapi.Window.Visible = true
-					for i = 1, 9 do
-						optionapi.Window['Slot'..i].ImageLabel.Image = hotbardata.Hotbar[tostring(i)] and bedwars.getIcon({itemType = hotbardata.Hotbar[tostring(i)]}, true) or ''
-					end
-				else
-					if optionapi.Hotbars[optionapi.Selected] then
-						optionapi.Hotbars[optionapi.Selected].Object.BackgroundColor3 = uipallet.Main
-					end
-					hotbar.BackgroundColor3 = color.Light(uipallet.Main, 0.034)
+					optionapi:RefreshWindow()
+				elseif ind then
 					optionapi.Selected = ind
+					optionapi:Repaint()
+					requestSave()
 				end
 			end)
-			local close = Instance.new('ImageButton')
-			close.Name = 'Close'
-			close.Size = UDim2.fromOffset(16, 16)
-			close.Position = UDim2.new(1, -23, 0, 6)
-			close.BackgroundColor3 = Color3.new(1, 1, 1)
-			close.BackgroundTransparency = 1
-			close.Image = getcustomasset('pistonware/assets/new/closemini.png')
-			close.ImageColor3 = color.Light(uipallet.Text, 0.2)
-			close.ImageTransparency = 0.5
-			close.AutoButtonColor = false
-			close.Parent = hotbar
-			local closecorner = Instance.new('UICorner')
-			closecorner.CornerRadius = UDim.new(1, 0)
-			closecorner.Parent = close
+			local close = icon(hotbar, 'x', 14, '\u{00D7}', true, {
+				Name = 'Close',
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -6, 0.5, 0),
+				Size = UDim2.fromOffset(22, 22)
+			})
 			close.MouseEnter:Connect(function()
-				close.ImageTransparency = 0.3
-				tween:Tween(close, TweenInfo.new(0.2), {
-					BackgroundTransparency = 0.6
-				})
+				close.TextColor3 = loaderStyle.Text
 			end)
 			close.MouseLeave:Connect(function()
-				close.ImageTransparency = 0.5
-				tween:Tween(close, TweenInfo.new(0.2), {
-					BackgroundTransparency = 1
-				})
+				close.TextColor3 = loaderStyle.SubText
 			end)
 			close.MouseButton1Click:Connect(function()
 				local ind = table.find(self.Hotbars, hotbardata)
-				local obj = self.Hotbars[self.Selected]
-				local obj2 = self.Hotbars[ind]
-				if obj and obj2 then
-					obj2.Object:ClearAllChildren()
-					obj2.Object:Destroy()
-					table.remove(self.Hotbars, ind)
-					ind = table.find(self.Hotbars, obj)
-					self.Selected = table.find(self.Hotbars, obj) or 1
-				end
+				if not ind then return end
+				local selected = self.Hotbars[self.Selected]
+				hotbar:Destroy()
+				table.remove(self.Hotbars, ind)
+				self.Selected = selected and table.find(self.Hotbars, selected) or 1
+				self:Repaint()
+				requestSave()
 			end)
+			self:Repaint()
 		end
-	
+
 		api.Options.HotbarList = optionapi
-	
+
 		return optionapi
 	end
 	
@@ -11969,31 +12625,33 @@ run(function()
 	
 	AutoHotbar = vape.Categories.Inventory:CreateModule({
 		Name = 'AutoHotbar',
+		DisplayName = 'Inv Manager',
 		Function = function(callback)
 			if callback then
 				task.spawn(sortCallback)
 				if Mode.Value == 'On Key' then
-					AutoHotbar:Toggle()
+					AutoHotbar:Toggle(nil, true)
 					return
 				end
 	
 				AutoHotbar:Clean(vapeEvents.InventoryAmountChanged.Event:Connect(sortCallback))
 			end
 		end,
-		Tooltip = 'Sorts your hotbar the way you want it.'
+		Tooltip = 'Sorts your items into the hotbar layout you set up.\nRuns as items change or on a key, and can clear the rest.'
 	})
+	List = AutoHotbar:CreateHotbarList({})
+	AutoHotbar:CreateDivider({Text = 'Extras'})
 	Mode = AutoHotbar:CreateDropdown({
 		Name = 'Activation',
 		List = {'Toggle', 'On Key'},
 		Function = function()
 			if AutoHotbar.Enabled then
-				AutoHotbar:Toggle()
-				AutoHotbar:Toggle()
+				AutoHotbar:Toggle(nil, true)
+				AutoHotbar:Toggle(nil, true)
 			end
 		end
 	})
 	Clear = AutoHotbar:CreateToggle({Name = 'Clear Hotbar'})
-	List = AutoHotbar:CreateHotbarList({})
 end)
 	
 run(function()
@@ -12007,7 +12665,7 @@ run(function()
 				oldclickhold = bedwars.ClickHold.startClick
 				oldshowprogress = bedwars.ClickHold.showProgress
 				bedwars.ClickHold.startClick = function(self)
-					self.startedClickTime = os.clock()
+					self.startedClickTime = tick()
 					local handle = self:showProgress()
 					local clicktime = self.startedClickTime
 					bedwars.RuntimeLib.Promise.defer(function()
@@ -12085,7 +12743,7 @@ run(function()
 				until not FastDrop.Enabled
 			end
 		end,
-		Tooltip = 'Dumps items quickly while you hold Q'
+		Tooltip = 'Quickly drops your held item while you hold H or Backspace.'
 	})
 end)
 	
@@ -12110,7 +12768,7 @@ run(function()
 	            end))
 	        end
 		end,
-		Tooltip = 'Your own effect when a bed goes down'
+		Tooltip = 'Plays an effect of your choice when a bed is broken.'
 	})
 	local BreakEffectName = {}
 	for i, v in bedwars.BedBreakEffectMeta do
@@ -12125,18 +12783,44 @@ run(function()
 end)
 	
 run(function()
-	vape.Legit:CreateModule({
+	local CleanKit
+	local oldspawnorb
+
+	local function hideEffect(obj)
+		if obj.Name == 'WindWalkerEffect' and obj:IsA('GuiObject') then
+			obj.Visible = false
+		end
+	end
+
+	CleanKit = vape.Legit:CreateModule({
 		Name = 'Clean Kit',
+		Tab = 'Kits',
 		Function = function(callback)
+			local controller = bedwars.WindWalkerController
 			if callback then
-				bedwars.WindWalkerController.spawnOrb = function() end
+				if controller then
+					oldspawnorb = rawget(controller, 'spawnOrb')
+					controller.spawnOrb = function() end
+				end
+				-- The kit mounts its status tile only once the match spawns you, which is
+				-- after a profile has already switched this on, so catch it as it appears.
+				CleanKit:Clean(lplr.PlayerGui.DescendantAdded:Connect(hideEffect))
 				local zephyreffect = lplr.PlayerGui:FindFirstChild('WindWalkerEffect', true)
-				if zephyreffect then 
-					zephyreffect.Visible = false 
+				if zephyreffect then
+					hideEffect(zephyreffect)
+				end
+			else
+				if controller then
+					controller.spawnOrb = oldspawnorb
+				end
+				oldspawnorb = nil
+				local zephyreffect = lplr.PlayerGui:FindFirstChild('WindWalkerEffect', true)
+				if zephyreffect and zephyreffect:IsA('GuiObject') then
+					zephyreffect.Visible = true
 				end
 			end
 		end,
-		Tooltip = 'Gets rid of the zephyr status indicator'
+		Tooltip = 'Hides the Zephyr orbs and status indicator.'
 	})
 end)
 	
@@ -12162,15 +12846,15 @@ run(function()
 				bedwars.ViewmodelController:showCrosshair()
 			end
 		end,
-		Tooltip = 'Your own first person crosshair, whatever image you pick.'
+		Tooltip = 'Replaces your crosshair with an image of your choice.'
 	})
 	Image = Crosshair:CreateTextBox({
 		Name = 'Image',
 		Placeholder = 'image id (roblox)',
 		Function = function(enter)
 			if enter and Crosshair.Enabled then
-				Crosshair:Toggle()
-				Crosshair:Toggle()
+				Crosshair:Toggle(nil, true)
+				Crosshair:Toggle(nil, true)
 			end
 		end
 	})
@@ -12212,7 +12896,7 @@ run(function()
 				debug.setconstant(bedwars.DamageIndicator, 119, 'Thickness')
 			end
 		end,
-		Tooltip = 'Change how the damage indicator looks'
+		Tooltip = 'Restyles the damage numbers that pop up on hits.\nSet the font, color, size, outline and how long they stay.'
 	})
 	local fontitems = {'GothamBlack'}
 	for _, v in Enum.Font:GetEnumItems() do
@@ -12296,7 +12980,7 @@ run(function()
 			
 			bedwars.FovController:setFOV(bedwars.Store:getState().Settings.fov)
 		end,
-		Tooltip = 'Tweaks how far and wide the camera sees'
+		Tooltip = 'Changes how wide your camera can see.\nSet any field of view from 30 to 120.'
 	})
 	Value = FOV:CreateSlider({
 		Name = 'FOV',
@@ -12372,14 +13056,14 @@ run(function()
 				restoreGameNametags()
 			end
 		end,
-		Tooltip = 'Turns off some effects to get you more frames'
+		Tooltip = 'Turns off heavy effects to raise your frame rate.\nCan remove kill effects, the visualizer and game nametags.'
 	})
 	Kill = FPSBoost:CreateToggle({
 		Name = 'Kill Effects',
 		Function = function()
 			if FPSBoost.Enabled then
-				FPSBoost:Toggle()
-				FPSBoost:Toggle()
+				FPSBoost:Toggle(nil, true)
+				FPSBoost:Toggle(nil, true)
 			end
 		end,
 		Default = true
@@ -12388,8 +13072,8 @@ run(function()
 		Name = 'Visualizer',
 		Function = function()
 			if FPSBoost.Enabled then
-				FPSBoost:Toggle()
-				FPSBoost:Toggle()
+				FPSBoost:Toggle(nil, true)
+				FPSBoost:Toggle(nil, true)
 			end
 		end,
 		Default = true
@@ -12452,7 +13136,7 @@ run(function()
 				table.clear(done)
 			end
 		end,
-		Tooltip = 'Change how the hit highlight looks'
+		Tooltip = 'Recolors the red highlight players get when hit.\nPick its color and how see-through it is.'
 	})
 	Color = HitColor:CreateColorSlider({
 		Name = 'Color',
@@ -12463,11 +13147,12 @@ end)
 run(function()
 	vape.Legit:CreateModule({
 		Name = 'HitFix',
+		Tab = 'Combat',
 		Function = function(callback)
 			debug.setconstant(bedwars.SwordController.swingSwordAtMouse, 23, callback and 'raycast' or 'Raycast')
 			debug.setupvalue(bedwars.SwordController.swingSwordAtMouse, 4, callback and bedwars.QueryUtil or workspace)
 		end,
-		Tooltip = 'Points raycasts at the right function'
+		Tooltip = 'Makes your sword hits land more reliably.'
 	})
 end)
 	
@@ -12518,7 +13203,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Change how the bedwars UI looks'
+		Tooltip = 'Restyles the BedWars hotbar and health bar.\nPick the health font and colors for both.'
 	})
 	local fontitems = {'LuckiestGuy'}
 	for _, v in Enum.Font:GetEnumItems() do
@@ -12694,7 +13379,7 @@ run(function()
 				lplr:SetAttribute('KillEffectType', 'default')
 			end
 		end,
-		Tooltip = 'Your own effect on a final kill'
+		Tooltip = 'Plays your chosen effect when you get a final kill.\nUse any BedWars effect or Gravity, Lightning or Delete.'
 	})
 	local modes = {'Bedwars'}
 	for i in killeffects do
@@ -12731,47 +13416,54 @@ end)
 run(function()
 	local ReachDisplay
 	local label
-	
+
+	local function unit(value)
+		return tostring(value)..' <font color="'..loaderStyle.SubHex..'">studs</font>'
+	end
+
 	ReachDisplay = vape.Legit:CreateModule({
 		Name = 'Reach Display',
 		Function = function(callback)
 			if callback then
 				repeat
-					label.Text = (store.attackReachUpdate > os.clock() and store.attackReach or '0.00')..' studs'
+					label.Text = unit(store.attackReachUpdate > os.clock() and store.attackReach or '0.00')
 					task.wait(0.4)
 				until not ReachDisplay.Enabled
 			end
 		end,
-		Size = UDim2.fromOffset(100, 41)
+		Size = UDim2.fromOffset(100, 41),
+		Tooltip = 'Shows the distance of your last hit.'
 	})
+	-- Kept for the profiles that save it; the face is the menu's Inter, as on the other widgets.
 	ReachDisplay:CreateFont({
 		Name = 'Font',
 		Blacklist = 'Gotham',
-		Function = function(val)
-			label.FontFace = val
+		Function = function()
+			if label then
+				loaderStyle.text(label, 'SemiBold')
+			end
 		end
 	})
 	ReachDisplay:CreateColorSlider({
 		Name = 'Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
+		DefaultHue = loaderStyle.Hue,
+		DefaultSat = loaderStyle.Sat,
+		DefaultValue = loaderStyle.Value,
+		DefaultOpacity = 1 - loaderStyle.Transparency,
 		Function = function(hue, sat, val, opacity)
 			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 			label.BackgroundTransparency = 1 - opacity
 		end
 	})
+	-- The loader's box, with the reading in its light grey and the unit in its secondary grey.
 	label = Instance.new('TextLabel')
 	label.Size = UDim2.fromScale(1, 1)
-	label.BackgroundTransparency = 0.5
+	loaderStyle.box(label)
+	label.RichText = true
 	label.TextSize = 15
-	label.Font = Enum.Font.Gotham
-	label.Text = '0.00 studs'
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.BackgroundColor3 = Color3.new()
+	label.Text = unit('0.00')
+	loaderStyle.text(label, 'SemiBold')
 	label.Parent = ReachDisplay.Children
-	local corner = Instance.new('UICorner')
-	corner.CornerRadius = UDim.new(0, 4)
-	corner.Parent = label
 end)
 	
 run(function()
@@ -12823,6 +13515,7 @@ run(function()
 	
 	SongBeats = vape.Legit:CreateModule({
 		Name = 'Song Beats',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				songobj = Instance.new('Sound')
@@ -12852,7 +13545,7 @@ run(function()
 				table.clear(alreadypicked)
 			end
 		end,
-		Tooltip = 'A little mp3 player built right in'
+		Tooltip = 'Plays your own music files while you play.\nCan pulse your FOV to the beat; set the volume and pulse size.'
 	})
 	List = SongBeats:CreateTextList({
 		Name = 'Songs',
@@ -12877,8 +13570,8 @@ run(function()
 				FOVValue.Object.Visible = callback
 			end
 			if SongBeats.Enabled then
-				SongBeats:Toggle()
-				SongBeats:Toggle()
+				SongBeats:Toggle(nil, true)
+				SongBeats:Toggle(nil, true)
 			end
 		end,
 		Default = true
@@ -13080,6 +13773,7 @@ run(function()
 
 	SoundChanger = vape.Legit:CreateModule({
 		Name = 'SoundChanger',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				buildProjectileSounds()
@@ -13186,7 +13880,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Swap ingame sounds for your own and set how loud they are.'
+		Tooltip = 'Replaces game sounds and changes how loud they are.\nCan also mute bow sounds apart from the hit ding.'
 	})
 
 	List = SoundChanger:CreateTextList({
@@ -13302,6 +13996,166 @@ run(function()
 		end
 	end
 	
+	--[[ Topbar Position. The BedWars top bar -- its row of buttons, the Settings menu that drops
+	from them and, in a match, the scores and timer beside them -- sits at the right of the strip
+	Roblox leaves free along the top of the screen. Middle centres that whole row on the screen
+	instead. The game's own app draws it and moves it again whenever its size changes, so each
+	move of the game's is kept (it is where Default puts it back) and the row is centred again
+	straight after. ]]
+	local TopbarPosition
+	local topbar = {
+		Original = setmetatable({}, {__mode = 'k'}),
+		Placed = setmetatable({}, {__mode = 'k'}),
+		Watched = setmetatable({}, {__mode = 'k'}),
+		Connections = {}
+	}
+
+	function topbar.middle()
+		return UICleanup ~= nil and UICleanup.Enabled and TopbarPosition ~= nil and TopbarPosition.Value == 'Middle'
+	end
+
+	-- Several changes in one frame (a resize moves and resizes everything) place it once.
+	function topbar.queue()
+		if topbar.Queued then return end
+		topbar.Queued = true
+		task.defer(function()
+			topbar.Queued = false
+			if topbar.middle() then
+				topbar.place()
+			end
+		end)
+	end
+
+	function topbar.watch(object)
+		if topbar.Watched[object] then return end
+		topbar.Watched[object] = true
+		local connections = topbar.Connections
+		table.insert(connections, object:GetPropertyChangedSignal('AbsoluteSize'):Connect(topbar.queue))
+		if object:IsA('GuiObject') then
+			table.insert(connections, object:GetPropertyChangedSignal('Visible'):Connect(topbar.queue))
+			table.insert(connections, object:GetPropertyChangedSignal('Position'):Connect(function()
+				if object.Position ~= topbar.Placed[object] then
+					topbar.queue()
+				end
+			end))
+		else
+			table.insert(connections, object:GetPropertyChangedSignal('AbsolutePosition'):Connect(topbar.queue))
+			table.insert(connections, object.ChildAdded:Connect(topbar.queue))
+		end
+	end
+
+	-- Where the game last put a piece: where it is now, unless that is where this put it.
+	function topbar.origin(object)
+		local current = object.Position
+		if current ~= topbar.Placed[object] then
+			topbar.Original[object] = current
+		end
+		return topbar.Original[object]
+	end
+
+	-- Puts a piece so its right edge is at `right` (a screen x), at the height the game gave it.
+	function topbar.move(object, gui, right)
+		local original = topbar.origin(object)
+		local x = right - gui.AbsolutePosition.X - (1 - object.AnchorPoint.X) * object.AbsoluteSize.X
+		local position = UDim2.new(0, math.floor(x + 0.5), original.Y.Scale, original.Y.Offset)
+		topbar.Placed[object] = position
+		if object.Position ~= position then
+			object.Position = position
+		end
+		topbar.watch(object)
+	end
+
+	function topbar.place()
+		local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+		local appGui = playerGui and playerGui:FindFirstChild('TopBarAppGui')
+		local buttons = appGui and appGui:FindFirstChild('TopBarApp')
+		local camera = workspace.CurrentCamera
+		if not (buttons and buttons:IsA('GuiObject') and camera) then return end
+		topbar.watch(appGui)
+		topbar.watch(buttons)
+		local statsGui = playerGui:FindFirstChild('TopBarStatsGui')
+		local stats = statsGui and statsGui:FindFirstChild('TopBarStatsScroller')
+		if statsGui then
+			topbar.watch(statsGui)
+		end
+		if stats and stats:IsA('GuiObject') then
+			topbar.watch(stats)
+		else
+			stats = nil
+		end
+		local statsWidth = stats and stats.Visible and stats.AbsoluteSize.X or 0
+		--[[ The mobile Pistonware button follows the buttons, 7 px to their left, so its place in the
+		row is kept clear: the scores and timer stop short of it rather than running under it. ]]
+		local vapeButton = vape.VapeButton
+		local reserve = (vapeButton and vapeButton.Parent) and math.max(vapeButton.AbsoluteSize.X, 32) + 7 or 0
+		local width = buttons.AbsoluteSize.X + reserve + (statsWidth > 0 and statsWidth + 8 or 0)
+		local left, area = appGui.AbsolutePosition.X, appGui.AbsoluteSize.X
+		if area <= 0 then return end
+		--[[ Centred on the screen, but kept inside the strip Roblox leaves free so it never runs under
+		Roblox's buttons. That strip is TopbarInset where the client reports one; TopBarAppGui itself
+		covers the whole screen. ]]
+		local low, high = left, left + area
+		pcall(function()
+			local inset = guiService.TopbarInset
+			if inset.Width > 0 then
+				low, high = inset.Min.X, inset.Max.X
+			end
+		end)
+		local start = math.clamp(camera.ViewportSize.X / 2 - width / 2, low, math.max(high - width, low))
+		local right = start + width
+		topbar.move(buttons, appGui, right)
+		if statsWidth > 0 then
+			topbar.move(stats, statsGui, start + statsWidth)
+		end
+		-- The Settings menu hangs from the right end of the buttons, as it does by default.
+		for _, child in appGui:GetChildren() do
+			if child ~= buttons and child:IsA('GuiObject') and topbar.origin(child).X == UDim.new(1, -12) then
+				topbar.move(child, appGui, right)
+			end
+		end
+	end
+
+	-- Back where the game last put each piece, unless the game has moved it itself since.
+	function topbar.restore()
+		for _, connection in topbar.Connections do
+			connection:Disconnect()
+		end
+		table.clear(topbar.Connections)
+		table.clear(topbar.Watched)
+		topbar.Hooked = false
+		for object, original in topbar.Original do
+			if object.Parent and object.Position == topbar.Placed[object] then
+				object.Position = original
+			end
+		end
+		table.clear(topbar.Original)
+		table.clear(topbar.Placed)
+	end
+
+	function topbar.refresh()
+		if not topbar.middle() then
+			topbar.restore()
+			return
+		end
+		if not topbar.Hooked then
+			topbar.Hooked = true
+			local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+			if playerGui then
+				-- The game builds the bar again when it remounts its HUD.
+				table.insert(topbar.Connections, playerGui.ChildAdded:Connect(function(child)
+					if child.Name == 'TopBarAppGui' or child.Name == 'TopBarStatsGui' then
+						topbar.queue()
+					end
+				end))
+			end
+			-- Roblox's own buttons coming and going changes the free strip.
+			pcall(function()
+				table.insert(topbar.Connections, guiService:GetPropertyChangedSignal('TopbarInset'):Connect(topbar.queue))
+			end)
+		end
+		topbar.queue()
+	end
+
 	UICleanup = vape.Legit:CreateModule({
 		Name = 'UI Cleanup',
 		Function = function(callback)
@@ -13341,8 +14195,17 @@ run(function()
 					starterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
 				end
 			end
+			topbar.refresh()
 		end,
-		Tooltip = 'Tidies up the kit and main menu UI'
+		Tooltip = 'Tidies up the BedWars HUD and removes clutter.\nCovers the health bar, hotbar, kill feed, player list, queue card and top bar.'
+	})
+	TopbarPosition = UICleanup:CreateDropdown({
+		Name = 'Topbar Position',
+		List = {'Default', 'Middle'},
+		Function = function()
+			topbar.refresh()
+		end,
+		Tooltip = 'Where the BedWars top bar sits: on the right (Default) or centred at the top of the screen (Middle).'
 	})
 	UICleanup:CreateToggle({
 		Name = 'Resize Health',
@@ -13456,7 +14319,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Swaps out the viewmodel animations'
+		Tooltip = 'Moves and rotates the item you hold in first person.\nCan also stop it bobbing as you walk.'
 	})
 	Depth = Viewmodel:CreateSlider({
 		Name = 'Depth',
@@ -13511,8 +14374,8 @@ run(function()
 		Default = true,
 		Function = function()
 			if Viewmodel.Enabled then
-				Viewmodel:Toggle()
-				Viewmodel:Toggle()
+				Viewmodel:Toggle(nil, true)
+				Viewmodel:Toggle(nil, true)
 			end
 		end
 	})
@@ -13539,7 +14402,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Pick any win effect you want. Clientside only'
+		Tooltip = 'Plays the win effect of your choice when a match ends.\nOnly you can see it.'
 	})
 	local WinEffectName = {}
 	for i, v in bedwars.WinEffectMeta do
@@ -13601,7 +14464,7 @@ run(function()
 			end
 			return Device.Value
 		end,
-		Tooltip = 'Changes what device the server thinks youre on'
+		Tooltip = 'Makes the game think you are playing on another device.\nPick mobile, PC, gamepad or a random one.'
 	})
 
 	Device = DeviceSpoofer:CreateDropdown({
@@ -13654,6 +14517,7 @@ run(function()
 
 	HideNametag = vape.Categories.Utility:CreateModule({
 		Name = 'HideNametag',
+		Tab = 'Visual',
 		Function = function(callback)
 			if callback then
 				setNametagEnabled(false)
@@ -13670,13 +14534,17 @@ run(function()
 				setNametagEnabled(true)
 			end
 		end,
-		Tooltip = 'Hides the nametag over your own head'
+		Tooltip = 'Hides the nametag over your own head.'
 	})
 end)
 
 --[[ == bedwars module loader ==
 Exposes shared.bedwars and loads the external obfuscatable module ]]
 
+--[[ A superseded boot stops here, and the current one clears any loaded flag the old payload left,
+so main.lua only takes the flag from this payload. ]]
+if shared.vape ~= vape then return end
+shared.PistonwareBedwarsLoaded = nil
 shared.bedwars = {
     --[[ Services ]]
     playersService      = playersService,
@@ -13733,7 +14601,6 @@ shared.bedwars = {
     frictionTable       = frictionTable,
     genv                = genv,
     collection          = collection,
-    addBlur             = addBlur,
     isnetworkowner      = isnetworkowner,
     getfontsize         = getfontsize,
     getcustomasset      = getcustomasset,
@@ -13904,7 +14771,7 @@ if not bedwarsSource then
     local failure = bedwarsFailure or bootFailure('bedwars.download', 'no usable BedWars payload')
 	bufferCall('error', failure.stage, failure.error)
     pcall(function()
-        vape:CreateNotification('Vape', 'BedWars modules could not be loaded ('..failure.stage..'). Rejoin the game to retry.', 30, 'alert')
+        vape:CreateNotification('Pistonware', 'BedWars modules could not be loaded ('..failure.stage..'). Rejoin the game to retry.', 30, 'alert')
     end)
     return failure
 end
@@ -13917,7 +14784,7 @@ if not bedwarsFn then
     local failure = bootFailure('bedwars.compile', bedwarsCompileError)
 	bufferCall('error', failure.stage, failure.error)
     pcall(function()
-        vape:CreateNotification('Vape', 'Combat modules could not be loaded (bedwars.compile). Rejoin the game to retry.', 30, 'alert')
+        vape:CreateNotification('Pistonware', 'Combat modules could not be loaded (bedwars.compile). Rejoin the game to retry.', 30, 'alert')
     end)
     return failure
 end
@@ -13930,11 +14797,12 @@ if not republishKey() then
     local failure = bootFailure('bedwars.key', 'no validated key was available for the BedWars payload')
 	bufferCall('error', failure.stage, failure.error)
     pcall(function()
-        vape:CreateNotification('Vape', 'Your key was not available when combat modules tried to load. Re-run the pistonware loader to fix this.', 30, 'alert')
+        vape:CreateNotification('Pistonware', 'Your key was not available when combat modules tried to load. Re-run the pistonware loader to fix this.', 30, 'alert')
     end)
     return failure
 end
 
+if shared.vape ~= vape then return end
 local ok, result = xpcall(bedwarsFn, errorTrace)
 if not ok then
     local failure = bootFailure('bedwars.payload.execute', result)

@@ -55,7 +55,7 @@ else
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			runChunk(downloadFile('pistonware/games/'..vape.Place..'.lua'), 'bedwars')
 		else
-			error('Pistonware game source '..tostring(vape.Place)..' was not found: '..tostring(res))
+			return
 		end
 	end
 end

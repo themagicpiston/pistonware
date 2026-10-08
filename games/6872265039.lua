@@ -60,6 +60,7 @@ local replicatedStorage = cloneref(game:GetService('ReplicatedStorage'))
 local inputService = cloneref(game:GetService('UserInputService'))
 local runService = cloneref(game:GetService('RunService'))
 local tweenService = cloneref(game:GetService('TweenService'))
+local guiService = cloneref(game:GetService('GuiService'))
 local coreGui = cloneref(game:GetService('CoreGui'))
 
 local lplr = playersService.LocalPlayer
@@ -113,12 +114,10 @@ run(function()
 	if not debug.getupvalue(Knit.Start, 1) then
 		repeat task.wait() until debug.getupvalue(Knit.Start, 1)
 	end
-	local Flamework = require(replicatedStorage['rbxts_include']['node_modules']['@flamework'].core.out).Flamework
 	local Client = require(replicatedStorage.TS.remotes).default.Client
 
 	bedwars = setmetatable({
 		Client = Client,
-		CrateItemMeta = debug.getupvalue(Flamework.resolveDependency('client/controllers/global/reward-crate/crate-controller@CrateController').onStart, 3),
 		Store = require(lplr.PlayerScripts.TS.ui.store).ClientStore
 	}, {
 		__index = function(self, ind)
@@ -130,6 +129,10 @@ run(function()
 	-- controllers every other lobby module needs from this table.
 	pcall(function()
 		bedwars.QueueMeta = require(replicatedStorage.TS.game['queue-meta']).QueueMeta
+	end)
+	-- AutoGamble's reward names: the lookup the game's own crate reveal uses, guarded the same way.
+	pcall(function()
+		bedwars.getCrateItemMeta = require(replicatedStorage.TS['reward-crate']['crate-item']['crate-item-meta']).getCrateItemMeta
 	end)
 
 	local kills = sessioninfo:AddItem('Kills')
@@ -175,6 +178,7 @@ run(function()
 	
 	Sprint = vape.Categories.Combat:CreateModule({
 		Name = 'Sprint',
+		Tab = 'Move',
 		Function = function(callback)
 			if callback then
 				if inputService.TouchEnabled then pcall(function() lplr.PlayerGui.MobileUI['2'].Visible = false end) end
@@ -192,7 +196,7 @@ run(function()
 				bedwars.SprintController:stopSprinting()
 			end
 		end,
-		Tooltip = 'Sets your sprinting to true.'
+		Tooltip = 'Automatically sprints for you.'
 	})
 end)
 	
@@ -201,12 +205,16 @@ run(function()
 	
 	AutoGamble = vape.Categories.Minigames:CreateModule({
 		Name = 'AutoGamble',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				AutoGamble:Clean(bedwars.Client:GetNamespace('RewardCrate'):Get('CrateOpened'):Connect(function(data)
 					if data.openingPlayer == lplr then
-						local tab = bedwars.CrateItemMeta[data.reward.itemType] or {displayName = data.reward.itemType or 'unknown'}
-						notif('AutoGamble', 'Won '..tab.displayName, 5)
+						-- Named the way the game's reveal names it: its override, else the item's meta.
+						local itemType = data.reward and data.reward.itemType
+						local ok, meta = pcall(function() return bedwars.getCrateItemMeta(itemType) end)
+						local name = data.visualOverrides and data.visualOverrides.displayName or (ok and type(meta) == 'table' and meta.displayName) or tostring(itemType or 'unknown')
+						notif('AutoGamble', 'Won '..name, 5)
 					end
 				end))
 	
@@ -216,10 +224,18 @@ run(function()
 							if v.consumable:find('crate') then
 								bedwars.CrateAltarController:pickCrate(v.consumable, 1)
 								task.wait(1.2)
-								if bedwars.CrateAltarController.activeCrates[1] and bedwars.CrateAltarController.activeCrates[1][2] then
-									bedwars.Client:GetNamespace('RewardCrate'):Get('OpenRewardCrate'):SendToServer({
-										crateId = bedwars.CrateAltarController.activeCrates[1][2].attributes.crateId
-									})
+								-- activeCrates[altarId] is the list of crates on that altar; open ours, as the
+								-- game's own prompt does (crateId and altarId).
+								local crates = bedwars.CrateAltarController.activeCrates[1]
+								if crates then
+									for index = #crates, 1, -1 do
+										local crate = crates[index]
+										local owner = crate.attributes.owner
+										if owner == nil or owner == lplr.UserId then
+											bedwars.CrateAltarController:requestOpenCrate(crate.attributes.crateId, 1)
+											break
+										end
+									end
 								end
 								break
 							end
@@ -229,7 +245,7 @@ run(function()
 				until not AutoGamble.Enabled
 			end
 		end,
-		Tooltip = 'Automatically opens lucky crates, piston inspired!'
+		Tooltip = 'Opens your crates for you one at a time.\nTells you what each crate gave you.'
 	})
 end)
 
@@ -355,7 +371,7 @@ run(function()
 				task.wait(0.25)
 			until not AutoQueue.Enabled
 		end,
-		Tooltip = 'Queues you into the chosen mode after the delay, whenever you are not in a queue.'
+		Tooltip = 'Automatically queues you into the chosen mode.'
 	})
 	Mode = AutoQueue:CreateDropdown({
 		Name = 'Mode',
@@ -414,7 +430,8 @@ run(function()
 
 	-- Only once the file has been read back: the profile applying first must not overwrite it.
 	local function writeSettings()
-		if not synced then return end
+		-- Uninject clears vape.Loaded before it switches modules off; that off is not the user's.
+		if not synced or vape.Loaded == nil then return end
 		local ok, encoded = pcall(function()
 			return httpService:JSONEncode({
 				enabled = RegionLock.Enabled,
@@ -551,7 +568,7 @@ run(function()
 			end
 			return Device.Value
 		end,
-		Tooltip = 'Spoofs the device you show up as to the server'
+		Tooltip = 'Makes the game think you are playing on another device.\nPick mobile, PC, gamepad or a random one.'
 	})
 
 	Device = DeviceSpoofer:CreateDropdown({
@@ -652,6 +669,7 @@ run(function()
 
 	ClaimRewards = vape.Categories.Minigames:CreateModule({
 		Name = 'ClaimRewards',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				dailyAttempted = false
@@ -673,7 +691,7 @@ run(function()
 				until not ClaimRewards.Enabled
 			end
 		end,
-		Tooltip = 'Automatically claims your daily reward, achievement rewards and level milestones.'
+		Tooltip = 'Claims your daily, achievement and level rewards.'
 	})
 
 	DailyReward = ClaimRewards:CreateToggle({
@@ -831,6 +849,7 @@ run(function()
 
 	NightmareEmote = vape.Categories.Utility:CreateModule({
 		Name = 'NightmareEmote',
+		Tab = 'Visual',
 		Function = function(callback)
 			if not callback then return end
 
@@ -842,12 +861,191 @@ run(function()
 			toggle. ]]
 			task.defer(function()
 				if NightmareEmote.Enabled then
-					NightmareEmote:Toggle()
+					NightmareEmote:Toggle(nil, true)
 				end
 			end)
 		end,
-		Tooltip = 'Plays the Nightmare emote on your own client. Move to stop it.'
+		Tooltip = 'Plays the Nightmare emote, visible only to you.\nEnds when you move, jump or die.'
 	})
 
 	vape:Clean(function() stopEmote() end)
+end)
+
+run(function()
+	local UICleanup
+	--[[ Topbar Position. The BedWars top bar -- its row of buttons, the Settings menu that drops
+	from them and, in a match, the scores and timer beside them -- sits at the right of the strip
+	Roblox leaves free along the top of the screen. Middle centres that whole row on the screen
+	instead. The game's own app draws it and moves it again whenever its size changes, so each
+	move of the game's is kept (it is where Default puts it back) and the row is centred again
+	straight after. ]]
+	local TopbarPosition
+	local topbar = {
+		Original = setmetatable({}, {__mode = 'k'}),
+		Placed = setmetatable({}, {__mode = 'k'}),
+		Watched = setmetatable({}, {__mode = 'k'}),
+		Connections = {}
+	}
+
+	function topbar.middle()
+		return UICleanup ~= nil and UICleanup.Enabled and TopbarPosition ~= nil and TopbarPosition.Value == 'Middle'
+	end
+
+	-- Several changes in one frame (a resize moves and resizes everything) place it once.
+	function topbar.queue()
+		if topbar.Queued then return end
+		topbar.Queued = true
+		task.defer(function()
+			topbar.Queued = false
+			if topbar.middle() then
+				topbar.place()
+			end
+		end)
+	end
+
+	function topbar.watch(object)
+		if topbar.Watched[object] then return end
+		topbar.Watched[object] = true
+		local connections = topbar.Connections
+		table.insert(connections, object:GetPropertyChangedSignal('AbsoluteSize'):Connect(topbar.queue))
+		if object:IsA('GuiObject') then
+			table.insert(connections, object:GetPropertyChangedSignal('Visible'):Connect(topbar.queue))
+			table.insert(connections, object:GetPropertyChangedSignal('Position'):Connect(function()
+				if object.Position ~= topbar.Placed[object] then
+					topbar.queue()
+				end
+			end))
+		else
+			table.insert(connections, object:GetPropertyChangedSignal('AbsolutePosition'):Connect(topbar.queue))
+			table.insert(connections, object.ChildAdded:Connect(topbar.queue))
+		end
+	end
+
+	-- Where the game last put a piece: where it is now, unless that is where this put it.
+	function topbar.origin(object)
+		local current = object.Position
+		if current ~= topbar.Placed[object] then
+			topbar.Original[object] = current
+		end
+		return topbar.Original[object]
+	end
+
+	-- Puts a piece so its right edge is at `right` (a screen x), at the height the game gave it.
+	function topbar.move(object, gui, right)
+		local original = topbar.origin(object)
+		local x = right - gui.AbsolutePosition.X - (1 - object.AnchorPoint.X) * object.AbsoluteSize.X
+		local position = UDim2.new(0, math.floor(x + 0.5), original.Y.Scale, original.Y.Offset)
+		topbar.Placed[object] = position
+		if object.Position ~= position then
+			object.Position = position
+		end
+		topbar.watch(object)
+	end
+
+	function topbar.place()
+		local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+		local appGui = playerGui and playerGui:FindFirstChild('TopBarAppGui')
+		local buttons = appGui and appGui:FindFirstChild('TopBarApp')
+		local camera = workspace.CurrentCamera
+		if not (buttons and buttons:IsA('GuiObject') and camera) then return end
+		topbar.watch(appGui)
+		topbar.watch(buttons)
+		local statsGui = playerGui:FindFirstChild('TopBarStatsGui')
+		local stats = statsGui and statsGui:FindFirstChild('TopBarStatsScroller')
+		if statsGui then
+			topbar.watch(statsGui)
+		end
+		if stats and stats:IsA('GuiObject') then
+			topbar.watch(stats)
+		else
+			stats = nil
+		end
+		local statsWidth = stats and stats.Visible and stats.AbsoluteSize.X or 0
+		--[[ The mobile Pistonware button follows the buttons, 7 px to their left, so its place in the
+		row is kept clear: the scores and timer stop short of it rather than running under it. ]]
+		local vapeButton = vape.VapeButton
+		local reserve = (vapeButton and vapeButton.Parent) and math.max(vapeButton.AbsoluteSize.X, 32) + 7 or 0
+		local width = buttons.AbsoluteSize.X + reserve + (statsWidth > 0 and statsWidth + 8 or 0)
+		local left, area = appGui.AbsolutePosition.X, appGui.AbsoluteSize.X
+		if area <= 0 then return end
+		--[[ Centred on the screen, but kept inside the strip Roblox leaves free so it never runs under
+		Roblox's buttons. That strip is TopbarInset where the client reports one; TopBarAppGui itself
+		covers the whole screen. ]]
+		local low, high = left, left + area
+		pcall(function()
+			local inset = guiService.TopbarInset
+			if inset.Width > 0 then
+				low, high = inset.Min.X, inset.Max.X
+			end
+		end)
+		local start = math.clamp(camera.ViewportSize.X / 2 - width / 2, low, math.max(high - width, low))
+		local right = start + width
+		topbar.move(buttons, appGui, right)
+		if statsWidth > 0 then
+			topbar.move(stats, statsGui, start + statsWidth)
+		end
+		-- The Settings menu hangs from the right end of the buttons, as it does by default.
+		for _, child in appGui:GetChildren() do
+			if child ~= buttons and child:IsA('GuiObject') and topbar.origin(child).X == UDim.new(1, -12) then
+				topbar.move(child, appGui, right)
+			end
+		end
+	end
+
+	-- Back where the game last put each piece, unless the game has moved it itself since.
+	function topbar.restore()
+		for _, connection in topbar.Connections do
+			connection:Disconnect()
+		end
+		table.clear(topbar.Connections)
+		table.clear(topbar.Watched)
+		topbar.Hooked = false
+		for object, original in topbar.Original do
+			if object.Parent and object.Position == topbar.Placed[object] then
+				object.Position = original
+			end
+		end
+		table.clear(topbar.Original)
+		table.clear(topbar.Placed)
+	end
+
+	function topbar.refresh()
+		if not topbar.middle() then
+			topbar.restore()
+			return
+		end
+		if not topbar.Hooked then
+			topbar.Hooked = true
+			local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+			if playerGui then
+				-- The game builds the bar again when it remounts its HUD.
+				table.insert(topbar.Connections, playerGui.ChildAdded:Connect(function(child)
+					if child.Name == 'TopBarAppGui' or child.Name == 'TopBarStatsGui' then
+						topbar.queue()
+					end
+				end))
+			end
+			-- Roblox's own buttons coming and going changes the free strip.
+			pcall(function()
+				table.insert(topbar.Connections, guiService:GetPropertyChangedSignal('TopbarInset'):Connect(topbar.queue))
+			end)
+		end
+		topbar.queue()
+	end
+
+	UICleanup = vape.Legit:CreateModule({
+		Name = 'UI Cleanup',
+		Function = function()
+			topbar.refresh()
+		end,
+		Tooltip = 'Tidies up the BedWars HUD and removes clutter.\nIn the lobby it covers the top bar.'
+	})
+	TopbarPosition = UICleanup:CreateDropdown({
+		Name = 'Topbar Position',
+		List = {'Default', 'Middle'},
+		Function = function()
+			topbar.refresh()
+		end,
+		Tooltip = 'Where the BedWars top bar sits: on the right (Default) or centred at the top of the screen (Middle).'
+	})
 end)

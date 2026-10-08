@@ -1049,9 +1049,14 @@ end
 
 local function insertCandidate(count, candidate, limit)
 	if limit and count >= limit then
-		if not defaultCandidateBefore(candidate, candidateBuffer[count]) then
+		local evicted = candidateBuffer[count]
+		if not defaultCandidateBefore(candidate, evicted) then
 			return count
 		end
+		-- The scratch record at limit + 1 is handed out again for the next entity, so it must
+		-- never enter the buffer: the evicted record takes over its values instead.
+		evicted.Entity, evicted.DistanceSq, evicted.Target = candidate.Entity, candidate.DistanceSq, candidate.Target
+		candidate = evicted
 	else
 		count += 1
 	end
@@ -1780,8 +1785,10 @@ entitylib.kill = function()
 		event:Destroy()
 	end
 
+	-- RaycastParams is a datatype with no Destroy (indexing it throws); drop its filter list
+	-- and let loopClean below nil the field.
 	if entitylib.IgnoreObject then
-		entitylib.IgnoreObject:Destroy()
+		entitylib.IgnoreObject.FilterDescendantsInstances = {}
 	end
 	loopClean(entitylib)
 end

@@ -351,6 +351,8 @@ assets load lazily when a module needs them. ]]
 --[[ False while a game script registers modules. finishLoading uses this because saving and
 profile application must wait for the module set. ]]
 local gameScriptFinished = true
+-- shared.bedwars as this boot found it, so a payload left over from the boot before cannot count.
+local payloadTableBefore
 
 --[[ Set after the profile is applied; teleport saves are allowed only then. ]]
 local profileApplied = false
@@ -358,11 +360,20 @@ local profileApplied = false
 -- shared survives reinjection on several executors, so every new boot owns a fresh state.
 shared.PistonwareBootFailed = nil
 shared.PistonwareBootFailure = nil
+--[[ Which boot owns the session. A reinject while the BedWars payload is still loading starts a new
+boot, but the old one's profile waiter is still polling: without this it would wake later and fail
+or apply into the new session, leaving saving off with no message. ]]
+local bootToken = {}
+shared.PistonwareBootToken = bootToken
+local function isCurrentBoot()
+	return shared.PistonwareBootToken == bootToken
+end
 -- vape is only assigned further down, once the GUI library chunk has run; until then there is
 -- nothing to block, and failBoot below re-applies the block once it exists.
 if vape and vape.BlockSaving then vape:BlockSaving() elseif vape then vape.SaveBlocked = true end
 
 local function failBoot(stageName, err)
+	if not isCurrentBoot() then return false end
 	if not shared.PistonwareBootFailed then
 		shared.PistonwareBootFailed = true
 		shared.PistonwareBootFailure = {
@@ -408,11 +419,12 @@ local function finishLoading()
 		module yet to appear -- destroying those settings on disk. vape.Loaded stays false for the
 		whole of vape:Load, which is what holds saving off until the apply is complete.
 
-		The one exception is a payload that runs past the backstop. Those modules are not lost:
-		vape:LoadLate applies their saved settings when they finally register, and it touches only
-		the ones that arrived after the load, so it cannot revert anything changed by hand.
+		A payload that runs past the 120s backstop gets the same rule, only later: the profile
+		keeps waiting for it rather than loading against a partial set, and saving stays off until
+		it lands.
 	]]
 	local function applyProfile(moduleSetComplete)
+		if not isCurrentBoot() then return end
 		--[[ A LuaArmor session that was refused registers no game modules (see the session
 		block at the top of bedwars.lua). Loading a profile against that empty set would
 		bring everything up on defaults, and the Save below would write those defaults
@@ -481,13 +493,17 @@ local function finishLoading()
 	caller has to know that before it writes anything to disk. ]]
 	local function waitForModules()
 		if gameScriptFinished then return true end
+		local function payloadDone()
+			return shared.PistonwareBedwarsLoaded and shared.bedwars ~= payloadTableBefore
+		end
 		local started = os.clock()
 		repeat
 			task.wait(0.1)
 		until gameScriptFinished
-			or shared.PistonwareBedwarsLoaded
+			or payloadDone()
+			or not isCurrentBoot()
 			or os.clock() - started > 120
-		local complete = (gameScriptFinished or shared.PistonwareBedwarsLoaded) and true or false
+		local complete = (gameScriptFinished or payloadDone()) and true or false
 		--[[ Same reason as the settle-watcher below: on the timeout path the payload is still
 		inserting, so this must not walk vape.Modules to count them. ]]
 		local count = vape.ModuleCount or 0
@@ -502,7 +518,22 @@ local function finishLoading()
 		applyProfile(true)
 	else
 		task.spawn(function()
-			applyProfile(waitForModules())
+			local complete = waitForModules()
+			--[[ Past the backstop the payload is slow, not gone (a low-end phone can take longer
+			than 120s). Keep waiting for it: vape.Loaded is still false, so RequestSave only
+			queues meanwhile. A reinject in that time owns the session, so this boot steps aside. ]]
+			if not complete and shared.vape == vape then
+				bufferWarn('profile.wait', 'payload still registering after 120s -- the profile is applied when it finishes')
+				repeat
+					task.wait(0.5)
+				until gameScriptFinished
+					or (shared.PistonwareBedwarsLoaded and shared.bedwars ~= payloadTableBefore)
+					or shared.vape ~= vape
+					or not isCurrentBoot()
+				if shared.vape ~= vape or not isCurrentBoot() then return end
+				complete = true
+			end
+			applyProfile(complete)
 		end)
 	end
 
@@ -584,6 +615,23 @@ local function finishLoading()
 								return
 							end
 						end
+						-- The developer branch's rule for the public boot: one that never brings pistonware
+						-- up cannot claim AutoQueueDodge's hold, and nothing else would let the match in or
+						-- say why. Not while another boot is still running or came up; that one can.
+						local vapeBefore = shared.vape
+						local function releaseHeldMatch()
+							local hold = shared.PistonwareDodgeHold
+							if type(hold) ~= 'table' or hold.jobId ~= game.JobId then return end
+							task.spawn(function()
+								-- A fast failure can land before the hold is up.
+								local deadline = os.clock() + 60
+								while hold.state == 'waiting' and os.clock() < deadline do task.wait(0.25) end
+								if shared.PistonwareLoaderBoot or (shared.vape ~= nil and shared.vape ~= vapeBefore) then return end
+								if hold.state == 'held' and not hold.claimed and type(hold.release) == 'function' then
+									pcall(hold.release)
+								end
+							end)
+						end
 						local release = shared.PistonwareRelease
 							local ref = type(release) == 'table' and (release.sourceRef or release.branch) or 'main'
 							local ok, source = pcall(function()
@@ -591,14 +639,20 @@ local function finishLoading()
 							end)
 							if not ok or type(source) ~= 'string' or source == '' or source == '404: Not Found' then
 								queuedError('teleport.loader.download', source)
+								releaseHeldMatch()
 								return
 							end
 							local chunk, compileError = loadstring(source, 'loader')
 							if not chunk then
 								queuedError('teleport.loader.compile', compileError)
+								releaseHeldMatch()
 								return
 							end
-							return chunk()
+							-- The loader returns once main.lua has run, or once the key gate or a failure ended the boot.
+							local ran, result = pcall(chunk)
+							releaseHeldMatch()
+							if not ran then error(result, 0) end
+							return result
 					]]
 			local currentRelease = shared.PistonwareRelease
 			if type(currentRelease) == 'table' then
@@ -1400,7 +1454,7 @@ end
 
 			if not hasQueueOnTeleport then
 				pcall(function()
-					vape:CreateNotification('Pistonware', 'queue_on_teleport is not supported by your executor -- Vape will not re-inject automatically after this teleport (e.g. queueing into a match). You will need to re-run your loadstring manually.', 15, 'alert')
+					vape:CreateNotification('Pistonware', 'queue_on_teleport is not supported by your executor -- Pistonware will not re-inject automatically after this teleport (e.g. queueing into a match). You will need to re-run your loadstring manually.', 15, 'alert')
 				end)
 			end
 
@@ -1423,16 +1477,17 @@ end
 	if not shared.vapereload then
 		--[[ Cosmetic, and entirely inside a pcall, because the rewrite moved every field it reads.
 		'GUI bind indicator' left Categories.Main.Options for Settings.GUI.Options, the keybind
-		list became GUIBind.Keys instead of a flat vape.Keybind, and vape.VapeButton no longer
-		exists at all. A finished-loading toast is not worth risking finishLoading over if any
-		of that moves again. ]]
+		list became GUIBind.Keys instead of a flat vape.Keybind, and vape.VapeButton is the
+		phone's >_ button now. A finished-loading toast is not worth risking finishLoading over
+		if any of that moves again. ]]
 		pcall(function()
 			if not vape.Categories then return end
 			local indicator = vape.Settings and vape.Settings.GUI and vape.Settings.GUI.Options['GUI bind indicator']
 			if not (indicator and indicator.Enabled) then return end
 			local keys = vape.GUIBind and vape.GUIBind.Keys
-			local how = (keys and #keys > 0)
-				and ('Press '..table.concat(keys, ' + '):upper()..' to open GUI')
+			-- A phone has no key to press: the GUI builds the >_ button there instead.
+			local how = vape.VapeButton and 'Tap the >_ button in the top bar to open the GUI'
+				or (keys and #keys > 0) and ('Press '..table.concat(keys, ' + '):upper()..' to open GUI')
 				or 'Open the GUI with your keybind'
 			vape:CreateNotification('Pistonware | Finished Loading', how, 5)
 		end)
@@ -1546,6 +1601,7 @@ if not shared.VapeIndependent then
 		from the previous injection would tell waitForModules the payload had already finished
 		before it had even started re-registering. ]]
 		shared.PistonwareBedwarsLoaded = nil
+		payloadTableBefore = shared.bedwars
 		--[[ Same reasoning for the refusal flag: bedwars.lua sets it from a fresh verdict every
 		run, but a game script that never sets it at all (the lobby) would otherwise inherit
 		a true left behind by a revoked BedWars session and refuse to save profiles there. ]]
@@ -1599,6 +1655,10 @@ if not shared.VapeIndependent then
 	earlier failed download reads back as "present", and loadstring('') silently does
 	nothing -- indistinguishable from the game script never loading at all. ]]
 	local gameScriptStarted = false
+	--[[ Set when GitHub answered that this place has no game file. That is an unsupported game,
+	not a failed boot: universal.lua is then the whole module set, so its profile still loads
+	and saves. A download that failed outright stays a failed boot. ]]
+	local adapterMissing = false
 		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) and readfile(gamePath) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
 		gameScriptStarted = runGameScript(cached, tostring(game.PlaceId))
@@ -1613,10 +1673,14 @@ if not shared.VapeIndependent then
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
 			gameScriptStarted = runGameScript(res, tostring(game.PlaceId))
+		elseif suc and res == '404: Not Found' then
+			adapterMissing = true
 		end
 	end
 	if not gameScriptStarted then
-		failBoot('game.download', 'no usable game adapter could be loaded for '..tostring(game.PlaceId))
+		if not adapterMissing then
+			failBoot('game.download', 'no usable game adapter could be loaded for '..tostring(game.PlaceId))
+		end
 		gameScriptFinished = true
 	end
 	finishLoading()

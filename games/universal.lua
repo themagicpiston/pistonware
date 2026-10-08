@@ -144,25 +144,81 @@ local TargetStrafeVector, SpiderShift, WaypointFolder
 local Spider = {Enabled = false}
 local Phase = {Enabled = false}
 
-local function addBlur(parent)
-	local blur = Instance.new('ImageLabel')
-	blur.Name = 'Blur'
-	blur.Size = UDim2.new(1, 89, 1, 52)
-	blur.Position = UDim2.fromOffset(-48, -31)
-	blur.BackgroundTransparency = 1
-	--[[ No blur rather than an error. getcustomasset is missing or refuses on some executors,
-	and the GUI only downloads this asset where it uses assets itself -- never on a touch
-	device -- so there the file is not there to load. Unguarded, that threw inside every
-	caller after it had already parented its billboard: KitESP's came out empty and its loop
-	died with it. ]]
-	local ok, image = pcall(function()
-		return getcustomasset('pistonware/assets/new/blur.png')
-	end)
-	blur.Image = ok and type(image) == 'string' and image or ''
-	blur.ScaleType = Enum.ScaleType.Slice
-	blur.SliceCenter = Rect.new(52, 31, 261, 502)
-	blur.Parent = parent
-	return blur
+--[[ The loader's look, for the boxes this file draws on the HUD, as the TP Down bar and the AutoBank
+box already are: the loader window's near-black with a tenth of its orange through it, part
+see-through, a soft orange border and rounded corners. Text is the menu's Inter in the loader's light
+grey, labels in its secondary grey, and what stands out in its orange. ]]
+local loaderStyle = {
+	Orange = Color3.fromRGB(240, 122, 31),
+	Text = Color3.fromRGB(230, 230, 230),
+	SubText = Color3.fromRGB(163, 161, 157),
+	Pressed = Color3.fromRGB(20, 20, 20),
+	Transparency = 0.3
+}
+loaderStyle.Background = Color3.fromRGB(10, 10, 10):Lerp(loaderStyle.Orange, 0.1)
+-- The background and the orange as colour-slider defaults, so a box with colour options starts on them.
+loaderStyle.Hue, loaderStyle.Sat, loaderStyle.Value = loaderStyle.Background:ToHSV()
+loaderStyle.OrangeHue, loaderStyle.OrangeSat, loaderStyle.OrangeValue = loaderStyle.Orange:ToHSV()
+loaderStyle.OrangeHex = '#'..loaderStyle.Orange:ToHex()
+loaderStyle.SubHex = '#'..loaderStyle.SubText:ToHex()
+
+-- Props for a box's background colour option, defaulting to the loader box.
+function loaderStyle.backgroundOption(props)
+	props.DefaultHue, props.DefaultSat, props.DefaultValue = loaderStyle.Hue, loaderStyle.Sat, loaderStyle.Value
+	props.DefaultOpacity = 0.7
+	return props
+end
+
+function loaderStyle.box(obj, radius)
+	obj.BackgroundColor3 = loaderStyle.Background
+	obj.BackgroundTransparency = loaderStyle.Transparency
+	obj.BorderSizePixel = 0
+	local corner = Instance.new('UICorner')
+	corner.CornerRadius = radius or UDim.new(0, 8)
+	corner.Parent = obj
+	local stroke = Instance.new('UIStroke')
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Color = loaderStyle.Orange
+	stroke.Thickness = 1
+	stroke.Transparency = 0.55
+	stroke.Parent = obj
+	return stroke, corner
+end
+
+-- The border follows a box's Color option: at no opacity the box is bare text, without an outline.
+function loaderStyle.border(obj, opacity)
+	local stroke = obj:FindFirstChildOfClass('UIStroke')
+	if stroke then
+		stroke.Enabled = opacity > 0
+	end
+end
+
+-- Inter through the font registry, so the label follows it if it finishes loading late.
+function loaderStyle.text(label, role)
+	label.TextColor3 = loaderStyle.Text
+	label.TextStrokeTransparency = 1
+	local fonts = vape.Libraries.fonts
+	if fonts and fonts.track then
+		fonts.track(label, role or 'Medium')
+	end
+end
+
+-- A reading with its unit after it in the secondary grey ('60 FPS'), for RichText labels.
+function loaderStyle.unit(value, unit)
+	return value..' <font color="'..loaderStyle.SubHex..'">'..unit..'</font>'
+end
+
+-- One Legit HUD reading (FPS, Ping, Clock...): a loader box filling its widget, the value centred on it.
+function loaderStyle.reading(parent, text)
+	local label = Instance.new('TextLabel')
+	label.Size = UDim2.fromScale(1, 1)
+	label.TextSize = 15
+	label.RichText = true
+	label.Text = text
+	loaderStyle.box(label)
+	loaderStyle.text(label, 'SemiBold')
+	label.Parent = parent
+	return label
 end
 
 local function calculateMoveVector(vec)
@@ -871,7 +927,7 @@ run(function()
 
 					if table.find(targets, tostring(lplr.UserId)) then
 						local hint = Instance.new('Hint')
-						hint.Text = 'VAPE ANNOUNCEMENT: '..whitelist.data.Announcement.text
+						hint.Text = 'PISTONWARE ANNOUNCEMENT: '..whitelist.data.Announcement.text
 						hint.Parent = workspace
 						game:GetService('Debris'):AddItem(hint, 20)
 					end
@@ -1049,9 +1105,14 @@ run(function()
 	
 	AimAssist = vape.Categories.Combat:CreateModule({
 		Name = 'AimAssist',
+		ExtraText = function()
+			if not Speed then return nil end
+			local low, high = Speed.ValueMin, Speed.ValueMax
+			return low == high and tostring(low) or low..'-'..high
+		end,
 		Function = function(callback)
 			if CircleObject then
-				CircleObject.Visible = callback
+				CircleObject.Visible = callback and not clickGuiOpen()
 			end
 	
 			if callback then
@@ -1060,6 +1121,9 @@ run(function()
 				AimAssist:Clean(runService.RenderStepped:Connect(function(dt)
 					if CircleObject then
 						CircleObject.Position = inputService:GetMouseLocation()
+						-- hidden while the menu is open
+						local show = not clickGuiOpen()
+						if CircleObject.Visible ~= show then CircleObject.Visible = show end
 					end
 	
 					if rightClicked and not clickGuiOpen() then
@@ -1109,13 +1173,19 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Smoothly aims to closest valid target'
+		Tooltip = 'Pulls your aim towards nearby enemies.\nSet pull speed, FOV size, head or body, and right-click only.'
 	})
-	Targets = AimAssist:CreateTargets({Players = true})
-	Part = AimAssist:CreateDropdown({
-		Name = 'Part',
-		List = {'RootPart', 'Head'}
+	AimAssist:CreateDivider({Text = 'Aim'})
+	Speed = AimAssist:CreateTwoSlider({
+		Name = 'Speed',
+		DisplayName = 'Horizontal speed',
+		Min = 0,
+		Max = 30,
+		DefaultMin = 15,
+		DefaultMax = 15,
+		Tooltip = 'How hard it pulls. Set a range and the pull varies within it.'
 	})
+	AimAssist:CreateDivider({Text = 'Target'})
 	FOV = AimAssist:CreateSlider({
 		Name = 'FOV',
 		Min = 0,
@@ -1127,13 +1197,12 @@ run(function()
 			end
 		end
 	})
-	Speed = AimAssist:CreateTwoSlider({
-		Name = 'Speed',
-		Min = 0,
-		Max = 30,
-		DefaultMin = 15,
-		DefaultMax = 15,
-		Tooltip = 'How hard it pulls. Set a range and the pull varies within it.'
+	AimAssist:CreateDivider({Text = 'Conditions'})
+	Targets = AimAssist:CreateTargets({Players = true})
+	AimAssist:CreateDivider({Text = 'Extras'})
+	Part = AimAssist:CreateDropdown({
+		Name = 'Part',
+		List = {'RootPart', 'Head'}
 	})
 	AimAssist:CreateToggle({
 		Name = 'Range Circle',
@@ -1147,7 +1216,7 @@ run(function()
 				CircleObject.NumSides = 100
 				CircleObject.Thickness = CircleThickness and CircleThickness.Value or 1
 				CircleObject.Transparency = 1 - CircleTransparency.Value
-				CircleObject.Visible = AimAssist.Enabled
+				CircleObject.Visible = AimAssist.Enabled and not clickGuiOpen()
 			else
 				pcall(function()
 					CircleObject.Visible = false
@@ -1231,6 +1300,11 @@ run(function()
 	
 	AutoClicker = vape.Categories.Combat:CreateModule({
 		Name = 'AutoClicker',
+		ExtraText = function()
+			if not CPS then return nil end
+			local low, high = CPS.ValueMin, CPS.ValueMax
+			return (low == high and tostring(low) or low..'-'..high)..' cps'
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -1251,19 +1325,21 @@ run(function()
 				until not AutoClicker.Enabled
 			end
 		end,
-		Tooltip = 'Automatically clicks for you'
-	})
-	Mode = AutoClicker:CreateDropdown({
-		Name = 'Mode',
-		List = {'Tool', 'Click', 'RightClick'},
-		Tooltip = 'Tool - Automatically uses roblox tools (eg. swords)\nClick - Left click\nRightClick - Right click'
+		Tooltip = 'Clicks for you at the speed you set.\nSwings your tool while you hold left-click, or clicks nonstop.'
 	})
 	CPS = AutoClicker:CreateTwoSlider({
 		Name = 'CPS',
+		DisplayName = 'Target CPS',
 		Min = 1,
 		Max = 20,
 		DefaultMin = 8,
 		DefaultMax = 12
+	})
+	AutoClicker:CreateDivider({Text = 'Extras'})
+	Mode = AutoClicker:CreateDropdown({
+		Name = 'Mode',
+		List = {'Tool', 'Click', 'RightClick'},
+		Tooltip = 'Tool - Automatically uses roblox tools (eg. swords)\nClick - Left click\nRightClick - Right click'
 	})
 end)
 	
@@ -1281,6 +1357,9 @@ run(function()
 	
 	Reach = vape.Categories.Combat:CreateModule({
 		Name = 'Reach',
+		ExtraText = function()
+			return Value and tostring(Value.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -1330,8 +1409,19 @@ run(function()
 				table.clear(modified)
 			end
 		end,
-		Tooltip = 'Extends tool attack reach'
+		Tooltip = 'Lets you hit enemies from further away.\nSet the extra distance, who it works on, and how often it applies.'
 	})
+	Value = Reach:CreateSlider({
+		Name = 'Range',
+		DisplayName = 'Distance',
+		Min = 0,
+		Max = 2,
+		Decimal = 10,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end
+	})
+	Reach:CreateDivider({Text = 'Extras'})
 	Targets = Reach:CreateTargets({Players = true})
 	Mode = Reach:CreateDropdown({
 		Name = 'Mode',
@@ -1340,15 +1430,6 @@ run(function()
 			Chance.Object.Visible = val == 'TouchInterest'
 		end,
 		Tooltip = 'TouchInterest - Reports fake collision events to the server\nResize - Physically modifies the tools size'
-	})
-	Value = Reach:CreateSlider({
-		Name = 'Range',
-		Min = 0,
-		Max = 2,
-		Decimal = 10,
-		Suffix = function(val)
-			return val == 1 and 'stud' or 'studs'
-		end
 	})
 	Chance = Reach:CreateTwoSlider({
 		Name = 'Chance',
@@ -1521,6 +1602,9 @@ run(function()
 				repeat
 					if CircleObject then
 						CircleObject.Position = inputService:GetMouseLocation()
+						-- hidden while the menu is open
+						local show = Mode.Value == 'Mouse' and not clickGuiOpen()
+						if CircleObject.Visible ~= show then CircleObject.Visible = show end
 					end
 
 					if AutoFire.Enabled then
@@ -1568,7 +1652,7 @@ run(function()
 		ExtraText = function()
 			return Method.Value:gsub('FindPartOnRay', '')
 		end,
-		Tooltip = 'Redirects your shots onto a target without moving your camera'
+		Tooltip = 'Makes your shots hit enemies without you aiming.\nSet range, hit and headshot chance, auto fire, wallbang and projectiles.'
 	})
 	Target = SilentAim:CreateTargets({Players = true})
 	Mode = SilentAim:CreateDropdown({
@@ -1576,7 +1660,7 @@ run(function()
 		List = {'Mouse', 'Position'},
 		Function = function(val)
 			if CircleObject then
-				CircleObject.Visible = SilentAim.Enabled and val == 'Mouse'
+				CircleObject.Visible = SilentAim.Enabled and val == 'Mouse' and not clickGuiOpen()
 			end
 		end,
 		Tooltip = 'Mouse - Checks for entities near the mouses position\nPosition - Checks for entities near the local character'
@@ -1681,7 +1765,7 @@ run(function()
 				CircleObject.NumSides = 100
 				CircleObject.Thickness = CircleThickness and CircleThickness.Value or 1
 				CircleObject.Transparency = 1 - CircleTransparency.Value
-				CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse'
+				CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse' and not clickGuiOpen()
 			else
 				pcall(function()
 					CircleObject.Visible = false
@@ -1796,6 +1880,9 @@ run(function()
 	
 	TriggerBot = vape.Categories.Combat:CreateModule({
 		Name = 'TriggerBot',
+		ExtraText = function()
+			return ShootDelay and math.round(ShootDelay.Value * 1000)..'ms' or nil
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -1829,7 +1916,7 @@ run(function()
 				mouseClicked = false
 			end
 		end,
-		Tooltip = 'Shoots people that enter your crosshair'
+		Tooltip = 'Shoots automatically when a target is in your crosshair.\nSet the max distance and the delay between shots.'
 	})
 	Targets = TriggerBot:CreateTargets({
 		Players = true,
@@ -1868,6 +1955,10 @@ run(function()
 	
 	AntiFall = vape.Categories.Blatant:CreateModule({
 		Name = 'AntiFall',
+		ExtraText = function()
+			if not Method then return nil end
+			return Method.Value == 'Part' and Mode and Mode.Value or Method.Value
+		end,
 		Function = function(callback)
 			if callback then
 				if Method.Value == 'Part' then
@@ -1924,7 +2015,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Catches you before you fall into the void.'
+		Tooltip = 'Catches you before you fall into the void.\nBounces you up, gives you a floor, or sends you back to land.'
 	})
 	Method = AntiFall:CreateDropdown({
 		Name = 'Method',
@@ -2009,7 +2100,7 @@ run(function()
 				hook = nil
 			end
 		end,
-		Tooltip = 'Prevent the server from replicating your current position to other players.'
+		Tooltip = 'Hides your real position from other players.'
 	})
 end)
 	
@@ -2180,7 +2271,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Moves you faster than your walk speed allows'
+		Tooltip = 'Lets you fly around freely.\nChoose the flying and hovering styles, speeds and up and down keys.'
 	})
 	Mode = Fly:CreateDropdown({
 		Name = 'Speed Mode',
@@ -2389,16 +2480,21 @@ run(function()
 					root:ApplyImpulse(Vector3.new(0, Value.Value - root.AssemblyLinearVelocity.Y, 0) * root.AssemblyMass)
 				end)
 			else
+				--[[ With no gravity there is no peak to stop at; the step cap covers gravity
+				dropping to 0 mid-jump (normal gravity needs under 50 steps). ]]
+				if workspace.Gravity <= 0 then return end
 				local yLevel = math.max(Value.Value - entitylib.character.Humanoid.JumpHeight, 0)
+				local steps = 0
 	
 				repeat
 					root.CFrame += Vector3.new(0, yLevel * 0.016, 0)
 					yLevel = yLevel - (workspace.Gravity * 0.016)
+					steps += 1
 	
 					if Mode.Value == 'CFrame' then
 						task.wait()
 					end
-				until yLevel <= 0
+				until yLevel <= 0 or steps >= 600
 			end
 		end
 	end
@@ -2412,7 +2508,10 @@ run(function()
 					HighJump:Toggle()
 				else
 					HighJump:Clean(runService.RenderStepped:Connect(function()
-						if not inputService:GetFocusedTextBox() and inputService:IsKeyDown(Enum.KeyCode.Space) then
+						if inputService:GetFocusedTextBox() then return end
+						--[[ The touch jump button sets no key; the control module holds Humanoid.Jump instead. ]]
+						if inputService:IsKeyDown(Enum.KeyCode.Space)
+							or (inputService.TouchEnabled and entitylib.isAlive and entitylib.character.Humanoid.Jump) then
 							jump()
 						end
 					end))
@@ -2422,7 +2521,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Lets you jump higher'
+		Tooltip = 'Lets you jump much higher than normal.\nBoosts one jump then turns off, or every jump while you hold Space.'
 	})
 	Mode = HighJump:CreateDropdown({
 		Name = 'Mode',
@@ -2453,6 +2552,11 @@ run(function()
 	
 	HitBoxes = vape.Categories.Blatant:CreateModule({
 		Name = 'HitBoxes',
+		ExtraText = function()
+			return Expand and tostring(Expand.Value) or nil
+		end,
+		DisplayName = 'Hitboxes',
+		Tab = 'Combat',
 		Function = function(callback)
 			if callback then
 				repeat
@@ -2477,21 +2581,23 @@ run(function()
 				table.clear(modified)
 			end
 		end,
-		Tooltip = 'Expands entities hitboxes'
-	})
-	Targets = HitBoxes:CreateTargets({Players = true})
-	TargetPart = HitBoxes:CreateDropdown({
-		Name = 'Part',
-		List = {'RootPart', 'Head'}
+		Tooltip = 'Makes other players easier to hit.\nGrows their body or head by the amount you set.'
 	})
 	Expand = HitBoxes:CreateSlider({
 		Name = 'Expand amount',
+		DisplayName = 'Expand',
 		Min = 0,
 		Max = 2,
 		Decimal = 10,
 		Suffix = function(val)
 			return val == 1 and 'stud' or 'studs'
 		end
+	})
+	HitBoxes:CreateDivider({Text = 'Extras'})
+	Targets = HitBoxes:CreateTargets({Players = true})
+	TargetPart = HitBoxes:CreateDropdown({
+		Name = 'Part',
+		List = {'RootPart', 'Head'}
 	})
 end)
 	
@@ -2603,7 +2709,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Allow you to stand on terrain water'
+		Tooltip = 'Lets you walk on water as if it were solid ground.'
 	})
 end)
 	
@@ -2649,6 +2755,10 @@ run(function()
 	
 	Killaura = vape.Categories.Blatant:CreateModule({
 		Name = 'Killaura',
+		ExtraText = function()
+			return AttackRange and tostring(AttackRange.Value) or nil
+		end,
+		Tab = 'Combat',
 		Function = function(callback)
 			if callback then
 				Killaura:Clean(entitylib.Events.EntityAdded:Connect(function()
@@ -2764,8 +2874,10 @@ run(function()
 						end
 					end
 
+				-- boxes and particles drop while the menu is open; attacking is unaffected
+				local hideVisuals = clickGuiOpen()
 				for i, v in Boxes do
-					local hit = i <= attackedCount and attacked[i] or nil
+					local hit = not hideVisuals and i <= attackedCount and attacked[i] or nil
 					v.Adornee = hit and hit.Entity.RootPart or nil
 					if hit then
 						v.Color3 = Color3.fromHSV(hit.Check.Hue, hit.Check.Sat, hit.Check.Value)
@@ -2774,7 +2886,7 @@ run(function()
 				end
 
 				for i, v in Particles do
-					local hit = i <= attackedCount and attacked[i] or nil
+					local hit = not hideVisuals and i <= attackedCount and attacked[i] or nil
 					v.Position = hit and hit.Entity.RootPart.Position or farAway
 					v.Parent = hit and gameCamera or nil
 				end
@@ -2805,7 +2917,7 @@ run(function()
 				targetScanElapsed = 0
 			end
 		end,
-		Tooltip = 'Attack players around you\nwithout aiming at them.'
+		Tooltip = 'Attacks enemies around you without you aiming.\nSet reach, speed, angle and target count, with target boxes and particles.'
 	})
 	Targets = Killaura:CreateTargets({Players = true})
 	CPS = Killaura:CreateTwoSlider({
@@ -2899,7 +3011,7 @@ run(function()
 					part.CanCollide = false
 					part.Transparency = 1
 					part.CanQuery = false
-					part.Parent = Killaura.Enabled and gameCamera or nil
+					part.Parent = Killaura.Enabled and not clickGuiOpen() and gameCamera or nil
 					local particles = Instance.new('ParticleEmitter')
 					particles.Brightness = 1.5
 					particles.Size = NumberSequence.new(ParticleSize.Value)
@@ -3021,7 +3133,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Throws your jumps further than normal'
+		Tooltip = 'Sends you far forward in a long, fast jump.\nSet the jump speed and whether it turns off when you land.'
 	})
 	Mode = LongJump:CreateDropdown({
 		Name = 'Mode',
@@ -3129,7 +3241,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Teleports to a selected position.'
+		Tooltip = 'Teleports you to the spot, player or waypoint you point at.\nGo there instantly, or glide over in steps.'
 	})
 	Mode = MouseTP:CreateDropdown({
 		Name = 'Mode',
@@ -3274,6 +3386,9 @@ run(function()
 	
 	Phase = vape.Categories.Blatant:CreateModule({
 		Name = 'Phase',
+		ExtraText = function()
+			return Mode and Mode.Value or nil
+		end,
 		Function = function(callback)
 			if callback then
 				Phase:Clean(runService.Stepped:Connect(function()
@@ -3294,7 +3409,7 @@ run(function()
 				releasePhase()
 			end
 		end,
-		Tooltip = 'Lets you Phase/Clip through walls. (Hold shift to use Phase over spider)'
+		Tooltip = 'Lets you walk through walls.\nChoose how it gets you through and the thickest wall it will pass.'
 	})
 	-- Tells AutoWin this Phase holds off by itself, so it is left switched on.
 	Phase.AutoWinAware = true
@@ -3380,7 +3495,7 @@ run(function()
 		ExtraText = function()
 			return Mode.Value
 		end,
-		Tooltip = 'Moves you faster, with a choice of methods.'
+		Tooltip = 'Makes you move faster than normal.\nPick a movement style and speed, with optional auto jumping.'
 	})
 	Mode = Speed:CreateDropdown({
 		Name = 'Mode',
@@ -3501,19 +3616,31 @@ run(function()
 	-- While AutoWin is on it picks the climbs (a safe step ahead) and sets
 	-- Spider.AutoWinClimb for them; anywhere else Spider stays on but holds off.
 	local function heldByAutoWin()
-		local autoWin = vape.Modules.AutoWin
+		local modules = vape.Modules
+		local autoWin = modules and modules.AutoWin
 		return autoWin ~= nil and autoWin.Enabled == true and not Spider.AutoWinClimb
 	end
 
 	Spider = vape.Categories.Blatant:CreateModule({
 		Name = 'Spider',
+		ExtraText = function()
+			return Mode and Mode.Value or nil
+		end,
 		Function = function(callback)
 			if callback then
 				if Truss then
 					Truss.Parent = gameCamera
 				end
 
-				Spider:Clean(runService.PreSimulation:Connect(function(dt)
+				--[[ A reinject empties the old vape table; a loop that outlived its session
+				(started again by AutoWin mid-unload) stops itself instead of erroring every
+				physics step. ]]
+				local loop
+				loop = runService.PreSimulation:Connect(function(dt)
+					if vape.Loaded == nil then
+						loop:Disconnect()
+						return
+					end
 					if heldByAutoWin() then
 						Active = nil
 						if Truss then
@@ -3563,7 +3690,8 @@ run(function()
 							end
 						end
 					end
-				end))
+				end)
+				Spider:Clean(loop)
 			else
 				if Truss then
 					Truss.Parent = nil
@@ -3571,7 +3699,7 @@ run(function()
 				SpiderShift = false
 			end
 		end,
-		Tooltip = 'Lets you climb up walls. (Hold shift to use Phase over spider)'
+		Tooltip = 'Lets you climb straight up walls.\nWalk into a wall to climb it; set the climbing style and speed.'
 	})
 	-- Tells AutoWin this Spider holds off by itself, so it is left switched on.
 	Spider.AutoWinAware = true
@@ -3651,7 +3779,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Makes your character spin around in circles (does not work in first person)'
+		Tooltip = 'Makes your character spin around in circles.\nSet the spin speed and which ways it turns.'
 	})
 	Mode = SpinBot:CreateDropdown({
 		Name = 'Mode',
@@ -3710,7 +3838,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Lets you swim midair'
+		Tooltip = 'Lets you swim through the air as if it were water.'
 	})
 end)
 	
@@ -3726,6 +3854,9 @@ run(function()
 	
 	TargetStrafe = vape.Categories.Blatant:CreateModule({
 		Name = 'TargetStrafe',
+		ExtraText = function()
+			return StrafeRange and tostring(StrafeRange.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				if not module then
@@ -3805,7 +3936,7 @@ run(function()
 				TargetStrafeVector = nil
 			end
 		end,
-		Tooltip = 'Automatically strafes around the opponent'
+		Tooltip = 'Circles you around the nearest enemy while you move.\nSet how far it looks and how wide it circles. Hold S to stop.'
 	})
 	Targets = TargetStrafe:CreateTargets({
 		Players = true,
@@ -3844,6 +3975,9 @@ run(function()
 	
 	Timer = vape.Categories.Blatant:CreateModule({
 		Name = 'Timer',
+		ExtraText = function()
+			return Value and Value.Value..'x' or nil
+		end,
 		Function = function(callback)
 			if callback then
 				setfflag('SimEnableStepPhysics', 'True')
@@ -3858,10 +3992,11 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Change the game speed.'
+		Tooltip = 'Speeds up your character, as if the game ran faster.\nSet how many times faster, up to 3x.'
 	})
 	Value = Timer:CreateSlider({
 		Name = 'Value',
+		DisplayName = 'Speed',
 		Min = 1,
 		Max = 3,
 		Decimal = 10
@@ -3871,77 +4006,365 @@ end)
 run(function()
 	local Arrows
 	local Targets
+	local Range
+	local IgnoreFOV
+	local Scale
+	local Radius
+	local Style
+	local ColorMode
 	local Color
+	local FriendColor
+	local NearColor
+	local FarColor
+	local Transition
 	local Teammates
-	local Distance
-	local DistanceLimit
+	local DistanceRadius
+	local Closest
+	local ClosestColor
+	-- Who the closest colour is on. They keep it until someone else is clearly nearer.
+	local closestEnt
 	local Reference = {}
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
-	
-	local function Added(ent)
-		if not Targets.Players.Enabled and ent.Player then return end
-		if not Targets.NPCs.Enabled and ent.NPC then return end
-	if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
-		if vape.ThreadFix then
-			setthreadidentity(8)
+	--[[ Slinky's pointer is a dart: an arrowhead with a notch cut into its back, filled flat in
+	its colour and outlined in the same colour, much darker. Measured from the middle of its back
+	edge, in lengths: the tip 1 out, the back corners 0.45 to each side, the notch 0.25 in. It is
+	14 px long at Scale 1 on a 1080 px tall screen; the outline is a fixed 1.25 px past the fill,
+	at a tenth of the fill's colour, as near black as the outline in Slinky's docs screenshot. ]]
+	local DART = {Length = 14, HalfWidth = 0.45, Notch = 0.25, Shade = 0.1, Outline = 2.5}
+	-- The top of the Range slider means no limit, as Name Tags has none.
+	local RANGE_MAX = 1024
+	-- Studs someone else has to be nearer by to take the closest colour, so two players at
+	-- about the same distance don't make it flicker between them.
+	local CLOSEST_MARGIN = 1
+	-- With Distance-based radius, how much further out the far end of the ring is (0.85 more:
+	-- about 1.8x the near ring, as in Slinky's screenshots).
+	local FAR_SPREAD = 0.85
+
+	local function newDrawing(class)
+		local ok, object = pcall(function()
+			return Drawing.new(class)
+		end)
+		return ok and object or nil
+	end
+
+	--[[ Two filled Triangles make the dart, split along the line from the tip to the notch (a
+	concave shape is not filled the same way by every executor as one Quad), over an unfilled
+	Quad drawn thick enough that only its outer edge shows past them as the outline. An executor
+	without the Drawing library gets the old image arrow instead, rotated the same way, so the
+	module still points somewhere. ]]
+	local function newPointer()
+		local right, left = newDrawing('Triangle'), newDrawing('Triangle')
+		if right and left then
+			for _, half in {right, left} do
+				half.Filled = true
+				half.Thickness = 1
+				half.Transparency = 1
+				half.ZIndex = 2
+				half.Visible = false
+			end
+			local outline = newDrawing('Quad')
+			if outline then
+				outline.Filled = false
+				outline.Thickness = DART.Outline
+				outline.Transparency = 1
+				outline.ZIndex = 1
+				outline.Visible = false
+			end
+			-- A line down the split in the fill colour: two anti-aliased Triangles that only meet
+			-- there let the background show through along it.
+			local seam = newDrawing('Line')
+			if seam then
+				seam.Thickness = 1
+				seam.Transparency = 1
+				seam.ZIndex = 2
+				seam.Visible = false
+			end
+			return {Right = right, Left = left, Outline = outline, Seam = seam, Visible = false, Layer = 0}
 		end
-	
-		local arrow = Instance.new('ImageLabel')
-		arrow.Size = UDim2.fromOffset(256, 256)
-		arrow.Position = UDim2.fromScale(0.5, 0.5)
+		if right then
+			pcall(function() right:Remove() end)
+		end
+		if left then
+			pcall(function() left:Remove() end)
+		end
+		--[[ No Drawing library: a triangle glyph in the pointer's colour on the same ring,
+		pointing the same way. Text, so it needs no image and shows on a phone too. ]]
+		local arrow = Instance.new('TextLabel')
 		arrow.AnchorPoint = Vector2.new(0.5, 0.5)
 		arrow.BackgroundTransparency = 1
 		arrow.BorderSizePixel = 0
+		arrow.Size = UDim2.fromOffset(24, 24)
+		arrow.Text = '\u{25B2}'
+		arrow.TextStrokeTransparency = 0.4
 		arrow.Visible = false
-		arrow.Image = getcustomasset('pistonware/assets/new/arrowmodule.png')
-		arrow.ImageColor3 = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+		vape.Libraries.fonts.track(arrow, 'Bold')
 		arrow.Parent = Folder
-		Reference[ent] = arrow
+		return {Image = arrow, Visible = false}
 	end
-	
+
+	local function setVisible(pointer, visible)
+		if pointer.Visible == visible then return end
+		pointer.Visible = visible
+		if pointer.Image then
+			pointer.Image.Visible = visible
+			return
+		end
+		pointer.Right.Visible = visible
+		pointer.Left.Visible = visible
+		if pointer.Outline then
+			pointer.Outline.Visible = visible
+		end
+		if pointer.Seam then
+			pointer.Seam.Visible = visible
+		end
+	end
+
+	local function dropPointer(pointer)
+		if pointer.Image then
+			pcall(function()
+				pointer.Image:Destroy()
+			end)
+			return
+		end
+		for _, key in {'Right', 'Left', 'Outline', 'Seam'} do
+			local object = pointer[key]
+			if object then
+				pcall(function()
+					object.Visible = false
+					object:Remove()
+				end)
+			end
+		end
+	end
+
+	--[[ Teammates get a pointer too, hidden each frame while Hide friendlies is on: a player's
+	team can land after they are added (BedWars sets it in place every match), and a pointer
+	decided once would then stay missing or wrong until they respawned. ]]
+	local function Added(ent)
+		if not Targets.Players.Enabled and ent.Player then return end
+		if not Targets.NPCs.Enabled and ent.NPC then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		-- Making the drawings can yield (the actor relay waits on each one), so the player is
+		-- checked again after: gone, or the module off, and they are thrown away.
+		local pointer = newPointer()
+		if Arrows.Enabled and not Reference[ent] and table.find(entitylib.List, ent) then
+			Reference[ent] = pointer
+		else
+			dropPointer(pointer)
+		end
+	end
+
 	local function Removed(ent)
-		local v = Reference[ent]
-		if v then
+		local pointer = Reference[ent]
+		if pointer then
 			if vape.ThreadFix then
 				setthreadidentity(8)
 			end
-	
 			Reference[ent] = nil
-			v:Destroy()
+			if closestEnt == ent then
+				closestEnt = nil
+			end
+			dropPointer(pointer)
 		end
 	end
-	
-	local function ColorFunc(hue, sat, val)
-		local color = Color3.fromHSV(hue, sat, val)
-		for ent, EntityArrow in Reference do
-			EntityArrow.ImageColor3 = entitylib.getEntityColor(ent) or color
-		end
+
+	local function hsv(option)
+		return Color3.fromHSV(option.Hue, option.Sat, option.Value)
 	end
-	
+
+	-- Only a living player can be the closest: not a body waiting to respawn, nor an NPC.
+	local function closestCandidate(ent)
+		return ent.Player ~= nil and ent.Targetable and not ent.Friend and not (type(ent.Health) == 'number' and ent.Health <= 0)
+	end
+
+	-- 0 at the near end of "Transition between", 1 at the far end.
+	local function farness(distance)
+		local span = math.max(Transition.ValueMax - Transition.ValueMin, 1)
+		return math.clamp((distance - Transition.ValueMin) / span, 0, 1)
+	end
+
 	local function Loop()
-		for ent, arrow in Reference do
-			if Distance.Enabled then
-				local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
-				if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-					arrow.Visible = false
-					continue
+		-- hidden while the menu is open; the first frame after it closes redraws them
+		if clickGuiOpen() then
+			for _, pointer in Reference do
+				setVisible(pointer, false)
+			end
+			return
+		end
+		local camCF = gameCamera.CFrame
+		local viewport = gameCamera.ViewportSize
+		local center = viewport / 2
+		local look = camCF.LookVector
+		local flat = look * Vector3.new(1, 0, 1)
+		if flat.Magnitude < 1e-3 then
+			-- looking straight up or down: the camera's up vector still knows which way is ahead
+			flat = camCF.UpVector * Vector3.new(1, 0, 1) * (look.Y > 0 and -1 or 1)
+		end
+		local basis = CFrame.lookAlong(camCF.Position, flat.Unit)
+		local origin = entitylib.isAlive and entitylib.character.RootPart.Position or camCF.Position
+		local maxRange = Range.Value >= RANGE_MAX and math.huge or Range.Value
+
+		--[[ First who is shown (in range, and not a teammate or friend while Hide friendlies is
+		on), and of the enemies among them who is closest. That is picked before Ignore within
+		FOV, so the closest colour always means the closest player: when they are inside the
+		ignored view, no pointer has it. ]]
+		local hideFriendlies = Teammates.Enabled
+		local best, bestDistance = nil, math.huge
+		for ent, pointer in Reference do
+			local root = ent.RootPart
+			local position = root and root.Parent and root.Position
+			local distance = position and (origin - position).Magnitude
+			if distance and (distance > maxRange or (hideFriendlies and (ent.Friend or not ent.Targetable))) then
+				distance = nil
+			end
+			pointer.Distance, pointer.Position = distance, position
+			if distance and distance < bestDistance and closestCandidate(ent) then
+				best, bestDistance = ent, distance
+			end
+		end
+		local held = closestEnt and Reference[closestEnt]
+		if best and held and held.Distance and closestCandidate(closestEnt) and held.Distance <= bestDistance + CLOSEST_MARGIN then
+			best = closestEnt
+		end
+		closestEnt = best
+
+		-- The same for every pointer this frame.
+		local px = math.clamp(viewport.Y / 1080, 0.5, 2)
+		local size = Scale.Value
+		local length = DART.Length * size * px
+		local halfWidth, notchAt = length * DART.HalfWidth, length * DART.Notch
+		local baseRadius = Radius.Value * px
+		local halfFov = IgnoreFOV.Value / 2
+		--[[ 3D lays the ring back like Minecraft clients do: tipped by the pitch, flattened to half
+		its height looking level or up, and opening out to round past 42° looking down. The dart
+		is flattened with it. ]]
+		local yScale = 1
+		if Style.Value == '3D' then
+			local pitch = -math.deg(math.asin(math.clamp(look.Y, -1, 1)))
+			yScale = math.cos(math.rad(math.clamp(pitch, 42, 90) - 102))
+		end
+		local squash = Vector2.new(1, yScale)
+		--[[ The widest the ring can be with the whole dart still on screen: on a small viewport a
+		large Radius, spread further for far players, put their darts past its edge. ]]
+		local maxRadius = math.max(math.min(center.X - 6, (center.Y - 6) / math.max(yScale, 0.1)) - length, 0)
+		local mode = ColorMode.Value
+		local near, far = hsv(NearColor), hsv(FarColor)
+		local enemy, friend = hsv(Color), hsv(FriendColor)
+		local closestColor = Closest.Enabled and hsv(ClosestColor) or nil
+
+		for ent, pointer in Reference do
+			local distance = pointer.Distance
+			if not distance then
+				setVisible(pointer, false)
+				continue
+			end
+
+			-- 0 straight ahead, positive to the right, measured flat on the ground
+			local relative = basis:PointToObjectSpace(pointer.Position)
+			local angle = math.atan2(relative.X, -relative.Z)
+			if math.deg(math.abs(angle)) < halfFov then
+				setVisible(pointer, false)
+				continue
+			end
+
+			local t = farness(distance)
+			local color
+			if closestColor and ent == closestEnt then
+				color = closestColor
+			elseif mode == 'Distance' then
+				color = near:Lerp(far, t)
+			elseif mode == 'Name Tag' then
+				color = entitylib.getEntityColor(ent) or Color3.new(1, 1, 1)
+			else
+				color = (ent.Friend or not ent.Targetable) and friend or enemy
+			end
+
+			local radius = baseRadius
+			if DistanceRadius.Enabled then
+				radius += radius * FAR_SPREAD * t
+			end
+			radius = math.min(radius, maxRadius)
+			if pointer.Image then
+				local arrow = pointer.Image
+				local dir = Vector2.new(math.sin(angle), -math.cos(angle))
+				local at = center + dir * (radius + length * 0.5) * squash
+				arrow.Position = UDim2.fromOffset(at.X, at.Y)
+				arrow.Rotation = math.deg(angle)
+				arrow.TextSize = math.max(length * 1.2, 8)
+				if arrow.TextColor3 ~= color then
+					arrow.TextColor3 = color
+				end
+				setVisible(pointer, true)
+				continue
+			end
+			local dir = Vector2.new(math.sin(angle), -math.cos(angle))
+			local side = Vector2.new(-dir.Y, dir.X) * halfWidth
+			local back = dir * radius
+			local tip = center + dir * (radius + length) * squash
+			local notch = center + dir * (radius + notchAt) * squash
+			local wingR = center + (back + side) * squash
+			local wingL = center + (back - side) * squash
+			-- Written only when they change: this runs every frame for every pointer.
+			if tip ~= pointer.Tip or notch ~= pointer.Notch or wingR ~= pointer.WingR or wingL ~= pointer.WingL then
+				pointer.Tip, pointer.Notch, pointer.WingR, pointer.WingL = tip, notch, wingR, wingL
+				local right, left, outline = pointer.Right, pointer.Left, pointer.Outline
+				right.PointA, right.PointB, right.PointC = tip, wingR, notch
+				left.PointA, left.PointB, left.PointC = tip, notch, wingL
+				if outline then
+					outline.PointA, outline.PointB, outline.PointC, outline.PointD = tip, wingR, notch, wingL
+				end
+				local seam = pointer.Seam
+				if seam then
+					-- Half a pixel short of the notch and a pixel short of the tip, so neither end of
+					-- it sticks out of the dart.
+					local along = tip - notch
+					local span = along.Magnitude
+					if span > 3 then
+						local unit = along / span
+						seam.From, seam.To = notch + unit * 0.5, tip - unit
+					else
+						seam.From, seam.To = notch, notch
+					end
 				end
 			end
-	
-			local _, rootVis = gameCamera:WorldToScreenPoint(ent.RootPart.Position)
-			arrow.Visible = not rootVis
-			if rootVis then continue end
-	
-			local dir = CFrame.lookAlong(gameCamera.CFrame.Position, gameCamera.CFrame.LookVector * Vector3.new(1, 0, 1)):PointToObjectSpace(ent.RootPart.Position)
-			arrow.Rotation = math.deg(math.atan2(dir.Z, dir.X))
+			if color ~= pointer.Color then
+				pointer.Color = color
+				pointer.Right.Color = color
+				pointer.Left.Color = color
+				if pointer.Seam then
+					pointer.Seam.Color = color
+				end
+				if pointer.Outline then
+					pointer.Outline.Color = Color3.new(color.R * DART.Shade, color.G * DART.Shade, color.B * DART.Shade)
+				end
+			end
+			-- The closest dart is drawn over the others, outline and all, so a player beside them
+			-- can't cover it.
+			local layer = closestColor and ent == closestEnt and 2 or 0
+			if layer ~= pointer.Layer then
+				pointer.Layer = layer
+				pointer.Right.ZIndex, pointer.Left.ZIndex = 2 + layer, 2 + layer
+				if pointer.Seam then
+					pointer.Seam.ZIndex = 2 + layer
+				end
+				if pointer.Outline then
+					pointer.Outline.ZIndex = 1 + layer
+				end
+			end
+			setVisible(pointer, true)
 		end
 	end
-	
+
 	Arrows = vape.Categories.Render:CreateModule({
 		Name = 'Arrows',
+		DisplayName = 'Pointers',
 		Function = function(callback)
 			if callback then
+				-- A start queued while a profile loads can arrive after the module was turned off.
+				if not Arrows.Enabled then return end
 				Arrows:Clean(entitylib.Events.EntityRemoved:Connect(Removed))
 				for _, v in entitylib.List do
 					if Reference[v] then Removed(v) end
@@ -3951,18 +4374,146 @@ run(function()
 					if Reference[ent] then Removed(ent) end
 					Added(ent)
 				end))
-				Arrows:Clean(vape.Categories.Friends.ColorUpdate.Event:Connect(function()
-					ColorFunc(Color.Hue, Color.Sat, Color.Value)
-				end))
 				Arrows:Clean(runService.RenderStepped:Connect(Loop))
 			else
 				for i in Reference do
 					Removed(i)
 				end
+				closestEnt = nil
 			end
 		end,
-		Tooltip = 'Draws arrows on screen when entities\nare out of your field of view.'
+		Tooltip = 'Draws pointers around your crosshair towards other players.\nThe closest one is red; set range, size, style and colors.'
 	})
+	--[[ Range, Ignore within FOV, Radius, Style and Distance-based radius are saved under new
+	names: every profile holds the old defaults (256, 90, 70, 2D, off), which would otherwise keep
+	pointers away from far players and anyone in front of you, and keep the flat ring. ]]
+	Range = Arrows:CreateSlider({
+		Name = 'Max Range',
+		DisplayName = 'Range',
+		Min = 8,
+		Max = RANGE_MAX,
+		Default = RANGE_MAX,
+		Suffix = function(val)
+			if val >= RANGE_MAX then
+				return 'studs (no limit)'
+			end
+			return val == 1 and 'stud' or 'studs'
+		end,
+		Tooltip = 'No pointer is drawn for players further away than this.\nAll the way up is no limit, like Name Tags.'
+	})
+	IgnoreFOV = Arrows:CreateSlider({
+		Name = 'Ignore FOV',
+		DisplayName = 'Ignore within FOV',
+		Min = 0,
+		Max = 180,
+		Default = 0,
+		Suffix = '°',
+		Tooltip = 'No pointer is drawn for players inside this field of view. 0 points to everyone.'
+	})
+	Teammates = Arrows:CreateToggle({
+		Name = 'Priority Only',
+		DisplayName = 'Hide friendlies',
+		Default = true,
+		Tooltip = 'Teammates and friends get no pointer.'
+	})
+	Arrows:CreateDivider({Text = 'Customization'})
+	Scale = Arrows:CreateSlider({
+		Name = 'Scale',
+		Min = 0.5,
+		Max = 2,
+		Default = 1,
+		Decimal = 10,
+		Tooltip = 'The size of the pointers.'
+	})
+	Radius = Arrows:CreateSlider({
+		Name = 'Ring Radius',
+		DisplayName = 'Radius',
+		Min = 20,
+		Max = 300,
+		Default = 100,
+		Tooltip = 'How far from your crosshair the pointers are drawn.'
+	})
+	Style = Arrows:CreateDropdown({
+		Name = 'Pointer Style',
+		DisplayName = 'Style',
+		List = {'3D', '2D'},
+		Tooltip = '3D: laid back at an angle for a sense of depth.\n2D: flat on the screen.'
+	})
+	ColorMode = Arrows:CreateDropdown({
+		Name = 'Colors',
+		List = {'Distance', 'Name Tag', 'Manual'},
+		Function = function(val)
+			NearColor.Object.Visible = val == 'Distance'
+			FarColor.Object.Visible = val == 'Distance'
+			Color.Object.Visible = val == 'Manual'
+			FriendColor.Object.Visible = val == 'Manual'
+			Transition.Object.Visible = val == 'Distance' or DistanceRadius.Enabled
+		end,
+		Tooltip = 'Distance: from the near colour to the far colour.\nName Tag: their team colour.\nManual: one colour for enemies, one for friendlies.'
+	})
+	NearColor = Arrows:CreateColorSlider({
+		Name = 'Near Color',
+		DisplayName = 'Near color',
+		DefaultHue = 0,
+		Darker = true
+	})
+	FarColor = Arrows:CreateColorSlider({
+		Name = 'Far Color',
+		DisplayName = 'Far color',
+		DefaultHue = 1 / 3,
+		Darker = true
+	})
+	Color = Arrows:CreateColorSlider({
+		Name = 'Player Color',
+		DisplayName = 'Enemy color',
+		Darker = true,
+		Visible = false
+	})
+	FriendColor = Arrows:CreateColorSlider({
+		Name = 'Friendly Color',
+		DisplayName = 'Friendly color',
+		DefaultHue = 0.6,
+		Darker = true,
+		Visible = false
+	})
+	-- Slinky's 10 to 50 blocks, in studs (a block is 3): nearer is fully red, further fully green.
+	Transition = Arrows:CreateTwoSlider({
+		Name = 'Transition between',
+		Min = 0,
+		Max = 256,
+		DefaultMin = 30,
+		DefaultMax = 150,
+		Darker = true,
+		Tooltip = 'Which distances count as near and far, for the colours and the distance-based radius.'
+	})
+	DistanceRadius = Arrows:CreateToggle({
+		Name = 'Distance Radius',
+		DisplayName = 'Distance-based radius',
+		Function = function(callback)
+			Transition.Object.Visible = ColorMode.Value == 'Distance' or callback
+		end,
+		Default = true,
+		Tooltip = 'Pointers for players far away are drawn further from your crosshair.'
+	})
+	Closest = Arrows:CreateToggle({
+		Name = 'Highlight Closest',
+		DisplayName = 'Highlight closest',
+		Function = function(callback)
+			-- Default runs this before the colour below exists; it starts out shown.
+			if ClosestColor then
+				ClosestColor.Object.Visible = callback
+			end
+		end,
+		Default = true,
+		Tooltip = 'The pointer to the closest enemy is always drawn in this colour, whatever the colour mode.'
+	})
+	ClosestColor = Arrows:CreateColorSlider({
+		Name = 'Closest Color',
+		DisplayName = 'Closest color',
+		DefaultHue = 0,
+		Darker = true
+	})
+	Arrows:CreateDivider({Text = 'Extras'})
 	Targets = Arrows:CreateTargets({
 		Players = true,
 		Function = function()
@@ -3971,40 +4522,6 @@ run(function()
 				Arrows:Toggle()
 			end
 		end
-	})
-	Color = Arrows:CreateColorSlider({
-		Name = 'Player Color',
-		Function = function(hue, sat, val)
-			if Arrows.Enabled then
-				ColorFunc(hue, sat, val)
-			end
-		end,
-	})
-	Teammates = Arrows:CreateToggle({
-		Name = 'Priority Only',
-		Function = function()
-			if Arrows.Enabled then
-				Arrows:Toggle()
-				Arrows:Toggle()
-			end
-		end,
-		Default = true,
-		Tooltip = 'Hides teammates & non targetable entities'
-	})
-	Distance = Arrows:CreateToggle({
-		Name = 'Distance Check',
-		Function = function(callback)
-			DistanceLimit.Object.Visible = callback
-		end
-	})
-	DistanceLimit = Arrows:CreateTwoSlider({
-		Name = 'Player Distance',
-		Min = 0,
-		Max = 256,
-		DefaultMin = 0,
-		DefaultMax = 64,
-		Darker = true,
-		Visible = false
 	})
 end)
 	
@@ -4101,6 +4618,21 @@ run(function()
 						end
 					end
 				end))
+				-- the folder leaves the gui while the menu is open, so its chams stop drawing
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				local scaled = vape.gui:FindFirstChild('ScaledGui')
+				local clickGui = scaled and scaled:FindFirstChild('ClickGui')
+				if clickGui then
+					Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					Chams:Clean(clickGui:GetPropertyChangedSignal('Visible'):Connect(function()
+						if vape.ThreadFix then
+							setthreadidentity(8)
+						end
+						Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					end))
+				end
 	
 				for _, v in entitylib.List do
 					if Reference[v] then
@@ -4112,10 +4644,27 @@ run(function()
 				for i in Reference do
 					Removed(i)
 				end
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				Folder.Parent = vape.gui
 			end
 		end,
-		Tooltip = 'Render players through walls'
+		Tooltip = 'Colors other players so you can see them through walls.\nChoose a glow or box style, its colors and transparency.'
 	})
+	Teammates = Chams:CreateToggle({
+		Name = 'Priority Only',
+		DisplayName = 'Hide friendlies',
+		Function = function()
+			if Chams.Enabled then
+				Chams:Toggle()
+				Chams:Toggle()
+			end
+		end,
+		Default = true,
+		Tooltip = 'Hides teammates & non targetable entities'
+	})
+	Chams:CreateDivider({Text = 'Extras'})
 	Targets = Chams:CreateTargets({
 		Players = true,
 		Function = function()
@@ -4137,6 +4686,33 @@ run(function()
 			end
 		end
 	})
+	OutlineColor = Chams:CreateColorSlider({
+		Name = 'Outline Color',
+		DefaultSat = 0,
+		Function = function(hue, sat, val)
+			for i, v in Reference do
+				if type(v) ~= 'table' then
+					v.OutlineColor = Color3.fromHSV(hue, sat, val)
+				end
+			end
+		end,
+		Darker = true
+	})
+	OutlineTransparency = Chams:CreateSlider({
+		Name = 'Outline Transparency',
+		Min = 0,
+		Max = 1,
+		Default = 0.5,
+		Function = function(val)
+			for _, v in Reference do
+				if type(v) ~= 'table' then
+					v.OutlineTransparency = val
+				end
+			end
+		end,
+		Decimal = 10,
+		Darker = true
+	})
 	FillColor = Chams:CreateColorSlider({
 		Name = 'Color',
 		Function = function(hue, sat, val)
@@ -4149,18 +4725,6 @@ run(function()
 				end
 			end
 		end
-	})
-	OutlineColor = Chams:CreateColorSlider({
-		Name = 'Outline Color',
-		DefaultSat = 0,
-		Function = function(hue, sat, val)
-			for i, v in Reference do
-				if type(v) ~= 'table' then
-					v.OutlineColor = Color3.fromHSV(hue, sat, val)
-				end
-			end
-		end,
-		Darker = true
 	})
 	FillTransparency = Chams:CreateSlider({
 		Name = 'Transparency',
@@ -4178,21 +4742,6 @@ run(function()
 		end,
 		Decimal = 10
 	})
-	OutlineTransparency = Chams:CreateSlider({
-		Name = 'Outline Transparency',
-		Min = 0,
-		Max = 1,
-		Default = 0.5,
-		Function = function(val)
-			for _, v in Reference do
-				if type(v) ~= 'table' then
-					v.OutlineTransparency = val
-				end
-			end
-		end,
-		Decimal = 10,
-		Darker = true
-	})
 	Walls = Chams:CreateToggle({
 		Name = 'Render Walls',
 		Function = function(callback)
@@ -4208,269 +4757,307 @@ run(function()
 		end,
 		Default = true
 	})
-	Teammates = Chams:CreateToggle({
-		Name = 'Priority Only',
-		Function = function()
-			if Chams.Enabled then
-				Chams:Toggle()
-				Chams:Toggle()
-			end
-		end,
-		Default = true,
-		Tooltip = 'Hides teammates & non targetable entities'
-	})
 end)
 	
 run(function()
 	local ESP
 	local Targets
-	local Color
+	local Range
+	local LineWidth
 	local Method
+	local ColorMode
+	local Color
+	local FriendColor
 	local BoundingBox
-	local Filled
 	local HealthBar
+	local Filled
+	local HurtEffect
 	local Name
 	local DisplayName
 	local Background
 	local Teammates
-	local Distance
-	local DistanceLimit
+	local OverrideTarget
+	local TargetColor
+	local TargetFill
 	local Reference = {}
+	local LastHealth = {}
+	local HurtAt = {}
 	local methodused
-	
+	local HURT_TIME = 0.5
+	local HURT_COLOR = Color3.fromRGB(255, 40, 40)
+
 	local function ESPWorldToViewport(pos)
 		local newpos = gameCamera:WorldToViewportPoint(gameCamera.CFrame:pointToWorldSpace(gameCamera.CFrame:PointToObjectSpace(pos)))
 		return Vector2.new(newpos.X, newpos.Y)
 	end
-	
+
+	local function passes(ent)
+		if not Targets.Players.Enabled and ent.Player then return false end
+		if not Targets.NPCs.Enabled and ent.NPC then return false end
+		if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return false end
+		return true
+	end
+
+	local function healthFraction(ent)
+		local maxHealth = ent.MaxHealth
+		if type(maxHealth) ~= 'number' or maxHealth <= 0 then return 1 end
+		local fraction = (ent.Health or maxHealth) / maxHealth
+		return fraction == fraction and math.clamp(fraction, 0, 1) or 1
+	end
+
+	-- Red for a moment after they take damage, fading back, like the game's own hurt tint.
+	local function hurtTint(ent, now, color)
+		local hurt = HurtEffect.Enabled and HurtAt[ent]
+		if hurt then
+			local alpha = 1 - (now - hurt) / HURT_TIME
+			if alpha > 0 then
+				return color:Lerp(HURT_COLOR, alpha)
+			end
+			HurtAt[ent] = nil
+		end
+		return color
+	end
+
+	--[[ The fill: with Override target color on, every box is filled in its fill colour and opacity,
+	and it stays that colour when they are hit; otherwise in the box's own colour at `alpha`. ]]
+	local function fillFor(ent, now, color, alpha)
+		if OverrideTarget.Enabled then
+			return Color3.fromHSV(TargetFill.Hue, TargetFill.Sat, TargetFill.Value), TargetFill.Opacity
+		end
+		return color, alpha
+	end
+
+	--[[ Override target color puts every box and outline in its border colour, the moment it is on.
+	Otherwise Automatic follows the name tag (team) colour, and Manual is one colour for enemies and
+	one for friendlies. ]]
+	local function baseColor(ent)
+		if OverrideTarget.Enabled then
+			return Color3.fromHSV(TargetColor.Hue, TargetColor.Sat, TargetColor.Value)
+		end
+		if ColorMode.Value == 'Manual' then
+			local friendly = ent.Friend or not ent.Targetable
+			local option = friendly and FriendColor or Color
+			return Color3.fromHSV(option.Hue, option.Sat, option.Value)
+		end
+		return entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+	end
+
+	-- Override target color is one fixed colour: the hurt flash is for the team and manual colours.
+	local function entityColor(ent, now)
+		if OverrideTarget.Enabled then
+			return baseColor(ent)
+		end
+		return hurtTint(ent, now, baseColor(ent))
+	end
+
+	local function newDrawing(kind, props)
+		local obj = Drawing.new(kind)
+		for key, value in props do
+			obj[key] = value
+		end
+		return obj
+	end
+
+	-- The health bar both box styles share: a dark track with the coloured part on top.
+	local function addHealthBar(EntityESP)
+		EntityESP.HealthBorder = newDrawing('Line', {Thickness = 4, Transparency = 0.5, ZIndex = 1, Color = Color3.new()})
+		EntityESP.HealthLine = newDrawing('Line', {Thickness = 2, ZIndex = 2})
+	end
+
+	local function drawHealthBar(EntityESP, ent, left, top, bottom)
+		local fraction = healthFraction(ent)
+		local x = left - 5
+		EntityESP.HealthBorder.From = Vector2.new(x, top - 1) // 1
+		EntityESP.HealthBorder.To = Vector2.new(x, bottom + 1) // 1
+		EntityESP.HealthLine.Visible = fraction > 0
+		EntityESP.HealthLine.From = Vector2.new(x, bottom) // 1
+		EntityESP.HealthLine.To = Vector2.new(x, bottom - (bottom - top) * fraction) // 1
+		EntityESP.HealthLine.Color = Color3.fromHSV(fraction / 2.5, 0.89, 0.75)
+	end
+
+	local function nameText(ent)
+		return ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
+	end
+
 	local ESPAdded = {
 		Drawing2D = function(ent)
-			if not Targets.Players.Enabled and ent.Player then return end
-			if not Targets.NPCs.Enabled and ent.NPC then return end
-			if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
+			if not passes(ent) then return end
 			if vape.ThreadFix then
 				setthreadidentity(8)
 			end
 			local EntityESP = {}
-			EntityESP.Main = Drawing.new('Square')
-			EntityESP.Main.Transparency = BoundingBox.Enabled and 1 or 0
-			EntityESP.Main.ZIndex = 2
-			EntityESP.Main.Filled = false
-			EntityESP.Main.Thickness = 1
-			EntityESP.Main.Color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-	
+			if Filled.Enabled then
+				EntityESP.Fill = newDrawing('Square', {Filled = true, Transparency = 0.25, ZIndex = 0, Thickness = 1})
+			end
 			if BoundingBox.Enabled then
-				EntityESP.Border = Drawing.new('Square')
-				EntityESP.Border.Transparency = 0.35
-				EntityESP.Border.ZIndex = 1
-				EntityESP.Border.Thickness = 1
-				EntityESP.Border.Filled = false
-				EntityESP.Border.Color = Color3.new()
-				EntityESP.Border2 = Drawing.new('Square')
-				EntityESP.Border2.Transparency = 0.35
-				EntityESP.Border2.ZIndex = 1
-				EntityESP.Border2.Thickness = 1
-				EntityESP.Border2.Filled = Filled.Enabled
-				EntityESP.Border2.Color = Color3.new()
+				EntityESP.Border = newDrawing('Square', {Filled = false, Transparency = 0.5, ZIndex = 1, Thickness = LineWidth.Value + 2, Color = Color3.new()})
+				EntityESP.Main = newDrawing('Square', {Filled = false, Transparency = 1, ZIndex = 2, Thickness = LineWidth.Value})
 			end
-	
 			if HealthBar.Enabled then
-				EntityESP.HealthLine = Drawing.new('Line')
-				EntityESP.HealthLine.Thickness = 1
-				EntityESP.HealthLine.ZIndex = 2
-				EntityESP.HealthLine.Color = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
-				EntityESP.HealthBorder = Drawing.new('Line')
-				EntityESP.HealthBorder.Thickness = 3
-				EntityESP.HealthBorder.Transparency = 0.35
-				EntityESP.HealthBorder.ZIndex = 1
-				EntityESP.HealthBorder.Color = Color3.new()
+				addHealthBar(EntityESP)
 			end
-			
 			if Name.Enabled then
 				if Background.Enabled then
-					EntityESP.TextBKG = Drawing.new('Square')
-					EntityESP.TextBKG.Transparency = 0.35
-					EntityESP.TextBKG.ZIndex = 0
-					EntityESP.TextBKG.Thickness = 1
-					EntityESP.TextBKG.Filled = true
-					EntityESP.TextBKG.Color = Color3.new()
+					EntityESP.TextBKG = newDrawing('Square', {Transparency = 0.35, ZIndex = 0, Thickness = 1, Filled = true, Color = Color3.new()})
 				end
-				EntityESP.Drop = Drawing.new('Text')
-				EntityESP.Drop.Color = Color3.new()
-				EntityESP.Drop.Text = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-				EntityESP.Drop.ZIndex = 1
-				EntityESP.Drop.Center = true
-				EntityESP.Drop.Size = 20
-				EntityESP.Text = Drawing.new('Text')
-				EntityESP.Text.Text = EntityESP.Drop.Text
-				EntityESP.Text.ZIndex = 2
-				EntityESP.Text.Color = EntityESP.Main.Color
-				EntityESP.Text.Center = true
-				EntityESP.Text.Size = 20
+				EntityESP.Drop = newDrawing('Text', {Color = Color3.new(), Text = nameText(ent), ZIndex = 1, Center = true, Size = 20})
+				EntityESP.Text = newDrawing('Text', {Text = EntityESP.Drop.Text, ZIndex = 2, Center = true, Size = 20})
 			end
 			Reference[ent] = EntityESP
 		end,
 		Drawing3D = function(ent)
-			if not Targets.Players.Enabled and ent.Player then return end
-			if not Targets.NPCs.Enabled and ent.NPC then return end
-			if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
+			if not passes(ent) then return end
 			if vape.ThreadFix then
 				setthreadidentity(8)
 			end
-			local EntityESP = {}
-			EntityESP.Line1 = Drawing.new('Line')
-			EntityESP.Line2 = Drawing.new('Line')
-			EntityESP.Line3 = Drawing.new('Line')
-			EntityESP.Line4 = Drawing.new('Line')
-			EntityESP.Line5 = Drawing.new('Line')
-			EntityESP.Line6 = Drawing.new('Line')
-			EntityESP.Line7 = Drawing.new('Line')
-			EntityESP.Line8 = Drawing.new('Line')
-			EntityESP.Line9 = Drawing.new('Line')
-			EntityESP.Line10 = Drawing.new('Line')
-			EntityESP.Line11 = Drawing.new('Line')
-			EntityESP.Line12 = Drawing.new('Line')
-	
-			local color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-			for _, v in EntityESP do
-				v.Thickness = 1
-				v.Color = color
+			local EntityESP = {Lines = {}, Faces = {}}
+			if BoundingBox.Enabled then
+				for i = 1, 12 do
+					EntityESP.Lines[i] = newDrawing('Line', {Thickness = LineWidth.Value, ZIndex = 2})
+				end
 			end
-	
+			if Filled.Enabled then
+				for i = 1, 6 do
+					local ok, face = pcall(newDrawing, 'Quad', {Filled = true, Transparency = 0.15, Thickness = 1, ZIndex = 1})
+					if not ok then break end
+					EntityESP.Faces[i] = face
+				end
+			end
+			if HealthBar.Enabled then
+				addHealthBar(EntityESP)
+			end
 			Reference[ent] = EntityESP
 		end,
 		DrawingSkeleton = function(ent)
-			if not Targets.Players.Enabled and ent.Player then return end
-			if not Targets.NPCs.Enabled and ent.NPC then return end
-			if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
+			if not passes(ent) then return end
 			if vape.ThreadFix then
 				setthreadidentity(8)
 			end
-			local EntityESP = {}
-			EntityESP.Head = Drawing.new('Line')
-			EntityESP.HeadFacing = Drawing.new('Line')
-			EntityESP.Torso = Drawing.new('Line')
-			EntityESP.UpperTorso = Drawing.new('Line')
-			EntityESP.LowerTorso = Drawing.new('Line')
-			EntityESP.LeftArm = Drawing.new('Line')
-			EntityESP.RightArm = Drawing.new('Line')
-			EntityESP.LeftLeg = Drawing.new('Line')
-			EntityESP.RightLeg = Drawing.new('Line')
-	
-			local color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-			for _, v in EntityESP do
-				v.Thickness = 2
-				v.Color = color
+			local EntityESP = {Lines = {}}
+			for _, name in {'Head', 'HeadFacing', 'Torso', 'UpperTorso', 'LowerTorso', 'LeftArm', 'RightArm', 'LeftLeg', 'RightLeg'} do
+				EntityESP.Lines[name] = newDrawing('Line', {Thickness = math.max(LineWidth.Value, 2)})
 			end
-	
 			Reference[ent] = EntityESP
 		end
 	}
-	
-	local ESPRemoved = {
-		Drawing2D = function(ent)
-			local EntityESP = Reference[ent]
-			if EntityESP then
-				if vape.ThreadFix then
-					setthreadidentity(8)
+
+	local function eachDrawing(EntityESP, callback)
+		for key, obj in EntityESP do
+			if key == 'Lines' or key == 'Faces' then
+				for _, line in obj do
+					callback(line)
 				end
-				Reference[ent] = nil
-				for _, v in EntityESP do
-					pcall(function()
-						v.Visible = false
-						v:Remove()
-					end)
-				end
+			else
+				callback(obj)
 			end
 		end
-	}
-	ESPRemoved.Drawing3D = ESPRemoved.Drawing2D
-	ESPRemoved.DrawingSkeleton = ESPRemoved.Drawing2D
-	
-	local ESPUpdated = {
-		Drawing2D = function(ent)
-			local EntityESP = Reference[ent]
-			if EntityESP then
-				if vape.ThreadFix then
-					setthreadidentity(8)
-				end
-				
-				if EntityESP.HealthLine then
-					EntityESP.HealthLine.Color = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
-				end
-	
-				if EntityESP.Text then
-					EntityESP.Text.Text = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-					EntityESP.Drop.Text = EntityESP.Text.Text
-				end
+	end
+
+	local function ESPRemoved(ent)
+		local EntityESP = Reference[ent]
+		LastHealth[ent] = nil
+		HurtAt[ent] = nil
+		if EntityESP then
+			if vape.ThreadFix then
+				setthreadidentity(8)
 			end
+			Reference[ent] = nil
+			eachDrawing(EntityESP, function(obj)
+				pcall(function()
+					obj.Visible = false
+					obj:Remove()
+				end)
+			end)
 		end
-	}
-	
-	local ColorFunc = {
-		Drawing2D = function(hue, sat, val)
-			local color = Color3.fromHSV(hue, sat, val)
-			for i, v in Reference do
-				v.Main.Color = entitylib.getEntityColor(i) or color
-				if v.Text then
-					v.Text.Color = v.Main.Color
-				end
+	end
+
+	local function ESPUpdated(ent)
+		local health = ent.Health
+		local last = LastHealth[ent]
+		if type(health) == 'number' then
+			if last and health < last then
+				HurtAt[ent] = os.clock()
 			end
-		end,
-		Drawing3D = function(hue, sat, val)
-			local color = Color3.fromHSV(hue, sat, val)
-			for i, v in Reference do
-				local playercolor = entitylib.getEntityColor(i) or color
-				for _, v2 in v do
-					v2.Color = playercolor
-				end
-			end
+			LastHealth[ent] = health
 		end
+		local EntityESP = Reference[ent]
+		if EntityESP and EntityESP.Text then
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			EntityESP.Text.Text = nameText(ent)
+			EntityESP.Drop.Text = EntityESP.Text.Text
+		end
+	end
+
+	local function setAll(EntityESP, visible)
+		eachDrawing(EntityESP, function(obj)
+			obj.Visible = visible
+		end)
+	end
+
+	-- Hidden when out of range or off screen; otherwise the root position on screen.
+	local function screenRoot(ent, EntityESP, origin)
+		-- hidden while the menu is open; the first frame after it closes redraws them
+		if clickGuiOpen() then
+			eachDrawing(EntityESP, function(obj)
+				if obj.Visible then obj.Visible = false end
+			end)
+			return nil
+		end
+		local root = ent.RootPart
+		if not (root and root.Parent) then
+			setAll(EntityESP, false)
+			return nil
+		end
+		if origin and (origin - root.Position).Magnitude > Range.Value then
+			setAll(EntityESP, false)
+			return nil
+		end
+		local rootPos, rootVis = gameCamera:WorldToViewportPoint(root.Position)
+		setAll(EntityESP, rootVis)
+		return rootVis and rootPos or nil, root
+	end
+
+	local BOX_EDGES = {{1, 2}, {3, 4}, {5, 6}, {7, 8}, {1, 3}, {1, 5}, {5, 7}, {7, 3}, {2, 4}, {2, 6}, {6, 8}, {8, 4}}
+	local BOX_FACES = {{1, 3, 4, 2}, {5, 7, 8, 6}, {1, 5, 6, 2}, {3, 7, 8, 4}, {1, 3, 7, 5}, {2, 4, 8, 6}}
+	local BOX_CORNERS = {
+		Vector3.new(1.5, 1, 1.5), Vector3.new(1.5, -1, 1.5), Vector3.new(-1.5, 1, 1.5), Vector3.new(-1.5, -1, 1.5),
+		Vector3.new(1.5, 1, -1.5), Vector3.new(1.5, -1, -1.5), Vector3.new(-1.5, 1, -1.5), Vector3.new(-1.5, -1, -1.5)
 	}
-	ColorFunc.DrawingSkeleton = ColorFunc.Drawing3D
-	
+
 	local ESPLoop = {
 		Drawing2D = function()
+			local now = os.clock()
+			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
 			for ent, EntityESP in Reference do
-				if Distance.Enabled then
-					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
-					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-						for _, obj in EntityESP do
-							obj.Visible = false
-						end
-						continue
-					end
-				end
-	
-				local rootPos, rootVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position)
-				for _, obj in EntityESP do
-					obj.Visible = rootVis
-				end
-				if not rootVis then continue end
-	
-				local topPos = gameCamera:WorldToViewportPoint((CFrame.lookAlong(ent.RootPart.Position, gameCamera.CFrame.LookVector) * CFrame.new(2, ent.HipHeight, 0)).p)
-				local bottomPos = gameCamera:WorldToViewportPoint((CFrame.lookAlong(ent.RootPart.Position, gameCamera.CFrame.LookVector) * CFrame.new(-2, -ent.HipHeight - 1, 0)).p)
+				local rootPos, root = screenRoot(ent, EntityESP, origin)
+				if not rootPos then continue end
+
+				local look = CFrame.lookAlong(root.Position, gameCamera.CFrame.LookVector)
+				local topPos = gameCamera:WorldToViewportPoint((look * CFrame.new(2, ent.HipHeight, 0)).p)
+				local bottomPos = gameCamera:WorldToViewportPoint((look * CFrame.new(-2, -ent.HipHeight - 1, 0)).p)
 				local sizex, sizey = topPos.X - bottomPos.X, topPos.Y - bottomPos.Y
-				local posx, posy = (rootPos.X - sizex / 2),  ((rootPos.Y - sizey / 2))
-				EntityESP.Main.Position = Vector2.new(posx, posy) // 1
-				EntityESP.Main.Size = Vector2.new(sizex, sizey) // 1
-				if EntityESP.Border then
-					EntityESP.Border.Position = Vector2.new(posx - 1, posy + 1) // 1
-					EntityESP.Border.Size = Vector2.new(sizex + 2, sizey - 2) // 1
-					EntityESP.Border2.Position = Vector2.new(posx + 1, posy - 1) // 1
-					EntityESP.Border2.Size = Vector2.new(sizex - 2, sizey + 2) // 1
+				local posx, posy = (rootPos.X - sizex / 2), (rootPos.Y - sizey / 2)
+				local color = entityColor(ent, now)
+				if EntityESP.Main then
+					EntityESP.Main.Position = Vector2.new(posx, posy) // 1
+					EntityESP.Main.Size = Vector2.new(sizex, sizey) // 1
+					EntityESP.Main.Color = color
+					EntityESP.Border.Position = EntityESP.Main.Position
+					EntityESP.Border.Size = EntityESP.Main.Size
 				end
-	
+				if EntityESP.Fill then
+					EntityESP.Fill.Position = Vector2.new(posx, posy) // 1
+					EntityESP.Fill.Size = Vector2.new(sizex, sizey) // 1
+					EntityESP.Fill.Color, EntityESP.Fill.Transparency = fillFor(ent, now, color, 0.25)
+				end
 				if EntityESP.HealthLine then
-					local healthposy = sizey * math.clamp(ent.Health / ent.MaxHealth, 0, 1)
-					EntityESP.HealthLine.Visible = ent.Health > 0
-					EntityESP.HealthLine.From = Vector2.new(posx - 6, posy + (sizey - (sizey - healthposy))) // 1
-					EntityESP.HealthLine.To = Vector2.new(posx - 6, posy) // 1
-					EntityESP.HealthBorder.From = Vector2.new(posx - 6, posy + 1) // 1
-					EntityESP.HealthBorder.To = Vector2.new(posx - 6, (posy + sizey) - 1) // 1
+					local top, bottom = math.min(posy, posy + sizey), math.max(posy, posy + sizey)
+					drawHealthBar(EntityESP, ent, math.min(posx, posx + sizex), top, bottom)
 				end
-	
 				if EntityESP.Text then
+					EntityESP.Text.Color = color
 					EntityESP.Text.Position = Vector2.new(posx + (sizex / 2), posy + (sizey - 28)) // 1
 					EntityESP.Drop.Position = EntityESP.Text.Position + Vector2.new(1, 1)
 					if EntityESP.TextBKG then
@@ -4481,281 +5068,268 @@ run(function()
 			end
 		end,
 		Drawing3D = function()
+			local now = os.clock()
+			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
+			local points = {}
 			for ent, EntityESP in Reference do
-				if Distance.Enabled then
-					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
-					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-						for _, obj in EntityESP do
-							obj.Visible = false
-						end
-						continue
-					end
+				local rootPos, root = screenRoot(ent, EntityESP, origin)
+				if not rootPos then continue end
+
+				local position, height = root.Position, ent.HipHeight
+				local left, top, right, bottom = math.huge, math.huge, -math.huge, -math.huge
+				for i, corner in BOX_CORNERS do
+					local point = ESPWorldToViewport(position + Vector3.new(corner.X, corner.Y * height, corner.Z))
+					points[i] = point
+					left, right = math.min(left, point.X), math.max(right, point.X)
+					top, bottom = math.min(top, point.Y), math.max(bottom, point.Y)
 				end
-	
-				local _, rootVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position)
-				for _, obj in EntityESP do
-					obj.Visible = rootVis
+				local color = entityColor(ent, now)
+				for i, line in EntityESP.Lines do
+					local edge = BOX_EDGES[i]
+					line.From = points[edge[1]]
+					line.To = points[edge[2]]
+					line.Color = color
 				end
-				if not rootVis then continue end
-	
-				local point1 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(1.5, ent.HipHeight, 1.5))
-				local point2 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(1.5, -ent.HipHeight, 1.5))
-				local point3 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(-1.5, ent.HipHeight, 1.5))
-				local point4 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(-1.5, -ent.HipHeight, 1.5))
-				local point5 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(1.5, ent.HipHeight, -1.5))
-				local point6 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(1.5, -ent.HipHeight, -1.5))
-				local point7 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(-1.5, ent.HipHeight, -1.5))
-				local point8 = ESPWorldToViewport(ent.RootPart.Position + Vector3.new(-1.5, -ent.HipHeight, -1.5))
-				EntityESP.Line1.From = point1
-				EntityESP.Line1.To = point2
-				EntityESP.Line2.From = point3
-				EntityESP.Line2.To = point4
-				EntityESP.Line3.From = point5
-				EntityESP.Line3.To = point6
-				EntityESP.Line4.From = point7
-				EntityESP.Line4.To = point8
-				EntityESP.Line5.From = point1
-				EntityESP.Line5.To = point3
-				EntityESP.Line6.From = point1
-				EntityESP.Line6.To = point5
-				EntityESP.Line7.From = point5
-				EntityESP.Line7.To = point7
-				EntityESP.Line8.From = point7
-				EntityESP.Line8.To = point3
-				EntityESP.Line9.From = point2
-				EntityESP.Line9.To = point4
-				EntityESP.Line10.From = point2
-				EntityESP.Line10.To = point6
-				EntityESP.Line11.From = point6
-				EntityESP.Line11.To = point8
-				EntityESP.Line12.From = point8
-				EntityESP.Line12.To = point4
+				local fill, fillAlpha = fillFor(ent, now, color, 0.15)
+				for i, face in EntityESP.Faces do
+					local corners = BOX_FACES[i]
+					face.PointA, face.PointB = points[corners[1]], points[corners[2]]
+					face.PointC, face.PointD = points[corners[3]], points[corners[4]]
+					face.Color = fill
+					face.Transparency = fillAlpha
+				end
+				if EntityESP.HealthLine then
+					drawHealthBar(EntityESP, ent, left, top, bottom)
+				end
 			end
 		end,
 		DrawingSkeleton = function()
+			local now = os.clock()
+			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
 			for ent, EntityESP in Reference do
-				if Distance.Enabled then
-					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
-					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-						for _, obj in EntityESP do
-							obj.Visible = false
-						end
-						continue
-					end
+				local rootPos = screenRoot(ent, EntityESP, origin)
+				if not rootPos then continue end
+
+				local lines = EntityESP.Lines
+				local color = entityColor(ent, now)
+				for _, line in lines do
+					line.Color = color
 				end
-	
-				local _, rootVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position)
-				for _, obj in EntityESP do
-					obj.Visible = rootVis
-				end
-				if not rootVis then continue end
-				
-				local rigcheck = ent.Humanoid.RigType == Enum.HumanoidRigType.R6
 				pcall(function()
+					local rigcheck = ent.Humanoid.RigType == Enum.HumanoidRigType.R6
 					local offset = rigcheck and CFrame.new(0, -0.8, 0) or CFrame.identity
+					local torso = ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame
 					local head = ESPWorldToViewport((ent.Head.CFrame).p)
 					local headfront = ESPWorldToViewport((ent.Head.CFrame * CFrame.new(0, 0, -0.5)).p)
-					local toplefttorso = ESPWorldToViewport((ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame * CFrame.new(-1.5, 0.8, 0)).p)
-					local toprighttorso = ESPWorldToViewport((ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame * CFrame.new(1.5, 0.8, 0)).p)
-					local toptorso = ESPWorldToViewport((ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame * CFrame.new(0, 0.8, 0)).p)
-					local bottomtorso = ESPWorldToViewport((ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame * CFrame.new(0, -0.8, 0)).p)
-					local bottomlefttorso = ESPWorldToViewport((ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame * CFrame.new(-0.5, -0.8, 0)).p)
-					local bottomrighttorso = ESPWorldToViewport((ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame * CFrame.new(0.5, -0.8, 0)).p)
+					local toplefttorso = ESPWorldToViewport((torso * CFrame.new(-1.5, 0.8, 0)).p)
+					local toprighttorso = ESPWorldToViewport((torso * CFrame.new(1.5, 0.8, 0)).p)
+					local toptorso = ESPWorldToViewport((torso * CFrame.new(0, 0.8, 0)).p)
+					local bottomtorso = ESPWorldToViewport((torso * CFrame.new(0, -0.8, 0)).p)
+					local bottomlefttorso = ESPWorldToViewport((torso * CFrame.new(-0.5, -0.8, 0)).p)
+					local bottomrighttorso = ESPWorldToViewport((torso * CFrame.new(0.5, -0.8, 0)).p)
 					local leftarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Arm' or 'LeftHand')].CFrame * offset).p)
 					local rightarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Arm' or 'RightHand')].CFrame * offset).p)
 					local leftleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Leg' or 'LeftFoot')].CFrame * offset).p)
 					local rightleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Leg' or 'RightFoot')].CFrame * offset).p)
-					EntityESP.Head.From = toptorso
-					EntityESP.Head.To = head
-					EntityESP.HeadFacing.From = head
-					EntityESP.HeadFacing.To = headfront
-					EntityESP.UpperTorso.From = toplefttorso
-					EntityESP.UpperTorso.To = toprighttorso
-					EntityESP.Torso.From = toptorso
-					EntityESP.Torso.To = bottomtorso
-					EntityESP.LowerTorso.From = bottomlefttorso
-					EntityESP.LowerTorso.To = bottomrighttorso
-					EntityESP.LeftArm.From = toplefttorso
-					EntityESP.LeftArm.To = leftarm
-					EntityESP.RightArm.From = toprighttorso
-					EntityESP.RightArm.To = rightarm
-					EntityESP.LeftLeg.From = bottomlefttorso
-					EntityESP.LeftLeg.To = leftleg
-					EntityESP.RightLeg.From = bottomrighttorso
-					EntityESP.RightLeg.To = rightleg
+					lines.Head.From, lines.Head.To = toptorso, head
+					lines.HeadFacing.From, lines.HeadFacing.To = head, headfront
+					lines.UpperTorso.From, lines.UpperTorso.To = toplefttorso, toprighttorso
+					lines.Torso.From, lines.Torso.To = toptorso, bottomtorso
+					lines.LowerTorso.From, lines.LowerTorso.To = bottomlefttorso, bottomrighttorso
+					lines.LeftArm.From, lines.LeftArm.To = toplefttorso, leftarm
+					lines.RightArm.From, lines.RightArm.To = toprighttorso, rightarm
+					lines.LeftLeg.From, lines.LeftLeg.To = bottomlefttorso, leftleg
+					lines.RightLeg.From, lines.RightLeg.To = bottomrighttorso, rightleg
 				end)
 			end
 		end
 	}
-	
+
+	local function restart()
+		if ESP.Enabled then
+			ESP:Toggle()
+			ESP:Toggle()
+		end
+	end
+
 	ESP = vape.Categories.Render:CreateModule({
 		Name = 'ESP',
+		DisplayName = 'Player ESP',
 		Function = function(callback)
 			if callback then
+				--[[ Every style draws with the Drawing library. Without it the first player threw
+				partway through this setup, with EntityRemoved connected and the loop never started,
+				and each player who joined threw again. Checked by use, not by type: some executors
+				hand Drawing over as userdata. ]]
+				if not pcall(function() assert(Drawing.new) end) then
+					notif('Player ESP', 'Your executor has no Drawing library to draw with.', 5, 'warning')
+					if ESP.Enabled then
+						ESP:Toggle(nil, true)
+					end
+					return
+				end
 				methodused = 'Drawing'..Method.Value
-				if ESPRemoved[methodused] then
-					ESP:Clean(entitylib.Events.EntityRemoved:Connect(ESPRemoved[methodused]))
-				end
-				if ESPAdded[methodused] then
-					for _, v in entitylib.List do
-						if Reference[v] then
-							ESPRemoved[methodused](v)
-						end
-						ESPAdded[methodused](v)
+				ESP:Clean(entitylib.Events.EntityRemoved:Connect(ESPRemoved))
+				for _, v in entitylib.List do
+					if Reference[v] then
+						ESPRemoved(v)
 					end
-					ESP:Clean(entitylib.Events.EntityAdded:Connect(function(ent)
-						if Reference[ent] then
-							ESPRemoved[methodused](ent)
-						end
-						ESPAdded[methodused](ent)
-					end))
+					ESPAdded[methodused](v)
+					ESPUpdated(v)
 				end
-				if ESPUpdated[methodused] then
-					ESP:Clean(entitylib.Events.EntityUpdated:Connect(ESPUpdated[methodused]))
-					for _, v in entitylib.List do
-						ESPUpdated[methodused](v)
+				ESP:Clean(entitylib.Events.EntityAdded:Connect(function(ent)
+					if Reference[ent] then
+						ESPRemoved(ent)
 					end
-				end
-				if ColorFunc[methodused] then
-					ESP:Clean(vape.Categories.Friends.ColorUpdate.Event:Connect(function()
-						ColorFunc[methodused](Color.Hue, Color.Sat, Color.Value)
-					end))
-				end
-				if ESPLoop[methodused] then
-					ESP:Clean(runService.RenderStepped:Connect(ESPLoop[methodused]))
-				end
+					ESPAdded[methodused](ent)
+				end))
+				ESP:Clean(entitylib.Events.EntityUpdated:Connect(ESPUpdated))
+				ESP:Clean(runService.RenderStepped:Connect(ESPLoop[methodused]))
 			else
-				if ESPRemoved[methodused] then
-					for i in Reference do
-						ESPRemoved[methodused](i)
-					end
+				for i in Reference do
+					ESPRemoved(i)
 				end
+				table.clear(LastHealth)
+				table.clear(HurtAt)
 			end
 		end,
-		Tooltip = 'Extra Sensory Perception\nRenders an ESP on players.'
+		Tooltip = 'Shows boxes around other players, even through walls.\nChoose 2D, 3D or skeleton, with names, health bars and colors.'
 	})
-	Targets = ESP:CreateTargets({
-		Players = true,
-		Function = function()
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-		end
+	ESP:CreateDivider({Text = 'Main'})
+	Range = ESP:CreateSlider({
+		Name = 'Range',
+		Min = 8,
+		Max = 1024,
+		Default = 1024,
+		Suffix = function(val)
+			return val == 1 and 'stud' or 'studs'
+		end,
+		Tooltip = 'Players further away than this are not highlighted.'
 	})
+	ESP:CreateDivider({Text = 'Customization'})
 	Method = ESP:CreateDropdown({
 		Name = 'Mode',
+		DisplayName = 'Style',
 		List = {'2D', '3D', 'Skeleton'},
 		Function = function(val)
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-			BoundingBox.Object.Visible = (val == '2D')
-			Filled.Object.Visible = (val == '2D')
-			HealthBar.Object.Visible = (val == '2D')
-			Name.Object.Visible = (val == '2D')
+			restart()
+			BoundingBox.Object.Visible = val ~= 'Skeleton'
+			HealthBar.Object.Visible = val ~= 'Skeleton'
+			Filled.Object.Visible = val ~= 'Skeleton'
+			Name.Object.Visible = val == '2D'
 			DisplayName.Object.Visible = Name.Object.Visible and Name.Enabled
 			Background.Object.Visible = Name.Object.Visible and Name.Enabled
 		end,
+		Tooltip = 'Both box styles can show the box and the health bar on their own.'
+	})
+	ColorMode = ESP:CreateDropdown({
+		Name = 'Colors',
+		List = {'Automatic', 'Manual'},
+		Function = function(val)
+			Color.Object.Visible = val == 'Manual'
+			FriendColor.Object.Visible = val == 'Manual'
+		end,
+		Tooltip = 'Automatic: their name tag colour. Manual: one colour for enemies, one for friendlies.'
 	})
 	Color = ESP:CreateColorSlider({
 		Name = 'Player Color',
-		Function = function(hue, sat, val)
-			if ESP.Enabled and ColorFunc[methodused] then
-				ColorFunc[methodused](hue, sat, val)
-			end
-		end
+		DisplayName = 'Enemy color',
+		Visible = false
+	})
+	FriendColor = ESP:CreateColorSlider({
+		Name = 'Friendly Color',
+		DisplayName = 'Friendly color',
+		DefaultHue = 0.6,
+		Visible = false
+	})
+	OverrideTarget = ESP:CreateToggle({
+		Name = 'Override target color',
+		Function = function(callback)
+			TargetColor.Object.Visible = callback
+			TargetFill.Object.Visible = callback
+		end,
+		Tooltip = 'Every box and outline uses the colours below.'
+	})
+	TargetColor = ESP:CreateColorSlider({
+		Name = 'Target color',
+		DisplayName = 'Target border color',
+		DefaultHue = 1 / 6,
+		DefaultSat = 1,
+		DefaultValue = 1,
+		Visible = false
+	})
+	TargetFill = ESP:CreateColorSlider({
+		Name = 'Target fill color',
+		DefaultHue = 1 / 6,
+		DefaultSat = 1,
+		DefaultValue = 1,
+		DefaultOpacity = 0.35,
+		Visible = false
+	})
+	LineWidth = ESP:CreateSlider({
+		Name = 'Line Width',
+		DisplayName = 'Line width',
+		Min = 1,
+		Max = 5,
+		Default = 1,
+		Suffix = 'px',
+		Function = restart,
+		Tooltip = 'How thick the outlines are.'
 	})
 	BoundingBox = ESP:CreateToggle({
 		Name = 'Bounding Box',
-		Function = function()
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-		end,
+		DisplayName = 'Show box',
+		Function = restart,
 		Default = true,
-		Darker = true
+		Tooltip = 'Draws a box around each player.'
 	})
 	Filled = ESP:CreateToggle({
 		Name = 'Filled',
-		Function = function()
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-		end,
-		Darker = true
+		Function = restart,
+		Tooltip = 'When off, only the outline is drawn.'
+	})
+	HurtEffect = ESP:CreateToggle({
+		Name = 'Hurt Effect',
+		DisplayName = 'Hurt effect',
+		Default = true,
+		Tooltip = 'Flashes red when they take damage, like their own model does.'
 	})
 	HealthBar = ESP:CreateToggle({
 		Name = 'Health Bar',
-		Function = function()
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-		end,
-		Darker = true
+		DisplayName = 'Show health bar',
+		Function = restart,
+		Tooltip = 'Shows how much health each player has left.'
+	})
+	ESP:CreateDivider({Text = 'Extras'})
+	Teammates = ESP:CreateToggle({
+		Name = 'Priority Only',
+		DisplayName = 'Hide friendlies',
+		Function = restart,
+		Default = true,
+		Tooltip = 'Teammates and friends are not highlighted.'
 	})
 	Name = ESP:CreateToggle({
 		Name = 'Name',
 		Function = function(callback)
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-			DisplayName.Object.Visible = callback
-			Background.Object.Visible = callback
-		end,
-		Darker = true
+			restart()
+			DisplayName.Object.Visible = callback and Name.Object.Visible
+			Background.Object.Visible = callback and Name.Object.Visible
+		end
 	})
 	DisplayName = ESP:CreateToggle({
 		Name = 'Use Displayname',
-		Function = function()
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-		end,
+		Function = restart,
 		Default = true,
-		Darker = true
+		Visible = false
 	})
 	Background = ESP:CreateToggle({
 		Name = 'Show Background',
-		Function = function()
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-		end,
-		Darker = true
-	})
-	Teammates = ESP:CreateToggle({
-		Name = 'Priority Only',
-		Function = function()
-			if ESP.Enabled then
-				ESP:Toggle()
-				ESP:Toggle()
-			end
-		end,
-		Default = true,
-		Tooltip = 'Hides teammates & non targetable entities'
-	})
-	Distance = ESP:CreateToggle({
-		Name = 'Distance Check',
-		Function = function(callback)
-			DistanceLimit.Object.Visible = callback
-		end
-	})
-	DistanceLimit = ESP:CreateTwoSlider({
-		Name = 'Player Distance',
-		Min = 0,
-		Max = 256,
-		DefaultMin = 0,
-		DefaultMax = 64,
-		Darker = true,
+		Function = restart,
 		Visible = false
+	})
+	Targets = ESP:CreateTargets({
+		Players = true,
+		Function = restart
 	})
 end)
 	
@@ -4807,7 +5381,7 @@ run(function()
 				table.clear(oldsettings)
 			end
 		end,
-		Tooltip = 'Increase the lighting of the world around you.'
+		Tooltip = 'Lights up the world so dark areas are easy to see.\nBrighten the whole map, or carry a light around with you.'
 	})
 	Mode = Fullbright:CreateDropdown({
 		Name = 'Mode',
@@ -5034,7 +5608,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Sit in the best gaming chair known to mankind.'
+		Tooltip = 'Sit in the best gaming chair known to mankind.\nIt rolls along with you and hovers while you fly.'
 	})
 	Color = GamingChair:CreateColorSlider({
 		Name = 'Color',
@@ -5060,18 +5634,21 @@ run(function()
 				label.BackgroundTransparency = 1
 				label.Text = '100 ❤️'
 				label.TextSize = 18
-				label.Font = Enum.Font.Arial
+				vape.Libraries.fonts.track(label)
 				label.Parent = vape.gui
 				Health:Clean(label)
 				
 				repeat
+					-- hidden while the menu is open
+					local show = not clickGuiOpen()
+					if label.Visible ~= show then label.Visible = show end
 					label.Text = entitylib.isAlive and math.round(entitylib.character.Humanoid.Health)..' ❤️' or ''
 					label.TextColor3 = entitylib.isAlive and Color3.fromHSV((entitylib.character.Humanoid.Health / entitylib.character.Humanoid.MaxHealth) / 2.8, 0.86, 1) or Color3.new()
 					task.wait()
 				until not Health.Enabled
 			end
 		end,
-		Tooltip = 'Shows your health as a number in the middle of the screen.'
+		Tooltip = 'Shows your health in the middle of the screen.'
 	})
 end)
 	
@@ -5083,7 +5660,6 @@ run(function()
 	local DisplayName
 	local Health
 	local Distance
-	local DrawingToggle
 	local Scale
 	local FontOption
 	local Teammates
@@ -5093,7 +5669,83 @@ run(function()
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
 	local methodused
+
+	--[[ Drawn like the mod overlay's lines: the tag's own text is hidden and two layers carry it, a
+	dark copy one pixel down and right with the coloured text over it -- layers, because a child
+	always draws over its parent's own text. Both follow the tag's text, colour and size. ]]
+	local function shadeTag(nametag)
+		local shadow = Instance.new('TextLabel')
+		shadow.Name = 'TextShadow'
+		shadow.BackgroundTransparency = 1
+		shadow.Position = UDim2.fromOffset(1, 1)
+		shadow.Size = UDim2.fromScale(1, 1)
+		shadow.TextColor3 = Color3.new()
+		shadow.TextTransparency = 0.35
+		local front = Instance.new('TextLabel')
+		front.Name = 'TextFront'
+		front.BackgroundTransparency = 1
+		front.RichText = true
+		front.Size = UDim2.fromScale(1, 1)
+		front.TextColor3 = nametag.TextColor3
+		for _, layer in {shadow, front} do
+			layer.FontFace = nametag.FontFace
+			layer.TextSize = nametag.TextSize
+			layer.Parent = nametag
+		end
+		--[[ Colour emoji (the device icons) draw in colour whatever TextColor3 says, so in the shadow
+		they are kept for their width but not drawn. ]]
+		shadow.RichText = true
+		local function sync()
+			front.Text = nametag.Text
+			local plain = removeTags(nametag.Text):gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
+			shadow.Text = plain:gsub('[\128-\255]+', function(run)
+				if run == '\u{2665}' then
+					return run
+				end
+				return '<font transparency="1">'..run..'</font>'
+			end)
+		end
+		sync()
+		nametag.TextTransparency = 1
+		nametag:GetPropertyChangedSignal('Text'):Connect(sync)
+		nametag:GetPropertyChangedSignal('TextColor3'):Connect(function()
+			front.TextColor3 = nametag.TextColor3
+		end)
+	end
 	
+	local TAG_GREEN, TAG_YELLOW, TAG_RED = Color3.fromRGB(85, 255, 85), Color3.fromRGB(255, 255, 85), Color3.fromRGB(255, 85, 85)
+
+	-- Green above half health, yellow at half or less, red under a fifth.
+	local function tagHealthColor(ent)
+		local fraction = 1
+		if type(ent.MaxHealth) == 'number' and ent.MaxHealth > 0 then
+			fraction = (ent.Health or ent.MaxHealth) / ent.MaxHealth
+		end
+		-- a nan compares false with everything, which would land it in red
+		if fraction ~= fraction then
+			fraction = 1
+		end
+		return fraction > 0.5 and TAG_GREEN or fraction >= 0.2 and TAG_YELLOW or TAG_RED
+	end
+
+	-- The same three for how far away they are: green past 30 studs, yellow from 10, red closer.
+	local function distanceText(studs)
+		local colour = studs > 30 and TAG_GREEN or studs >= 10 and TAG_YELLOW or TAG_RED
+		return '<font color="#'..colour:ToHex()..'">'..studs..'m</font>'
+	end
+
+	-- Health with its heart before the name, the distance after it, left as %s for the loop.
+	local function tagText(ent)
+		local text = ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
+		if Health.Enabled then
+			text = '<font color="#'..tagHealthColor(ent):ToHex()..'">'..math.round(ent.Health or 0)..'\u{2665}</font> '..text
+		end
+		if Distance.Enabled then
+			text = text..' %s'
+		end
+		return text
+	end
+
 	local Added = {
 		Normal = function(ent)
 			if not Targets.Players.Enabled and ent.Player then return end
@@ -5103,16 +5755,7 @@ run(function()
 				setthreadidentity(8)
 			end
 	
-			Strings[ent] = ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-	
-			if Health.Enabled then
-				local healthColor = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
-				Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health)..'</font>'
-			end
-	
-			if Distance.Enabled then
-				Strings[ent] = '<font color="rgb(85, 255, 85)">[</font><font color="rgb(255, 255, 255)">%s</font><font color="rgb(85, 255, 85)">]</font> '..Strings[ent]
-			end
+			Strings[ent] = tagText(ent)
 	
 			local nametag = Instance.new('TextLabel')
 			nametag.TextSize = 14 * Scale.Value
@@ -5128,37 +5771,8 @@ run(function()
 			nametag.Text = Strings[ent]
 			nametag.TextColor3 = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 			nametag.RichText = true
+			shadeTag(nametag)
 			nametag.Parent = Folder
-			Reference[ent] = nametag
-		end,
-		Drawing = function(ent)
-			if not Targets.Players.Enabled and ent.Player then return end
-			if not Targets.NPCs.Enabled and ent.NPC then return end
-			if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
-	
-			local nametag = {}
-			nametag.BG = Drawing.new('Square')
-			nametag.BG.Filled = true
-			nametag.BG.Transparency = 1 - Background.Value
-			nametag.BG.Color = Color3.new()
-			nametag.BG.ZIndex = 1
-			nametag.Text = Drawing.new('Text')
-			nametag.Text.Size = 15 * Scale.Value
-			nametag.Text.Font = 0
-			nametag.Text.ZIndex = 2
-			Strings[ent] = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-	
-			if Health.Enabled then
-				Strings[ent] = Strings[ent]..' '..math.round(ent.Health)
-			end
-	
-			if Distance.Enabled then
-				Strings[ent] = '[%s] '..Strings[ent]
-			end
-	
-			nametag.Text.Text = Strings[ent]
-			nametag.Text.Color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-			nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
 			Reference[ent] = nametag
 		end
 	}
@@ -5175,23 +5789,6 @@ run(function()
 				Sizes[ent] = nil
 				v:Destroy()
 			end
-		end,
-		Drawing = function(ent)
-			local v = Reference[ent]
-			if v then
-				if vape.ThreadFix then
-					setthreadidentity(8)
-				end
-				Reference[ent] = nil
-				Strings[ent] = nil
-				Sizes[ent] = nil
-				for _, obj in v do
-					pcall(function()
-						obj.Visible = false
-						obj:Remove()
-					end)
-				end
-			end
 		end
 	}
 	
@@ -5203,44 +5800,11 @@ run(function()
 					setthreadidentity(8)
 				end
 				Sizes[ent] = nil
-				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-	
-				if Health.Enabled then
-					local color = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
-					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(color.R * 255))..','..tostring(math.floor(color.G * 255))..','..tostring(math.floor(color.B * 255))..')">'..math.round(ent.Health)..'</font>'
-				end
-	
-				if Distance.Enabled then
-					Strings[ent] = '<font color="rgb(85, 255, 85)">[</font><font color="rgb(255, 255, 255)">%s</font><font color="rgb(85, 255, 85)">]</font> '..Strings[ent]
-				end
+				Strings[ent] = tagText(ent)
 	
 				local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 				nametag.Text = Strings[ent]
-			end
-		end,
-		Drawing = function(ent)
-			local nametag = Reference[ent]
-			if nametag then
-				if vape.ThreadFix then
-					setthreadidentity(8)
-				end
-				Sizes[ent] = nil
-				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-	
-				if Health.Enabled then
-					Strings[ent] = Strings[ent]..' '..math.round(ent.Health)
-				end
-	
-				if Distance.Enabled then
-					Strings[ent] = '[%s] '..Strings[ent]
-					nametag.Text.Text = entitylib.isAlive and string.format(Strings[ent], math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude)) or Strings[ent]
-				else
-					nametag.Text.Text = Strings[ent]
-				end
-	
-				nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
-				nametag.Text.Color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 			end
 		end
 	}
@@ -5251,18 +5815,18 @@ run(function()
 			for i, v in Reference do
 				v.TextColor3 = entitylib.getEntityColor(i) or color
 			end
-		end,
-		Drawing = function(hue, sat, val)
-			local color = Color3.fromHSV(hue, sat, val)
-			for i, v in Reference do
-				v.Text.Color = entitylib.getEntityColor(i) or color
-			end
 		end
 	}
 	
 	local Loop = {
 		Normal = function()
+			-- hidden while the menu is open; the first frame after it closes redraws them
+			local hidden = clickGuiOpen()
 			for ent, nametag in Reference do
+				if hidden then
+					if nametag.Visible then nametag.Visible = false end
+					continue
+				end
 				if DistanceCheck.Enabled then
 					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
 					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
@@ -5280,43 +5844,13 @@ run(function()
 				if Distance.Enabled then
 					local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
 					if Sizes[ent] ~= mag then
-						nametag.Text = string.format(Strings[ent], mag)
+						nametag.Text = string.format(Strings[ent], distanceText(mag))
 						local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
 						nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 						Sizes[ent] = mag
 					end
 				end
 				nametag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
-			end
-		end,
-		Drawing = function()
-			for ent, nametag in Reference do
-				if DistanceCheck.Enabled then
-					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
-					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-						nametag.Text.Visible = false
-						nametag.BG.Visible = false
-						continue
-					end
-				end
-	
-				local headPos, headVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position + Vector3.new(0, ent.HipHeight + 1, 0))
-				nametag.Text.Visible = headVis
-				nametag.BG.Visible = headVis
-				if not headVis then
-					continue
-				end
-	
-				if Distance.Enabled then
-					local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
-					if Sizes[ent] ~= mag then
-						nametag.Text.Text = string.format(Strings[ent], mag)
-						nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
-						Sizes[ent] = mag
-					end
-				end
-				nametag.BG.Position = Vector2.new(headPos.X - (nametag.BG.Size.X / 2), headPos.Y - nametag.BG.Size.Y)
-				nametag.Text.Position = nametag.BG.Position + Vector2.new(4, 3)
 			end
 		end
 	}
@@ -5325,7 +5859,7 @@ run(function()
 		Name = 'NameTags',
 		Function = function(callback)
 			if callback then
-				methodused = DrawingToggle.Enabled and 'Drawing' or 'Normal'
+				methodused = 'Normal'
 				if Removed[methodused] then
 					NameTags:Clean(entitylib.Events.EntityRemoved:Connect(Removed[methodused]))
 				end
@@ -5365,8 +5899,41 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Draws names over players and mobs, visible through walls.'
+		Tooltip = 'Shows clear name tags above other players.\nCan add health and distance, with your own font, size and colors.'
 	})
+	Scale = NameTags:CreateSlider({
+		Name = 'Scale',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle()
+				NameTags:Toggle()
+			end
+		end,
+		Default = 1,
+		Min = 0.1,
+		Max = 1.5,
+		Decimal = 10
+	})
+	NameTags:CreateDivider({Text = 'Extra info'})
+	Health = NameTags:CreateToggle({
+		Name = 'Health',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle()
+				NameTags:Toggle()
+			end
+		end
+	})
+	Distance = NameTags:CreateToggle({
+		Name = 'Distance',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle()
+				NameTags:Toggle()
+			end
+		end
+	})
+	NameTags:CreateDivider({Text = 'Extras'})
 	Targets = NameTags:CreateTargets({
 		Players = true,
 		Function = function()
@@ -5394,19 +5961,6 @@ run(function()
 			end
 		end
 	})
-	Scale = NameTags:CreateSlider({
-		Name = 'Scale',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end,
-		Default = 1,
-		Min = 0.1,
-		Max = 1.5,
-		Decimal = 10
-	})
 	Background = NameTags:CreateSlider({
 		Name = 'Transparency',
 		Function = function()
@@ -5419,24 +5973,6 @@ run(function()
 		Min = 0,
 		Max = 1,
 		Decimal = 10
-	})
-	Health = NameTags:CreateToggle({
-		Name = 'Health',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
-	})
-	Distance = NameTags:CreateToggle({
-		Name = 'Distance',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
 	})
 	DisplayName = NameTags:CreateToggle({
 		Name = 'Use Displayname',
@@ -5458,15 +5994,6 @@ run(function()
 		end,
 		Default = true,
 		Tooltip = 'Hides teammates & non targetable entities'
-	})
-	DrawingToggle = NameTags:CreateToggle({
-		Name = 'Drawing',
-		Function = function()
-			if NameTags.Enabled then
-				NameTags:Toggle()
-				NameTags:Toggle()
-			end
-		end
 	})
 	DistanceCheck = NameTags:CreateToggle({
 		Name = 'Distance Check',
@@ -5572,7 +6099,7 @@ run(function()
 				table.clear(models)
 			end
 		end,
-		Tooltip = 'Change the player models to a Mesh'
+		Tooltip = 'Puts a custom 3D model on other players.\nSet the mesh, texture, size and rotation; Local adds one to you too.'
 	})
 	Scale = PlayerModel:CreateSlider({
 		Name = 'Scale',
@@ -5636,9 +6163,26 @@ run(function()
 	local DotStyle
 	local PlayerColor
 	local Clamp
+	local BarColor
 	local Reference = {}
-	local bkg
-	
+	local bkg, bar
+	--[[ Bar Color's own default (the old orange), and the older teal default the shipped profiles still
+	save: left on either, the bar follows the GUI colour instead. ]]
+	local barDefaults = {{Color3.fromRGB(243, 93, 18):ToHSV()}, {0.44, 1, 1}}
+
+	local function barColor()
+		local h, s, v = BarColor.Hue, BarColor.Sat, BarColor.Value
+		if not BarColor.Rainbow then
+			for _, default in barDefaults do
+				if math.abs(h - default[1]) < 1e-3 and math.abs(s - default[2]) < 1e-3 and math.abs(v - default[3]) < 1e-3 then
+					h, s, v = vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value
+					break
+				end
+			end
+		end
+		return Color3.fromHSV(h, s, v)
+	end
+
 	local function Added(ent)
 		if not Targets.Players.Enabled and ent.Player then return end
 		if not Targets.NPCs.Enabled and ent.NPC then return end
@@ -5676,9 +6220,6 @@ run(function()
 	
 	Radar = vape:CreateOverlay({
 		Name = 'Radar',
-		Icon = getcustomasset('pistonware/assets/new/radaricon.png'),
-		Size = UDim2.fromOffset(14, 14),
-		Position = UDim2.fromOffset(12, 13),
 		Function = function(callback)
 			if callback then
 				Radar:Clean(entitylib.Events.EntityRemoved:Connect(Removed))
@@ -5700,6 +6241,10 @@ run(function()
 					end
 				end))
 				Radar:Clean(runService.RenderStepped:Connect(function()
+					local accent = barColor()
+					if bar.BackgroundColor3 ~= accent then
+						bar.BackgroundColor3 = accent
+					end
 					for ent, dot in Reference do
 						if entitylib.isAlive then
 							local dt = CFrame.lookAlong(entitylib.character.RootPart.Position, gameCamera.CFrame.LookVector * Vector3.new(1, 0, 1)):PointToObjectSpace(ent.RootPart.Position)
@@ -5740,64 +6285,69 @@ run(function()
 			end
 		end
 	})
+	-- The loader's box, with the cross as two hairlines in its secondary grey.
 	bkg = Instance.new('Frame')
 	bkg.Size = UDim2.fromOffset(216, 216)
 	bkg.Position = UDim2.fromOffset(2, 2)
-	bkg.BackgroundColor3 = Color3.new()
-	bkg.BackgroundTransparency = 0.5
 	bkg.ClipsDescendants = true
 	bkg.Parent = Radar.Children
-	local corner = Instance.new('UICorner')
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = bkg
-	local stroke = Instance.new('UIStroke')
-	stroke.Thickness = 2
-	stroke.Color = Color3.new()
-	stroke.Transparency = 0.4
-	stroke.Parent = bkg
+	local stroke = loaderStyle.box(bkg)
 	local line1 = Instance.new('Frame')
-	line1.Size = UDim2.new(0, 2, 1, 0)
+	line1.Size = UDim2.new(0, 1, 1, 0)
 	line1.Position = UDim2.fromScale(0.5, 0.5)
 	line1.AnchorPoint = Vector2.new(0.5, 0.5)
 	line1.ZIndex = 0
-	line1.BackgroundColor3 = Color3.new(1, 1, 1)
-	line1.BackgroundTransparency = 0.5
+	line1.BackgroundColor3 = loaderStyle.SubText
+	line1.BackgroundTransparency = 0.6
 	line1.BorderSizePixel = 0
 	line1.Parent = bkg
 	local line2 = line1:Clone()
-	line2.Size = UDim2.new(1, 0, 0, 2)
+	line2.Size = UDim2.new(1, 0, 0, 1)
 	line2.Parent = bkg
-	local bar = Instance.new('Frame')
-	bar.Size = UDim2.new(1, -6, 0, 4)
-	bar.Position = UDim2.fromOffset(3, 0)
-	bar.BackgroundColor3 = Color3.fromHSV(0.44, 1, 1)
+	-- The accent: a thin line inset along the top edge.
+	bar = Instance.new('Frame')
+	bar.Size = UDim2.new(1, -20, 0, 2)
+	bar.Position = UDim2.fromOffset(10, 0)
+	bar.BorderSizePixel = 0
 	bar.Parent = bkg
 	local barcorner = Instance.new('UICorner')
-	barcorner.CornerRadius = UDim.new(0, 8)
+	barcorner.CornerRadius = UDim.new(1, 0)
 	barcorner.Parent = bar
-	Radar:CreateColorSlider({
-		Name = 'Bar Color',
-		Function = function(hue, sat, val)
-			bar.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-		end
-	})
 	Radar:CreateToggle({
 		Name = 'Show Background',
 		Default = true,
 		Function = function(callback)
-			bkg.BackgroundTransparency = callback and 0.5 or 1
+			bkg.BackgroundTransparency = callback and loaderStyle.Transparency or 1
 			bar.BackgroundTransparency = callback and 0 or 1
-			stroke.Transparency = callback and 0.4 or 1
+			stroke.Transparency = callback and 0.55 or 1
 		end
 	})
 	Radar:CreateToggle({
 		Name = 'Show Cross',
 		Default = true,
 		Function = function(callback)
-			line1.BackgroundTransparency = callback and 0.5 or 1
-			line2.BackgroundTransparency = callback and 0.5 or 1
+			line1.BackgroundTransparency = callback and 0.6 or 1
+			line2.BackgroundTransparency = callback and 0.6 or 1
 		end
 	})
+	Radar:CreateToggle({
+		Name = 'Accent Bar',
+		Default = true,
+		Function = function(callback)
+			bar.Visible = callback
+			if BarColor then
+				BarColor.Object.Visible = callback
+			end
+		end
+	})
+	BarColor = Radar:CreateColorSlider({
+		Name = 'Bar Color',
+		Darker = true,
+		Function = function()
+			bar.BackgroundColor3 = barColor()
+		end
+	})
+	bar.BackgroundColor3 = barColor()
 	Clamp = Radar:CreateToggle({
 		Name = 'Clamp Radar',
 		Default = true
@@ -5863,11 +6413,30 @@ run(function()
 					end
 					CandidatesInitialized = true
 				end
+				-- the folder leaves the gui while the menu is open, so its boxes stop drawing
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				local scaled = vape.gui:FindFirstChild('ScaledGui')
+				local clickGui = scaled and scaled:FindFirstChild('ClickGui')
+				if clickGui then
+					Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					Search:Clean(clickGui:GetPropertyChangedSignal('Visible'):Connect(function()
+						if vape.ThreadFix then
+							setthreadidentity(8)
+						end
+						Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					end))
+				end
 				for v in Candidates do
 					Add(v)
 				end
 			else
 			Folder:ClearAllChildren()
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			Folder.Parent = vape.gui
 			table.clear(Reference)
 			--[[ Nothing tracks the workspace while off, so the list would go stale; the next
 			enable walks it again. ]]
@@ -5875,7 +6444,7 @@ run(function()
 			CandidatesInitialized = false
 		end
 		end,
-		Tooltip = 'Draws box around selected parts\nAdd parts in Search frame'
+		Tooltip = 'Shows boxes around parts you name, even through walls.\nAdd part names to the list and pick the box color and transparency.'
 	})
 	List = Search:CreateTextList({
 		Name = 'Parts',
@@ -5936,11 +6505,12 @@ run(function()
 	local infolabel
 	local infostroke
 	
+	-- The title in the loader's orange, and each entry's name in its secondary grey.
+	local TITLE = '<font color="'..loaderStyle.OrangeHex..'"><b>Session Info</b></font>'
+	local KEY = '<font color="'..loaderStyle.SubHex..'">%s:</font> %s'
+
 	SessionInfo = vape:CreateOverlay({
 		Name = 'Session Info',
-		Icon = getcustomasset('pistonware/assets/new/textguiicon.png'),
-		Size = UDim2.fromOffset(16, 12),
-		Position = UDim2.fromOffset(12, 14),
 		Function = function(callback)
 			if callback then
 				local teleportedServers
@@ -5963,11 +6533,11 @@ run(function()
 					if vape.Libraries.sessioninfo then
 						local stuff = {''}
 						if Title.Enabled then
-							stuff[1] = TitleOffset.Enabled and '<b>Session Info</b>\n<font size="4"> </font>' or '<b>Session Info</b>'
+							stuff[1] = TitleOffset.Enabled and TITLE..'\n<font size="4"> </font>' or TITLE
 						end
 	
 						for i, v in vape.Libraries.sessioninfo.Objects do
-							stuff[v.Index] = not table.find(Hide.ListEnabled, i) and i..': '..v.Function(v.Value) or false
+							stuff[v.Index] = not table.find(Hide.ListEnabled, i) and KEY:format(i, v.Function(v.Value)) or false
 						end
 	
 						--[[
@@ -6006,10 +6576,9 @@ run(function()
 							table.remove(stuff, 1)
 						end
 						infolabel.Text = table.concat(stuff, '\n')
-						infolabel.FontFace = FontOption.Value
 						infolabel.TextSize = TextSize.Value
 						local size = getfontsize(removeTags(infolabel.Text), infolabel.TextSize, infolabel.FontFace)
-						infoholder.Size = UDim2.fromOffset(size.X + 16, size.Y + (Title.Enabled and TitleOffset.Enabled and 4 or 16))
+						infoholder.Size = UDim2.fromOffset(size.X + 20, size.Y + (Title.Enabled and TitleOffset.Enabled and 4 or 16))
 					end
 	
 					task.wait(1)
@@ -6017,6 +6586,29 @@ run(function()
 			end
 		end
 	})
+	-- The loader's box, built before the options: the Border toggle reaches its stroke as it is made.
+	infoholder = Instance.new('Frame')
+	infoholder.Parent = SessionInfo.Children
+	infostroke = loaderStyle.box(infoholder)
+	vape:Clean(SessionInfo.Children:GetPropertyChangedSignal('AbsolutePosition'):Connect(function()
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		local newside = SessionInfo.Children.AbsolutePosition.X > (vape.gui.AbsoluteSize.X / 2)
+		infoholder.Position = UDim2.fromScale(newside and 1 or 0, 0)
+		infoholder.AnchorPoint = Vector2.new(newside and 1 or 0, 0)
+	end))
+	infolabel = Instance.new('TextLabel')
+	infolabel.Size = UDim2.new(1, -20, 1, -16)
+	infolabel.Position = UDim2.fromOffset(10, 8)
+	infolabel.BackgroundTransparency = 1
+	infolabel.TextXAlignment = Enum.TextXAlignment.Left
+	infolabel.TextYAlignment = Enum.TextYAlignment.Top
+	infolabel.TextSize = 16
+	infolabel.RichText = true
+	loaderStyle.text(infolabel, 'Medium')
+	infolabel.Parent = infoholder
+
 	FontOption = SessionInfo:CreateFont({
 		Name = 'Font',
 		Blacklist = 'Arial'
@@ -6024,29 +6616,15 @@ run(function()
 	Hide = SessionInfo:CreateTextList({
 		Name = 'Blacklist',
 		Tooltip = 'Name of entry to hide.',
-		Icon = getcustomasset('pistonware/assets/new/blockedicon.png'),
-		Tab = getcustomasset('pistonware/assets/new/blockedtab.png'),
-		TabSize = UDim2.fromOffset(21, 16),
 		Color = Color3.fromRGB(250, 50, 56)
 	})
-	SessionInfo:CreateColorSlider({
+	SessionInfo:CreateColorSlider(loaderStyle.backgroundOption({
 		Name = 'Background Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			infoholder.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 			infoholder.BackgroundTransparency = 1 - opacity
 		end
-	})
-	BorderColor = SessionInfo:CreateColorSlider({
-		Name = 'Border Color',
-		Function = function(hue, sat, val, opacity)
-			infostroke.Color = Color3.fromHSV(hue, sat, val)
-			infostroke.Transparency = 1 - opacity
-		end,
-		Darker = true,
-		Visible = false
-	})
+	}))
 	TextSize = SessionInfo:CreateSlider({
 		Name = 'Text Size',
 		Min = 1,
@@ -6069,10 +6647,25 @@ run(function()
 	})
 	SessionInfo:CreateToggle({
 		Name = 'Border',
+		Default = true,
 		Function = function(callback)
 			infostroke.Enabled = callback
-			BorderColor.Object.Visible = callback
+			if BorderColor then
+				BorderColor.Object.Visible = callback
+			end
 		end
+	})
+	BorderColor = SessionInfo:CreateColorSlider({
+		Name = 'Border Color',
+		DefaultHue = loaderStyle.OrangeHue,
+		DefaultSat = loaderStyle.OrangeSat,
+		DefaultValue = loaderStyle.OrangeValue,
+		DefaultOpacity = 0.45,
+		Function = function(hue, sat, val, opacity)
+			infostroke.Color = Color3.fromHSV(hue, sat, val)
+			infostroke.Transparency = 1 - opacity
+		end,
+		Darker = true
 	})
 	Custom = SessionInfo:CreateToggle({
 		Name = 'Add custom text',
@@ -6085,39 +6678,6 @@ run(function()
 		Darker = true,
 		Visible = false
 	})
-	infoholder = Instance.new('Frame')
-	infoholder.BackgroundColor3 = Color3.new()
-	infoholder.BackgroundTransparency = 0.5
-	infoholder.Parent = SessionInfo.Children
-	vape:Clean(SessionInfo.Children:GetPropertyChangedSignal('AbsolutePosition'):Connect(function()
-		if vape.ThreadFix then
-			setthreadidentity(8)
-		end
-		local newside = SessionInfo.Children.AbsolutePosition.X > (vape.gui.AbsoluteSize.X / 2)
-		infoholder.Position = UDim2.fromScale(newside and 1 or 0, 0)
-		infoholder.AnchorPoint = Vector2.new(newside and 1 or 0, 0)
-	end))
-	local sessioninfocorner = Instance.new('UICorner')
-	sessioninfocorner.CornerRadius = UDim.new(0, 5)
-	sessioninfocorner.Parent = infoholder
-	infolabel = Instance.new('TextLabel')
-	infolabel.Size = UDim2.new(1, -16, 1, -16)
-	infolabel.Position = UDim2.fromOffset(8, 8)
-	infolabel.BackgroundTransparency = 1
-	infolabel.TextXAlignment = Enum.TextXAlignment.Left
-	infolabel.TextYAlignment = Enum.TextYAlignment.Top
-	infolabel.TextSize = 16
-	infolabel.TextColor3 = Color3.new(1, 1, 1)
-	infolabel.TextStrokeColor3 = Color3.new()
-	infolabel.TextStrokeTransparency = 0.8
-	infolabel.Font = Enum.Font.Arial
-	infolabel.RichText = true
-	infolabel.Parent = infoholder
-	infostroke = Instance.new('UIStroke')
-	infostroke.Enabled = false
-	infostroke.Color = Color3.fromHSV(0.44, 1, 1)
-	infostroke.Parent = infoholder
-	addBlur(infoholder)
 end)
 
 if shared.PistonwareDeveloper == true then
@@ -6218,9 +6778,6 @@ if shared.PistonwareDeveloper == true then
 		KillauraInfo = vape:CreateOverlay({
 			-- Keep this category name stable so existing developer profiles continue to load.
 			Name = 'Killaura Info',
-			Icon = getcustomasset('pistonware/assets/new/targetinfo.png'),
-			Size = UDim2.fromOffset(16, 12),
-			Position = UDim2.fromOffset(12, 110),
 			CategorySize = 240,
 			Function = function(callback)
 				if not callback then
@@ -6401,9 +6958,8 @@ if shared.PistonwareDeveloper == true then
 		infolabel.Parent = infoholder
 		infostroke = Instance.new('UIStroke')
 		infostroke.Enabled = false
-		infostroke.Color = Color3.fromHSV(0.44, 1, 1)
+		infostroke.Color = Color3.fromRGB(243, 93, 18)
 		infostroke.Parent = infoholder
-		addBlur(infoholder)
 	end)
 end
 
@@ -6459,6 +7015,13 @@ run(function()
 	end
 	
 	local function Loop()
+		-- hidden while the menu is open; the first frame after it closes redraws them
+		if clickGuiOpen() then
+			for _, EntityTracer in Reference do
+				if EntityTracer.Visible then EntityTracer.Visible = false end
+			end
+			return
+		end
 		local screenSize = vape.gui.AbsoluteSize
 		local startVector = StartPosition.Value == 'Mouse' and inputService:GetMouseLocation() or Vector2.new(screenSize.X / 2, (StartPosition.Value == 'Middle' and screenSize.Y / 2 or screenSize.Y))
 	
@@ -6517,7 +7080,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Renders tracers on players.'
+		Tooltip = 'Draws lines from your screen to other players.\nSet where lines start and end, colors, distance limits and off-screen lines.'
 	})
 	Targets = Tracers:CreateTargets({
 		Players = true,
@@ -6625,29 +7188,47 @@ run(function()
 			can be raised), and this thread does not carry that identity; both ways, since
 			switching off clears the folder. Each point is built whole and then parented, so an
 			entry that is not 'x, y, z/name' costs itself rather than every point after it. ]]
-			if vape.ThreadFix then
-				setthreadidentity(8)
+			-- Guarded: a bare setthreadidentity(8) throws on an executor capped below 8.
+			if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+				pcall(setthreadidentity, 7)
 			end
 			if callback then
+				-- the folder leaves the gui while the menu is open, so its points stop drawing
+				local scaled = vape.gui:FindFirstChild('ScaledGui')
+				local clickGui = scaled and scaled:FindFirstChild('ClickGui')
+				if clickGui then
+					WaypointFolder.Parent = (not clickGui.Visible) and vape.gui or nil
+					Waypoints:Clean(clickGui:GetPropertyChangedSignal('Visible'):Connect(function()
+						if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+							pcall(setthreadidentity, 7)
+						end
+						WaypointFolder.Parent = (not clickGui.Visible) and vape.gui or nil
+					end))
+				end
 				for _, v in List.ListEnabled do
 					local billboard
 					local ok = pcall(function()
 						local split = v:split('/')
 						local tagSize = getfontsize(removeTags(split[2]), 14 * Scale.Value, FontOption.Value, Vector2.new(100000, 100000))
 						billboard = Instance.new('BillboardGui')
-						billboard.Size = UDim2.fromOffset(tagSize.X + 8, tagSize.Y + 7)
+						billboard.Size = UDim2.fromOffset(tagSize.X + 12, tagSize.Y + 7)
+						--[[ Anchored to Terrain, which sits at the world origin, so the offset is the
+						point itself. With no Adornee a billboard in the GUI folder has nowhere in
+						the world to be drawn, and no waypoint ever showed. ]]
+						billboard.Adornee = workspace.Terrain
 						billboard.StudsOffsetWorldSpace = Vector3.new(unpack(split[1]:split(',')))
 						billboard.AlwaysOnTop = true
+						-- A small loader box; its border goes with the background when that is cleared.
 						local tag = Instance.new('TextLabel')
-						tag.BackgroundColor3 = Color3.new()
-						tag.BorderSizePixel = 0
+						local stroke = loaderStyle.box(tag, UDim.new(0, 6))
+						stroke.Enabled = Background.Value < 1
 						tag.Visible = true
 						tag.RichText = true
-						tag.FontFace = FontOption.Value
 						tag.TextSize = 14 * Scale.Value
 						tag.BackgroundTransparency = Background.Value
 						tag.Size = billboard.Size
 						tag.Text = split[2]
+						loaderStyle.text(tag, 'Medium')
 						tag.TextColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 						tag.Parent = billboard
 						billboard.Parent = WaypointFolder
@@ -6658,9 +7239,10 @@ run(function()
 				end
 			else
 				WaypointFolder:ClearAllChildren()
+				WaypointFolder.Parent = vape.gui
 			end
 		end,
-		Tooltip = 'Mark certain spots with a visual indicator'
+		Tooltip = 'Shows named markers at spots in the world you save.\nAdd points by position or where you stand, and style their labels.'
 	})
 	FontOption = Waypoints:CreateFont({
 		Name = 'Font',
@@ -6693,6 +7275,10 @@ run(function()
 	})
 	Color = Waypoints:CreateColorSlider({
 		Name = 'Color',
+		-- the loader's light grey
+		DefaultHue = 0,
+		DefaultSat = 0,
+		DefaultValue = 230 / 255,
 		Function = function(hue, sat, val)
 			for _, v in WaypointFolder:GetChildren() do
 				v.TextLabel.TextColor3 = Color3.fromHSV(hue, sat, val)
@@ -6720,7 +7306,7 @@ run(function()
 				Waypoints:Toggle()
 			end
 		end,
-		Default = 0.5,
+		Default = loaderStyle.Transparency,
 		Min = 0,
 		Max = 1,
 		Decimal = 10
@@ -6782,7 +7368,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Plays a specific animation of your choosing at a certain speed'
+		Tooltip = 'Plays an animation of your choosing.\nEnter an animation id, then set its speed and priority.'
 	})
 	IDBox = AnimationPlayer:CreateTextBox({
 		Name = 'Animation',
@@ -6838,7 +7424,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Prevents you from getting knocked down in a ragdoll state'
+		Tooltip = 'Stops you from getting knocked into a ragdoll.'
 	})
 end)
 	
@@ -6859,7 +7445,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Automatically rejoins into a new server if you get disconnected / kicked'
+		Tooltip = 'Automatically joins a new server when you get kicked.\nChoose whether it prefers full or empty servers.'
 	})
 	Sort = AutoRejoin:CreateDropdown({
 		Name = 'Sort',
@@ -6970,7 +7556,7 @@ run(function()
 				restorePrompts()
 			end
 		end,
-		Tooltip = 'Changes ProximityPrompt interaction range and hold time'
+		Tooltip = 'Lets you use interact prompts from further away and faster.\nSet the reach, and the hold time as a percent of normal.'
 	})
 	Mode = PromptChanger:CreateDropdown({
 		Name = 'Mode',
@@ -7022,6 +7608,9 @@ run(function()
 	
 	Blink = vape.Categories.Utility:CreateModule({
 		Name = 'Blink',
+		ExtraText = function()
+			return Type and (Type.Value == 'All' and 'All' or 'Movement') or nil
+		end,
 		Function = function(callback)
 			if callback then
 				local teleported
@@ -7044,7 +7633,7 @@ run(function()
 					end
 	
 					task.wait(0.03)
-				until (not Blink.Enabled and not teleported)
+				until not Blink.Enabled or teleported
 			else
 				if setfflag then
 					setfflag('PhysicsSenderMaxBandwidthBps', '38760')
@@ -7053,8 +7642,9 @@ run(function()
 				oldphys, oldsend = nil, nil
 			end
 		end,
-		Tooltip = 'Chokes packets until disabled.'
+		Tooltip = 'Freezes you in place for others, then jumps you ahead.\nCan hold back your actions too, and catch up at set intervals.'
 	})
+	Blink:CreateDivider({Text = 'Extras'})
 	Type = Blink:CreateDropdown({
 		Name = 'Type',
 		List = {'Movement Only', 'All'},
@@ -7092,6 +7682,12 @@ ChatSpammer = vape.Categories.Utility:CreateModule({
 	Name = 'ChatSpammer',
 	Function = function(callback)
 		if callback then
+			if #Lines.ListEnabled == 0 then
+				notif('ChatSpammer', 'Add a line to send first.', 5, 'warning')
+				ChatSpammer:Toggle(nil, true)
+				return
+			end
+
 			if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
 				if Hide.Enabled and coreGui:FindFirstChild('ExperienceChat') then
 					ChatSpammer:Clean(coreGui.ExperienceChat.appLayout.chatWindow.contentFrame.scrollingView.bottomLockedScrollView.scrollView.ChildAdded:Connect(function(msg)
@@ -7115,7 +7711,8 @@ ChatSpammer = vape.Categories.Utility:CreateModule({
 
 			local index = 1
 			repeat
-				local message = 'vxpe on top'
+				--[[ Nothing is sent while the list is empty (it can be cleared mid-run). ]]
+				local message
 				if #Lines.ListEnabled > 0 then
 					if Mode.Value == 'Order' then
 						message = Lines.ListEnabled[index] or Lines.ListEnabled[1]
@@ -7131,10 +7728,12 @@ ChatSpammer = vape.Categories.Utility:CreateModule({
 					end
 				end
 
-				if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
-					textChatService.ChatInputBarConfiguration.TargetTextChannel:SendAsync(message)
-				else
-					replicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, 'All')
+				if message then
+					if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+						textChatService.ChatInputBarConfiguration.TargetTextChannel:SendAsync(message)
+					else
+						replicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, 'All')
+					end
 				end
 
 				task.wait(Delay.Value)
@@ -7145,7 +7744,7 @@ ChatSpammer = vape.Categories.Utility:CreateModule({
 			end
 		end
 	end,
-	Tooltip = 'Automatically types in chat'
+	Tooltip = 'Sends your chosen messages in chat over and over.\nSet the lines, random or in order, the delay, and hide the wait warning.'
 })
 Lines = ChatSpammer:CreateTextList({
 	Name = 'Lines',
@@ -7201,7 +7800,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Disables GetPropertyChangedSignal detections for movement'
+		Tooltip = 'Makes movement modules work more reliably.'
 	})
 end)
 	
@@ -7212,12 +7811,13 @@ run(function()
 			if callback then
 				for _, v in (vape.EachModule and vape:EachModule() or vape.Modules) do
 					if v.Enabled then
-						v:Toggle()
+						--[[ Quiet and batched: one overlay rebuild and no toast per module. ]]
+						v:Toggle(true, true)
 					end
 				end
 			end
 		end,
-		Tooltip = 'Disables all currently enabled modules'
+		Tooltip = 'Turns off every module that is currently on.'
 	})
 end)
 	
@@ -7238,7 +7838,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Rejoins the server'
+		Tooltip = 'Rejoins the server you are in.'
 	})
 end)
 	
@@ -7254,7 +7854,7 @@ run(function()
 				serverHop(nil, Sort.Value)
 			end
 		end,
-		Tooltip = 'Teleports into a unique server'
+		Tooltip = 'Moves you to a different server of this game.\nPrefer full or empty servers, or go back to the previous one.'
 	})
 	Sort = ServerHop:CreateDropdown({
 		Name = 'Sort',
@@ -7383,7 +7983,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Warns you when someone with a staff rank is in your server'
+		Tooltip = 'Warns you when staff are in your server.\nCan also unload, switch server, swap profile or turn modules off.'
 	})
 	Mode = StaffDetector:CreateDropdown({
 		Name = 'Mode',
@@ -7419,6 +8019,7 @@ run(function()
 	
 	vape.Categories.World:CreateModule({
 		Name = 'Anti-AFK',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				for _, v in getconnections(lplr.Idled) do
@@ -7432,7 +8033,7 @@ run(function()
 				table.clear(connections)
 			end
 		end,
-		Tooltip = 'Keeps you from being kicked for being idle'
+		Tooltip = 'Prevents you from getting kicked for being idle.'
 	})
 end)
 	
@@ -7443,8 +8044,16 @@ run(function()
 	
 	Freecam = vape.Categories.World:CreateModule({
 		Name = 'Freecam',
+		Tab = 'Visual',
 		Function = function(callback)
 			if callback then
+				--[[ Movement is keyboard only; without one the camera would just be pinned in place. ]]
+				if inputService.TouchEnabled and not inputService.KeyboardEnabled then
+					notif('Freecam', 'Freecam moves with W, A, S, D, Q and E, so it needs a keyboard.', 5, 'warning')
+					Freecam:Toggle(nil, true)
+					return
+				end
+
 				repeat
 					task.wait(0.1)
 					for _, v in getconnections(gameCamera:GetPropertyChangedSignal('CameraType')) do
@@ -7495,7 +8104,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Lets you fly and clip through walls freely\nwithout moving your player server-sided.'
+		Tooltip = 'Lets you fly your camera around freely.\nMove with WASD, E and Q, and hold Shift to slow down.'
 	})
 	Value = Freecam:CreateSlider({
 		Name = 'Speed',
@@ -7516,6 +8125,10 @@ run(function()
 	
 	Gravity = vape.Categories.World:CreateModule({
 		Name = 'Gravity',
+		Tab = 'Move',
+		ExtraText = function()
+			return Value and tostring(Value.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				if Mode.Value == 'Workspace' then
@@ -7547,7 +8160,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Changes the rate you fall'
+		Tooltip = 'Lowers gravity so you fall more slowly.\nApply it to the whole game or just to your own character.'
 	})
 	Mode = Gravity:CreateDropdown({
 		Name = 'Mode',
@@ -7574,6 +8187,7 @@ run(function()
 	
 	Parkour = vape.Categories.World:CreateModule({
 		Name = 'Parkour',
+		Tab = 'Move',
 		Function = function(callback)
 			if callback then 
 				local oldfloor
@@ -7588,7 +8202,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Automatically jumps after reaching the edge'
+		Tooltip = 'Jumps for you automatically as you run off an edge.'
 	})
 end)
 	
@@ -7599,6 +8213,7 @@ run(function()
 	
 	vape.Categories.World:CreateModule({
 		Name = 'SafeWalk',
+		Tab = 'Move',
 		Function = function(callback)
 			if callback then
 				if not module then
@@ -7636,7 +8251,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Prevents you from walking off the edge of parts'
+		Tooltip = 'Prevents you from walking off ledges.'
 	})
 end)
 	
@@ -7656,6 +8271,7 @@ run(function()
 
 	Xray = vape.Categories.World:CreateModule({
 		Name = 'Xray',
+		Tab = 'Visual',
 		Function = function(callback)
 			if callback then
 				Xray:Clean(workspace.DescendantAdded:Connect(modifyPart))
@@ -7677,7 +8293,7 @@ run(function()
 				table.clear(modified)
 			end
 		end,
-		Tooltip = 'Renders whitelisted parts through walls.'
+		Tooltip = 'Makes the world see-through so you can look past walls.\nParts named in the list stay solid.'
 	})
 	List = Xray:CreateTextList({
 		Name = 'Part',
@@ -7734,6 +8350,7 @@ run(function()
 	
 	MurderMystery = vape.Categories.Minigames:CreateModule({
 		Name = 'MurderMystery',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				oldtargetable, oldgetcolor = entitylib.targetCheck, entitylib.getEntityColor
@@ -7765,7 +8382,7 @@ run(function()
 				entitylib.refresh()
 			end
 		end,
-		Tooltip = 'Automatic murder mystery teaming based on equipped roblox tools.'
+		Tooltip = 'Finds the murderer and sheriff from their weapons.\nColors them and makes them your targets, or everyone if you are the murderer.'
 	})
 end)
 	
@@ -7869,7 +8486,7 @@ run(function()
 				table.clear(oldobjects)
 			end
 		end,
-		Tooltip = 'Custom lighting objects'
+		Tooltip = 'Replaces the sky and lighting with your own settings.\nCovers sky, atmosphere, bloom, depth of field, sun rays and color.'
 	})
 	for i, v in apidump do
 		Toggles[i] = {Objects = {}}
@@ -7904,10 +8521,13 @@ run(function()
 			elseif v2 == 'Color' then
 				Toggles[i].Objects[i2] = Atmosphere:CreateColorSlider({
 					Name = i2,
-					Function = function()
-						if Atmosphere.Enabled then
-							Atmosphere:Toggle()
-							Atmosphere:Toggle()
+					--[[ Recolours the live object instead of restarting the module, since rainbow
+					mode calls this every frame. ]]
+					Function = function(hue, sat, val)
+						for _, obj in newobjects do
+							if obj.ClassName == i then
+								obj[i2] = Color3.fromHSV(hue, sat, val)
+							end
 						end
 					end,
 					Darker = true,
@@ -7948,8 +8568,23 @@ run(function()
 				Breadcrumbs:Clean(point)
 				Breadcrumbs:Clean(point2)
 				Breadcrumbs:Clean(entitylib.Events.LocalAdded:Connect(function(ent)
-					point.Parent = ent.HumanoidRootPart
-					point2.Parent = ent.HumanoidRootPart
+					local moved = pcall(function()
+						point.Parent = ent.HumanoidRootPart
+						point2.Parent = ent.HumanoidRootPart
+					end)
+					if not moved then
+						--[[ The old attachments were destroyed with the last character. ]]
+						point = Instance.new('Attachment')
+						point.Position = Vector3.new(0, Thickness.Value - 2.7, 0)
+						point2 = Instance.new('Attachment')
+						point2.Position = Vector3.new(0, -Thickness.Value - 2.7, 0)
+						trail.Attachment0 = point
+						trail.Attachment1 = point2
+						Breadcrumbs:Clean(point)
+						Breadcrumbs:Clean(point2)
+						point.Parent = ent.HumanoidRootPart
+						point2.Parent = ent.HumanoidRootPart
+					end
 					trail.Parent = gameCamera
 				end))
 	
@@ -7964,7 +8599,7 @@ run(function()
 				point2 = nil
 			end
 		end,
-		Tooltip = 'Shows a trail behind your character'
+		Tooltip = 'Leaves a trail behind your character as you move.\nSet its texture, colors, length and thickness.'
 	})
 	Texture = Breadcrumbs:CreateTextBox({
 		Name = 'Texture',
@@ -8029,7 +8664,19 @@ end)
 run(function()
 	local Cape
 	local Texture
-	local part, motor
+	local Outline
+	local OutlineColor
+	local part, motor, outline
+	-- The square Pistonware piston, when no texture is set.
+	local DEFAULT_CAPE = 'rbxassetid://73714636260061'
+
+	-- An outline round the cape: a Highlight with no fill, hidden behind walls like the cape itself.
+	local function paintOutline()
+		if not outline then return end
+		outline.Enabled = Outline.Enabled
+		outline.OutlineColor = Color3.fromHSV(OutlineColor.Hue, OutlineColor.Sat, OutlineColor.Value)
+		outline.OutlineTransparency = 1 - OutlineColor.Opacity
+	end
 	
 	local function createMotor(char)
 		if motor then 
@@ -8080,11 +8727,17 @@ run(function()
 					decal:Play()
 				else
 					local decal = Instance.new('ImageLabel')
-					decal.Image = Texture.Value ~= '' and (Texture.Value:find('rbxasset') and Texture.Value or assetfunction(Texture.Value)) or 'rbxassetid://14637958134'
+					decal.Image = Texture.Value ~= '' and (Texture.Value:find('rbxasset') and Texture.Value or assetfunction(Texture.Value)) or DEFAULT_CAPE
 					decal.Size = UDim2.fromScale(1, 1)
 					decal.BackgroundTransparency = 1
 					decal.Parent = capesurface
 				end
+				outline = Instance.new('Highlight')
+				outline.DepthMode = Enum.HighlightDepthMode.Occluded
+				outline.FillTransparency = 1
+				outline.Adornee = part
+				outline.Parent = part
+				paintOutline()
 				Cape:Clean(part)
 				Cape:Clean(entitylib.Events.LocalAdded:Connect(createMotor))
 				if entitylib.isAlive then
@@ -8103,12 +8756,31 @@ run(function()
 			else
 				part = nil
 				motor = nil
+				outline = nil
 			end
 		end,
-		Tooltip = 'Add\'s a cape to your character'
+		Tooltip = 'Gives your character a cape that sways as you move.\nShows the Pistonware piston, or your own image or video.'
 	})
 	Texture = Cape:CreateTextBox({
 		Name = 'Texture'
+	})
+	Outline = Cape:CreateToggle({
+		Name = 'Outline',
+		Function = function(callback)
+			if OutlineColor then
+				OutlineColor.Object.Visible = callback
+			end
+			paintOutline()
+		end,
+		Tooltip = 'Draws an outline round the cape.'
+	})
+	OutlineColor = Cape:CreateColorSlider({
+		Name = 'Outline Color',
+		Function = function()
+			paintOutline()
+		end,
+		Darker = true,
+		Visible = false
 	})
 end)
 	
@@ -8165,7 +8837,7 @@ run(function()
 				hat = nil
 			end
 		end,
-		Tooltip = 'Puts a china hat on your character (ty mastadawn)'
+		Tooltip = 'Puts a china hat on your head.\nPick its material, color and transparency. (ty mastadawn)'
 	})
 	local materials = {'ForceField'}
 	for _, v in Enum.Material:GetEnumItems() do
@@ -8210,39 +8882,25 @@ run(function()
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
-		Tooltip = 'Shows the current local time'
+		Tooltip = 'Shows your local time on screen.\nPick the font, background, and 12 or 24 hour time.'
 	})
+	-- Kept for saved profiles; the label is in the menu's Inter through loaderStyle.text.
 	Clock:CreateFont({
 		Name = 'Font',
-		Blacklist = 'Gotham',
-		Function = function(val)
-			label.FontFace = val
-		end
+		Blacklist = 'Gotham'
 	})
-	Clock:CreateColorSlider({
+	Clock:CreateColorSlider(loaderStyle.backgroundOption({
 		Name = 'Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 			label.BackgroundTransparency = 1 - opacity
+			loaderStyle.border(label, opacity)
 		end
-	})
+	}))
 	TwentyFourHour = Clock:CreateToggle({
 		Name = '24 Hour Clock'
 	})
-	label = Instance.new('TextLabel')
-	label.Size = UDim2.new(0, 100, 0, 41)
-	label.BackgroundTransparency = 0.5
-	label.TextSize = 15
-	label.Font = Enum.Font.Gotham
-	label.Text = '0:00 PM'
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.BackgroundColor3 = Color3.new()
-	label.Parent = Clock.Children
-	local corner = Instance.new('UICorner')
-	corner.CornerRadius = UDim.new(0, 4)
-	corner.Parent = label
+	label = loaderStyle.reading(Clock.Children, '0:00 PM')
 end)
 	
 run(function()
@@ -8565,7 +9223,7 @@ run(function()
 				restore()
 			end
 		end,
-		Tooltip = 'Wears someone else\'s avatar (a user id or username), or an animation pack (bundle id), on your own screen'
+		Tooltip = 'Wears another avatar or animation pack on your screen.\nEnter a username or user id for an avatar, or a bundle id for animations.'
 	})
 	Mode = Disguise:CreateDropdown({
 		Name = 'Mode',
@@ -8607,7 +9265,7 @@ run(function()
 				gameCamera.FieldOfView = oldfov
 			end
 		end,
-		Tooltip = 'Changes how wide your camera sees'
+		Tooltip = 'Changes how wide your camera can see.'
 	})
 	Value = FOV:CreateSlider({
 		Name = 'FOV',
@@ -8641,42 +9299,28 @@ run(function()
 					frames[1] = updateClock
 					if updateTick < tick() then
 						updateTick = tick() + 1
-						label.Text = math.floor(os.clock() - startClock >= 1 and #frames or #frames / (os.clock() - startClock))..' FPS'
+						label.Text = loaderStyle.unit(math.floor(os.clock() - startClock >= 1 and #frames or #frames / (os.clock() - startClock)), 'FPS')
 					end
 				end))
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
-		Tooltip = 'Shows the current framerate'
+		Tooltip = 'Shows your frames per second on screen.\nPick the font and background.'
 	})
+	-- Kept for saved profiles; the label is in the menu's Inter through loaderStyle.text.
 	FPS:CreateFont({
 		Name = 'Font',
-		Blacklist = 'Gotham',
-		Function = function(val)
-			label.FontFace = val
-		end
+		Blacklist = 'Gotham'
 	})
-	FPS:CreateColorSlider({
+	FPS:CreateColorSlider(loaderStyle.backgroundOption({
 		Name = 'Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 			label.BackgroundTransparency = 1 - opacity
+			loaderStyle.border(label, opacity)
 		end
-	})
-	label = Instance.new('TextLabel')
-	label.Size = UDim2.fromScale(1, 1)
-	label.BackgroundTransparency = 0.5
-	label.TextSize = 15
-	label.Font = Enum.Font.Gotham
-	label.Text = 'inf FPS'
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.BackgroundColor3 = Color3.new()
-	label.Parent = FPS.Children
-	local corner = Instance.new('UICorner')
-	corner.CornerRadius = UDim.new(0, 4)
-	corner.Parent = label
+	}))
+	label = loaderStyle.reading(FPS.Children, loaderStyle.unit('inf', 'FPS'))
 end)
 	
 run(function()
@@ -8685,77 +9329,117 @@ run(function()
 	local Color
 	local keys, holder = {}
 	
-	local function createKeystroke(keybutton, pos, pos2, text)
+	local function createKeystroke(keybutton, pos, text)
 		if keys[keybutton] then
 			keys[keybutton].Key:Destroy()
 			keys[keybutton] = nil
 		end
 	
+		-- Loader boxes with the key centred on them; the spacebar is a short bar across its middle.
+		local space = keybutton == Enum.KeyCode.Space
 		local key = Instance.new('Frame')
-		key.Size = keybutton == Enum.KeyCode.Space and UDim2.new(0, 110, 0, 24) or UDim2.new(0, 34, 0, 36)
+		key.Size = space and UDim2.new(0, 110, 0, 24) or UDim2.new(0, 34, 0, 36)
+		loaderStyle.box(key)
 		key.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 		key.BackgroundTransparency = 1 - Color.Opacity
+		loaderStyle.border(key, Color.Opacity)
 		key.Position = pos
 		key.Name = keybutton.Name
 		key.Parent = holder
 		local keytext = Instance.new('TextLabel')
 		keytext.BackgroundTransparency = 1
 		keytext.Size = UDim2.fromScale(1, 1)
-		keytext.Font = Enum.Font.Gotham
-		keytext.Text = text or keybutton.Name
-		keytext.TextXAlignment = Enum.TextXAlignment.Left
-		keytext.TextYAlignment = Enum.TextYAlignment.Top
-		keytext.Position = pos2
-		keytext.TextSize = keybutton == Enum.KeyCode.Space and 18 or 15
-		keytext.TextColor3 = Color3.new(1, 1, 1)
+		keytext.Text = space and '' or text or keybutton.Name
+		keytext.TextSize = 15
+		loaderStyle.text(keytext, 'SemiBold')
 		keytext.Parent = key
-		local corner = Instance.new('UICorner')
-		corner.CornerRadius = UDim.new(0, 4)
-		corner.Parent = key
+		local bar
+		if space then
+			bar = Instance.new('Frame')
+			bar.AnchorPoint = Vector2.new(0.5, 0.5)
+			bar.Position = UDim2.fromScale(0.5, 0.5)
+			bar.Size = UDim2.new(0.4, 0, 0, 2)
+			bar.BackgroundColor3 = loaderStyle.Text
+			bar.BorderSizePixel = 0
+			bar.Parent = key
+			local barcorner = Instance.new('UICorner')
+			barcorner.CornerRadius = UDim.new(1, 0)
+			barcorner.Parent = bar
+		end
 	
-		keys[keybutton] = {Key = key}
+		keys[keybutton] = {Key = key, Text = keytext, Bar = bar}
+	end
+	
+	-- Pressed is the loader's orange with dark text.
+	local function setPressed(keyCode, pressed)
+		local key = keys[keyCode]
+		if not key or key.Pressed == pressed then return end
+		key.Pressed = pressed
+		for _, tween in key.Tweens or {} do
+			tween:Cancel()
+		end
+		local textColor = pressed and loaderStyle.Pressed or loaderStyle.Text
+		key.Tweens = {
+			tweenService:Create(key.Key, TweenInfo.new(0.1), {
+				BackgroundColor3 = pressed and loaderStyle.Orange or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value),
+				BackgroundTransparency = pressed and 0 or 1 - Color.Opacity
+			}),
+			tweenService:Create(key.Text, TweenInfo.new(0.1), {TextColor3 = textColor})
+		}
+		if key.Bar then
+			table.insert(key.Tweens, tweenService:Create(key.Bar, TweenInfo.new(0.1), {BackgroundColor3 = textColor}))
+		end
+		for _, tween in key.Tweens do
+			tween:Play()
+		end
 	end
 	
 	local function updateKey(inputType)
-		local key = keys[inputType.KeyCode]
-		if key then
-			if key.Tween then
-				key.Tween:Cancel()
-			end
+		setPressed(inputType.KeyCode, inputType.UserInputState == Enum.UserInputState.Begin)
+	end
 	
-			if key.Tween2 then
-				key.Tween2:Cancel()
+	--[[ A phone has no movement keys: its thumbstick and jump button drive the humanoid, so there the
+	keys follow which way it is walking, relative to the camera, and whether it is jumping. ]]
+	local function touchKeys()
+		local humanoid = entitylib.isAlive and entitylib.character.Humanoid
+		local forward, right, jump = 0, 0, false
+		if humanoid then
+			local look = gameCamera.CFrame.LookVector * Vector3.new(1, 0, 1)
+			if look.Magnitude > 1e-3 then
+				look = look.Unit
+				local move = humanoid.MoveDirection
+				forward, right = move:Dot(look), move:Dot(Vector3.new(-look.Z, 0, look.X))
 			end
-	
-			local pressed = inputType.UserInputState == Enum.UserInputState.Begin
-			key.Pressed = pressed
-			key.Tween = tweenService:Create(key.Key, TweenInfo.new(0.1), {
-				BackgroundColor3 = pressed and Color3.new(1, 1, 1) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value),
-				BackgroundTransparency = pressed and 0 or 1 - Color.Opacity
-			})
-			key.Tween2 = tweenService:Create(key.Key.TextLabel, TweenInfo.new(0.1), {
-				TextColor3 = pressed and Color3.new() or Color3.new(1, 1, 1)
-			})
-			key.Tween:Play()
-			key.Tween2:Play()
+			jump = humanoid.Jump
 		end
+		setPressed(Enum.KeyCode.W, forward > 0.3)
+		setPressed(Enum.KeyCode.S, forward < -0.3)
+		setPressed(Enum.KeyCode.A, right < -0.3)
+		setPressed(Enum.KeyCode.D, right > 0.3)
+		setPressed(Enum.KeyCode.Space, jump)
 	end
 	
 	Keystrokes = vape.Legit:CreateModule({
 		Name = 'Keystrokes',
 		Function = function(callback)
 			if callback then
-				createKeystroke(Enum.KeyCode.W, UDim2.new(0, 38, 0, 0), UDim2.new(0, 6, 0, 5), Style.Value == 'Arrow' and '↑' or nil)
-				createKeystroke(Enum.KeyCode.S, UDim2.new(0, 38, 0, 42), UDim2.new(0, 8, 0, 5), Style.Value == 'Arrow' and '↓' or nil)
-				createKeystroke(Enum.KeyCode.A, UDim2.new(0, 0, 0, 42), UDim2.new(0, 7, 0, 5), Style.Value == 'Arrow' and '←' or nil)
-				createKeystroke(Enum.KeyCode.D, UDim2.new(0, 76, 0, 42), UDim2.new(0, 8, 0, 5), Style.Value == 'Arrow' and '→' or nil)
+				createKeystroke(Enum.KeyCode.W, UDim2.new(0, 38, 0, 0), Style.Value == 'Arrow' and '↑' or nil)
+				createKeystroke(Enum.KeyCode.S, UDim2.new(0, 38, 0, 42), Style.Value == 'Arrow' and '↓' or nil)
+				createKeystroke(Enum.KeyCode.A, UDim2.new(0, 0, 0, 42), Style.Value == 'Arrow' and '←' or nil)
+				createKeystroke(Enum.KeyCode.D, UDim2.new(0, 76, 0, 42), Style.Value == 'Arrow' and '→' or nil)
+				-- the spacebar outlives a restart; it starts released like the rest
+				setPressed(Enum.KeyCode.Space, false)
 	
-				Keystrokes:Clean(inputService.InputBegan:Connect(updateKey))
-				Keystrokes:Clean(inputService.InputEnded:Connect(updateKey))
+				if inputService.TouchEnabled and not inputService.KeyboardEnabled then
+					Keystrokes:Clean(runService.RenderStepped:Connect(touchKeys))
+				else
+					Keystrokes:Clean(inputService.InputBegan:Connect(updateKey))
+					Keystrokes:Clean(inputService.InputEnded:Connect(updateKey))
+				end
 			end
 		end,
 		Size = UDim2.fromOffset(110, 176),
-		Tooltip = 'Shows movement keys onscreen'
+		Tooltip = 'Shows your movement keys on screen as you press them.\nPick letter or arrow keys, the color, and whether Space shows.'
 	})
 	holder = Instance.new('Frame')
 	holder.Size = UDim2.fromScale(1, 1)
@@ -8771,27 +9455,26 @@ run(function()
 			end
 		end
 	})
-	Color = Keystrokes:CreateColorSlider({
+	Color = Keystrokes:CreateColorSlider(loaderStyle.backgroundOption({
 		Name = 'Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			for _, v in keys do
 				if not v.Pressed then
 					v.Key.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 					v.Key.BackgroundTransparency = 1 - opacity
 				end
+				loaderStyle.border(v.Key, opacity)
 			end
 		end
-	})
+	}))
 	Keystrokes:CreateToggle({
 		Name = 'Show Spacebar',
 		Function = function(callback)
 			Keystrokes.Children.Size = UDim2.fromOffset(110, callback and 107 or 78)
 	
 			if callback then
-				createKeystroke(Enum.KeyCode.Space, UDim2.new(0, 0, 0, 83), UDim2.new(0, 25, 0, -10), '______')
-			else
+				createKeystroke(Enum.KeyCode.Space, UDim2.new(0, 0, 0, 83))
+			elseif keys[Enum.KeyCode.Space] then
 				keys[Enum.KeyCode.Space].Key:Destroy()
 				keys[Enum.KeyCode.Space] = nil
 			end
@@ -8809,42 +9492,28 @@ run(function()
 		Function = function(callback)
 			if callback then
 				repeat
-					label.Text = math.floor(tonumber(game:GetService('Stats'):FindFirstChild('PerformanceStats').Memory:GetValue()))..' MB'
+					label.Text = loaderStyle.unit(math.floor(tonumber(game:GetService('Stats'):FindFirstChild('PerformanceStats').Memory:GetValue())), 'MB')
 					task.wait(1)
 				until not Memory.Enabled
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
-		Tooltip = 'A label showing the memory currently used by roblox'
+		Tooltip = 'Shows how much memory Roblox is using.\nPick the font and background.'
 	})
+	-- Kept for saved profiles; the label is in the menu's Inter through loaderStyle.text.
 	Memory:CreateFont({
 		Name = 'Font',
-		Blacklist = 'Gotham',
-		Function = function(val)
-			label.FontFace = val
-		end
+		Blacklist = 'Gotham'
 	})
-	Memory:CreateColorSlider({
+	Memory:CreateColorSlider(loaderStyle.backgroundOption({
 		Name = 'Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 			label.BackgroundTransparency = 1 - opacity
+			loaderStyle.border(label, opacity)
 		end
-	})
-	label = Instance.new('TextLabel')
-	label.Size = UDim2.new(0, 100, 0, 41)
-	label.BackgroundTransparency = 0.5
-	label.TextSize = 15
-	label.Font = Enum.Font.Gotham
-	label.Text = '0 MB'
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.BackgroundColor3 = Color3.new()
-	label.Parent = Memory.Children
-	local corner = Instance.new('UICorner')
-	corner.CornerRadius = UDim.new(0, 4)
-	corner.Parent = label
+	}))
+	label = loaderStyle.reading(Memory.Children, loaderStyle.unit('0', 'MB'))
 end)
 	
 run(function()
@@ -8856,42 +9525,28 @@ run(function()
 		Function = function(callback)
 			if callback then
 				repeat
-					label.Text = math.floor(tonumber(game:GetService('Stats'):FindFirstChild('PerformanceStats').Ping:GetValue()))..' ms'
+					label.Text = loaderStyle.unit(math.floor(tonumber(game:GetService('Stats'):FindFirstChild('PerformanceStats').Ping:GetValue())), 'ms')
 					task.wait(1)
 				until not Ping.Enabled
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
-		Tooltip = 'Shows the current connection speed to the roblox server'
+		Tooltip = 'Shows your ping to the server in milliseconds.\nPick the font and background.'
 	})
+	-- Kept for saved profiles; the label is in the menu's Inter through loaderStyle.text.
 	Ping:CreateFont({
 		Name = 'Font',
-		Blacklist = 'Gotham',
-		Function = function(val)
-			label.FontFace = val
-		end
+		Blacklist = 'Gotham'
 	})
-	Ping:CreateColorSlider({
+	Ping:CreateColorSlider(loaderStyle.backgroundOption({
 		Name = 'Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 			label.BackgroundTransparency = 1 - opacity
+			loaderStyle.border(label, opacity)
 		end
-	})
-	label = Instance.new('TextLabel')
-	label.Size = UDim2.new(0, 100, 0, 41)
-	label.BackgroundTransparency = 0.5
-	label.TextSize = 15
-	label.Font = Enum.Font.Gotham
-	label.Text = '0 ms'
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.BackgroundColor3 = Color3.new()
-	label.Parent = Ping.Children
-	local corner = Instance.new('UICorner')
-	corner.CornerRadius = UDim.new(0, 4)
-	corner.Parent = label
+	}))
+	label = loaderStyle.reading(Ping.Children, loaderStyle.unit('0', 'ms'))
 end)
 	
 run(function()
@@ -8946,6 +9601,7 @@ run(function()
 	
 	SongBeats = vape.Legit:CreateModule({
 		Name = 'Song Beats',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				songobj = Instance.new('Sound')
@@ -8985,7 +9641,7 @@ run(function()
 				table.clear(alreadypicked)
 			end
 		end,
-		Tooltip = 'Plays your own music files while you play'
+		Tooltip = 'Plays your own music files while you play.\nCan pulse your FOV to the beat; set the volume and pulse size.'
 	})
 	List = SongBeats:CreateTextList({
 		Name = 'Songs',
@@ -9038,41 +9694,27 @@ run(function()
 					local lastpos = entitylib.isAlive and entitylib.character.HumanoidRootPart.Position * Vector3.new(1, 0, 1) or Vector3.zero
 					local dt = task.wait(0.2)
 					local newpos = entitylib.isAlive and entitylib.character.HumanoidRootPart.Position * Vector3.new(1, 0, 1) or Vector3.zero
-					label.Text = math.round(((lastpos - newpos) / dt).Magnitude)..' sps'
+					label.Text = loaderStyle.unit(math.round(((lastpos - newpos) / dt).Magnitude), 'sps')
 				until not Speedmeter.Enabled
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
-		Tooltip = 'A label showing the average velocity in studs'
+		Tooltip = 'Shows how fast you are moving, in studs per second.\nPick the font and background.'
 	})
+	-- Kept for saved profiles; the label is in the menu's Inter through loaderStyle.text.
 	Speedmeter:CreateFont({
 		Name = 'Font',
-		Blacklist = 'Gotham',
-		Function = function(val)
-			label.FontFace = val
-		end
+		Blacklist = 'Gotham'
 	})
-	Speedmeter:CreateColorSlider({
+	Speedmeter:CreateColorSlider(loaderStyle.backgroundOption({
 		Name = 'Color',
-		DefaultValue = 0,
-		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
 			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
 			label.BackgroundTransparency = 1 - opacity
+			loaderStyle.border(label, opacity)
 		end
-	})
-	label = Instance.new('TextLabel')
-	label.Size = UDim2.fromScale(1, 1)
-	label.BackgroundTransparency = 0.5
-	label.TextSize = 15
-	label.Font = Enum.Font.Gotham
-	label.Text = '0 sps'
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.BackgroundColor3 = Color3.new()
-	label.Parent = Speedmeter.Children
-	local corner = Instance.new('UICorner')
-	corner.CornerRadius = UDim.new(0, 4)
-	corner.Parent = label
+	}))
+	label = loaderStyle.reading(Speedmeter.Children, loaderStyle.unit('0', 'sps'))
 end)
 	
 run(function()
@@ -9091,7 +9733,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Change the time of the current world'
+		Tooltip = 'Sets the time of day to the hour you choose.'
 	})
 	Value = TimeChanger:CreateSlider({
 		Name = 'Time',
@@ -9209,26 +9851,7 @@ run(function()
         end
     end
 
-    Transparency = vape.Categories.Render:CreateModule({
-        Name = 'Transparency',
-        Function = function(callback)
-            if callback then
-                --[[ Each reapplication performs full GetChildren/GetDescendants sweeps of the
-                character; at 60fps, that means hundreds of instance calls per frame.
-                10Hz is visually identical because the game only rarely resets
-                transparency, and slider callbacks still apply instantly. ]]
-                local nextApply = 0
-                connection = runService.RenderStepped:Connect(function()
-                    if os.clock() < nextApply then return end
-                    nextApply = os.clock() + 0.1
-                    setTransparency()
-                end)
-            end
-        end,
-        Tooltip = 'Changes the visibility of your body parts on the client.'
-    })
-
-    Transparency:Clean(function()
+    local function restoreTransparency()
         if connection then
             connection:Disconnect()
             connection = nil
@@ -9244,7 +9867,28 @@ run(function()
         end
 
         table.clear(originalTransparency)
-    end)
+    end
+
+    Transparency = vape.Categories.Render:CreateModule({
+        Name = 'Transparency',
+        Function = function(callback)
+            if callback then
+                --[[ Each reapplication performs full GetChildren/GetDescendants sweeps of the
+                character; at 60fps, that means hundreds of instance calls per frame.
+                10Hz is visually identical because the game only rarely resets
+                transparency, and slider callbacks still apply instantly. ]]
+                local nextApply = 0
+                connection = runService.RenderStepped:Connect(function()
+                    if os.clock() < nextApply then return end
+                    nextApply = os.clock() + 0.1
+                    setTransparency()
+                end)
+                --[[ Registered on every enable: each disable clears the module's cleanup list. ]]
+                Transparency:Clean(restoreTransparency)
+            end
+        end,
+        Tooltip = 'Makes parts of your character see-through for you.\nSet each body part and your hair, and hide your armor.'
+    })
 
     sliders.Hair = Transparency:CreateSlider({
         Name = "Hair",
@@ -9278,6 +9922,7 @@ end)
 
 		AnimDisabler = vape.Categories.Utility:CreateModule({
 			Name = 'AnimDisabler',
+			Tab = 'Visual',
 			Function = function(callback)
 				if callback then
 					if not AnimDisabler.Connection then
@@ -9329,6 +9974,7 @@ run(function()
 
 	FPSUnlocker = vape.Legit:CreateModule({
 		Name = 'FPS Unlocker',
+		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
 				if not setfpscap then
@@ -9346,7 +9992,7 @@ run(function()
 		ExtraText = function()
 			return tostring(Cap.Value)
 		end,
-		Tooltip = 'Raises the framerate cap while enabled, and puts back the cap you had when turned off.'
+		Tooltip = 'Raises the framerate cap while enabled.'
 	})
 	Cap = FPSUnlocker:CreateSlider({
 		Name = 'FPS Cap',
@@ -9416,6 +10062,7 @@ run(function()
 
 	ZoomUnlocker = vape.Categories.Utility:CreateModule({
 		Name = 'ZoomUnlocker',
+		Tab = 'Visual',
 		Function = function(callback)
 			if callback then
 				applyZoom()
@@ -9432,7 +10079,7 @@ run(function()
 				lplr.CameraMaxZoomDistance = defaultMaxZoom()
 			end
 		end,
-		Tooltip = 'Removes the camera zoom limit so you can zoom further out'
+		Tooltip = 'Lets you zoom your camera further out.'
 	})
 
 	MaxZoom = ZoomUnlocker:CreateSlider({
@@ -9447,5 +10094,56 @@ run(function()
 			end
 		end,
 		Tooltip = 'How far out the camera is allowed to go. 14 is the game default'
+	})
+end)
+
+run(function()
+	local ChatMover
+	local Position
+	local original
+
+	--[[ Puts Roblox's chat at the top or the bottom of the screen. Whatever alignment it had before
+	is put back when the module is turned off. ]]
+	local function apply()
+		local config = textChatService:FindFirstChild('ChatWindowConfiguration')
+		if not config then return end
+		if original == nil then
+			original = config.VerticalAlignment
+		end
+		-- On a phone the bottom left is the thumbstick's, so there the chat always goes to the top.
+		local touchOnly = inputService.TouchEnabled and not inputService.KeyboardEnabled
+		config.VerticalAlignment = (Position.Value == 'Top' or touchOnly) and Enum.VerticalAlignment.Top or Enum.VerticalAlignment.Bottom
+	end
+
+	ChatMover = vape.Categories.Utility:CreateModule({
+		Name = 'ChatMover',
+		DisplayName = 'Chat Mover',
+		Function = function(callback)
+			if callback then
+				task.spawn(function()
+					-- The chat's configuration can arrive a moment after the game has loaded.
+					textChatService:WaitForChild('ChatWindowConfiguration', 10)
+					if ChatMover.Enabled then
+						apply()
+					end
+				end)
+			else
+				local config = textChatService:FindFirstChild('ChatWindowConfiguration')
+				if config and original ~= nil then
+					config.VerticalAlignment = original
+				end
+				original = nil
+			end
+		end,
+		Tooltip = 'Moves the chat to the top or bottom of your screen.'
+	})
+	Position = ChatMover:CreateDropdown({
+		Name = 'Position',
+		List = {'Bottom', 'Top'},
+		Function = function()
+			if ChatMover.Enabled then
+				apply()
+			end
+		end
 	})
 end)

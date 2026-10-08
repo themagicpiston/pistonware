@@ -76,6 +76,9 @@ local classes = {
 
 commchannel.Event:Connect(function(...)
 	local actor, key = ...
+	-- The channel is one BindableEvent, so each side also hears what it fired itself:
+	-- the actor only takes messages flagged true, the main side only those flagged false.
+	if (actor and true or false) ~= isactor then return end
 	local args = {select(3, ...)}
 	if isactor and actor then
 		if key == 'new' then

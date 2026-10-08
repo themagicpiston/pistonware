@@ -35,6 +35,16 @@ local color = vape.Libraries.color
 local whitelist = vape.Libraries.whitelist
 local prediction = vape.Libraries.prediction
 local getcustomasset = vape.Libraries.getcustomasset
+-- Is Pistonware's own menu open; the plain field reads safely from any thread
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
 
 local skywars, remotes = {}, {}
 local store = {
@@ -436,6 +446,11 @@ run(function()
 	
 	AutoClicker = vape.Categories.Combat:CreateModule({
 		Name = 'AutoClicker',
+		ExtraText = function()
+			if not CPS then return nil end
+			local low, high = CPS.ValueMin, CPS.ValueMax
+			return (low == high and tostring(low) or low..'-'..high)..' cps'
+		end,
 		Function = function(callback)
 			if callback then
 				AutoClicker:Clean(inputService.InputBegan:Connect(function(input, gameProcessed)
@@ -451,7 +466,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Hold attack button to automatically click'
+		Tooltip = 'Clicks for you while you hold the attack button.\nCan also place blocks for you at a separate speed.'
 	})
 	CPS = AutoClicker:CreateTwoSlider({
 		Name = 'CPS',
@@ -509,7 +524,7 @@ run(function()
 				skywars.SprintingController:disableSprinting()
 			end
 		end,
-		Tooltip = 'Sets your sprinting to true.'
+		Tooltip = 'Automatically sprints for you.'
 	})
 end)
 	
@@ -541,6 +556,10 @@ run(function()
 	
 	Velocity = vape.Categories.Combat:CreateModule({
 		Name = 'Velocity',
+		ExtraText = function()
+			if not (Horizontal and Vertical) then return nil end
+			return Horizontal.Value..'% '..Vertical.Value..'%'
+		end,
 		Function = function(callback)
 			if callback then
 				connection = getconnections(debug.getupvalue(debug.getupvalue(skywars.Remotes[remotes['PlayerVelocityController:onStart']].connect, 1).fireClient, 1).OnClientEvent)[1]
@@ -555,7 +574,7 @@ run(function()
 				connection = nil
 			end
 		end,
-		Tooltip = 'Reduces knockback taken'
+		Tooltip = 'Reduces the amount of knockback you take.\nSet horizontal, vertical and chance amounts.'
 	})
 	Horizontal = Velocity:CreateSlider({
 		Name = 'Horizontal',
@@ -600,6 +619,9 @@ run(function()
 	
 	AntiFall = vape.Categories.Blatant:CreateModule({
 		Name = 'AntiFall',
+		ExtraText = function()
+			return Mode and Mode.Value or nil
+		end,
 		Function = function(callback)
 			if callback then
 				local pos, debounce = getLowGround(), tick()
@@ -628,7 +650,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Help\'s you with your Parkinson\'s\nPrevents you from falling into the void.'
+		Tooltip = 'Catches you before you fall into the void.\nBounces you back up or gives you a floor to walk on.'
 	})
 	Mode = AntiFall:CreateDropdown({
 		Name = 'Move Mode',
@@ -685,7 +707,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Allows you to continuous movement in menus'
+		Tooltip = 'Lets you keep moving while a menu is open.'
 	})
 end)
 	
@@ -722,6 +744,9 @@ run(function()
 	
 	Killaura = vape.Categories.Blatant:CreateModule({
 		Name = 'Killaura',
+		ExtraText = function()
+			return AttackRange and tostring(AttackRange.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				if Animation.Enabled then
@@ -812,7 +837,13 @@ run(function()
 						setthreadidentity(8)
 					end
 	
+					-- hidden while the menu is open; the first tick after it closes draws them again
+					local hidden = clickGuiOpen()
 					for i, v in Boxes do
+						if hidden then
+							if v.Adornee then v.Adornee = nil end
+							continue
+						end
 						v.Adornee = attacked[i] and attacked[i].RootPart or nil
 						if v.Adornee then
 							v.Color3 = Color3.fromHSV(BoxAttackColor.Hue, BoxAttackColor.Sat, BoxAttackColor.Value)
@@ -821,6 +852,10 @@ run(function()
 					end
 	
 					for i, v in Particles do
+						if hidden then
+							if v.Parent then v.Parent = nil end
+							continue
+						end
 						v.Position = attacked[i] and attacked[i].RootPart.Position or Vector3.new(9e9, 9e9, 9e9)
 						v.Parent = attacked[i] and gameCamera or nil
 					end
@@ -842,7 +877,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Attack players around you\nwithout aiming at them.'
+		Tooltip = 'Attacks enemies around you without you aiming.\nSet range, swing, target effects and animations.'
 	})
 	Targets = Killaura:CreateTargets({Players = true})
 	AttackRange = Killaura:CreateSlider({
@@ -912,7 +947,8 @@ run(function()
 					part.CanCollide = false
 					part.Transparency = 1
 					part.CanQuery = false
-					part.Parent = Killaura.Enabled and gameCamera or nil
+					-- a part made while the menu is open starts hidden
+					part.Parent = Killaura.Enabled and not clickGuiOpen() and gameCamera or nil
 					local particles = Instance.new('ParticleEmitter')
 					particles.Brightness = 1.5
 					particles.Size = NumberSequence.new(ParticleSize.Value)
@@ -1059,7 +1095,7 @@ run(function()
 				until not NoFall.Enabled
 			end
 		end,
-		Tooltip = 'Prevents taking fall damage.'
+		Tooltip = 'Prevents you from taking fall damage.'
 	})
 end)
 	
@@ -1133,6 +1169,9 @@ run(function()
 	
 	local ProjectileAimbot = vape.Categories.Blatant:CreateModule({
 		Name = 'ProjectileAimbot',
+		ExtraText = function()
+			return TargetPart and TargetPart.Value or nil
+		end,
 		Function = function(callback)
 			if callback then 
 				old = hookfunction(skywars.CameraUtil.getCursorDirection, function(...)
@@ -1148,7 +1187,7 @@ run(function()
 				oldMobile = nil
 			end
 		end,
-		Tooltip = 'Silently adjusts your aim towards the enemy'
+		Tooltip = 'Aims your projectiles at enemies for you.\nPick the body part and how wide to search.'
 	})
 	TargetPart = ProjectileAimbot:CreateDropdown({
 		Name = 'Part',
@@ -1184,6 +1223,9 @@ run(function()
 	
 	ProjectileAura = vape.Categories.Blatant:CreateModule({
 		Name = 'ProjectileAura',
+		ExtraText = function()
+			return Range and tostring(Range.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -1218,7 +1260,7 @@ run(function()
 				until not ProjectileAura.Enabled
 			end
 		end,
-		Tooltip = 'Shoots people around you'
+		Tooltip = 'Shoots your projectiles at enemies around you.\nPick which projectiles it uses and the range.'
 	})
 	Targets = ProjectileAura:CreateTargets({
 		Players = true, 
@@ -1360,7 +1402,7 @@ run(function()
 				until not Scaffold.Enabled
 			end
 		end,
-		Tooltip = 'Helps you make bridges/scaffold walk.'
+		Tooltip = 'Places blocks under you so you can bridge.\nCan also tower up, go down, widen the path and bridge diagonally.'
 	})
 	Expand = Scaffold:CreateSlider({
 		Name = 'Expand',
@@ -1416,7 +1458,7 @@ run(function()
 				until not ChestSteal.Enabled
 			end
 		end,
-		Tooltip = 'Grabs items from near chests.'
+		Tooltip = 'Pulls items out of the chests near you.\nCan wait until you open each chest yourself.'
 	})
 	Range = ChestSteal:CreateSlider({
 		Name = 'Range',
@@ -1482,7 +1524,7 @@ run(function()
 				buyCheck(table.clone(skywars.Store:getState().GameCurrency.Quantities))
 			end
 		end,
-		Tooltip = 'Automatically buys items when you go near the shop'
+		Tooltip = 'Buys gear and upgrades as soon as you can afford them.\nCovers swords, armor, pickaxes and team upgrades.'
 	})
 	Sword = AutoBuy:CreateToggle({
 		Name = 'Buy Sword',
@@ -1561,7 +1603,7 @@ run(function()
 				consumeCheck()
 			end
 		end,
-		Tooltip = 'Automatically uses shield potions.'
+		Tooltip = 'Drinks a shield potion whenever your shield runs out.'
 	})
 end)
 	
@@ -1601,7 +1643,9 @@ run(function()
 				StudsOffset = Vector3.new(0, 2.5, 0),
 				Adornee = part,
 				MaxDistance = 40,
-				AlwaysOnTop = true
+				AlwaysOnTop = true,
+				-- a bar made while the menu is open starts hidden
+				Enabled = not clickGuiOpen()
 			}, {
 				create('Frame', {
 					Size = UDim2.fromOffset(160, 50),
@@ -1610,14 +1654,6 @@ run(function()
 					BackgroundTransparency = 0.5
 				}, {
 					create('UICorner', {CornerRadius = UDim.new(0, 5)}),
-					create('ImageLabel', {
-						Size = UDim2.new(1, 89, 1, 52),
-						Position = UDim2.fromOffset(-48, -31),
-						BackgroundTransparency = 1,
-						Image = getcustomasset('pistonware/assets/new/blur.png'),
-						ScaleType = Enum.ScaleType.Slice,
-						SliceCenter = Rect.new(52, 31, 261, 502)
-					}),
 					create('TextLabel', {
 						Size = UDim2.fromOffset(145, 14),
 						Position = UDim2.fromOffset(13, 12),
@@ -1711,11 +1747,18 @@ run(function()
 						end
 					end
 					
+					-- the bar hides while the menu is open; the first tick after it closes shows it again
+					local bar = BreakerPart and BreakerPart:FindFirstChildWhichIsA('BillboardGui')
+					local show = not clickGuiOpen()
+					if bar and bar.Enabled ~= show then
+						bar.Enabled = show
+					end
+
 					task.wait(0.016)
 				until not Breaker.Enabled
 			end
 		end,
-		Tooltip = 'Automatically destroys eggs around you'
+		Tooltip = 'Breaks enemy eggs near you automatically.\nShows a health bar on the egg you are hitting.'
 	})
 	Range = Breaker:CreateSlider({
 		Name = 'Break range',
@@ -1779,6 +1822,6 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Replaces the default viewmodel'
+		Tooltip = 'Changes how your held item looks in first person.'
 	})
 end)
