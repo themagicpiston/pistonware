@@ -625,7 +625,7 @@ local SCRIPT_ID   = 'a17b484e156ebbb2a7679f3d7d821e2d'
 is what issues the key; the provider only decides whose checkpoints you sit through getting
 there -- so adding another is a URL here and an entry in the links list at the gate, nothing
 else. ]]
-local LOOTLABS_URL = 'https://ads.luarmor.net/get_key?for=Pistonware_Key-xnpnovpEljPO'
+local LOOTLABS_URL = 'https://ads.luarmor.net/get_key?for=Pistonware_LootLabs-xnpnovpEljPO'
 local WORKINK_URL = 'https://ads.luarmor.net/get_key?for=Pistonware_Workink-cjPVCqOPPBCJ'
 local KEY_FILE    = 'pistonwarekey.json'
 local RELEASE_FILE = 'pistonware_release.json'
