@@ -3150,43 +3150,16 @@ function build.lists()
 		if shared.PistonwareDeveloper and isfile('pistonware/loaderdev.lua') then
 			loadstring(readfile('pistonware/loaderdev.lua'), 'loader')()
 		else
-			loadstring(pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')()
+			-- A loader that did not download used to be called as nil: the click errored, the menu
+			-- stayed as it was, and nothing on screen said why.
+			local ok, source = pcall(pistonwareHttpGet, 'https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true)
+			local chunk = ok and type(source) == 'string' and loadstring(source, 'loader')
+			if not chunk then
+				vape:CreateNotification('Pistonware', 'Could not download the loader to reload. Run the loader again to load the config.', 15, 'alert')
+				return false
+			end
+			chunk()
 		end
-	end
-
-	-- pistonware/profiles is stamped with the commit it was pulled from, so a sync that would
-	-- change nothing can be turned away before it spends any requests finding that out.
-	--
-	-- loader.lua stamps the SAME file with its own 'p1-' fingerprint (a hash of the profile blob
-	-- shas, so its update check costs no extra API call). The two schemes can never compare
-	-- equal, which only means the short-circuit below misses after a loader-driven sync and this
-	-- button downloads once more than it strictly had to. That is the safe direction to fail:
-	-- syncing when nothing changed costs a few requests, skipping a sync that was needed does
-	-- not do what the button says. loader.lua already migrates a 40-char sha it finds here, so
-	-- writing one back does not make it prompt.
-	local function localProfileCommit()
-		local suc, res = pcall(readfile, 'pistonware/profiles/profilecommit.txt')
-		if not (suc and type(res) == 'string') then return nil end
-		res = res:gsub('%s', '')
-		return res ~= '' and res or nil
-	end
-
-	local function latestProfileCommit()
-		local suc, res = pcall(function()
-			return pistonwareHttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1', true)
-		end)
-		if not (suc and res and res ~= '' and res ~= '404: Not Found') then return nil end
-		local ok, body = pcall(function()
-			return httpService:JSONDecode(res)
-		end)
-		if not (ok and typeof(body) == 'table' and body[1] and type(body[1].sha) == 'string') then return nil end
-		return body[1].sha
-	end
-
-	-- Being on the latest commit is not enough on its own: the sync exists to put both shipped
-	-- configs for this place on disk, so a missing one has to let it through regardless.
-	local function hasBothConfigs()
-		return isfile('pistonware/profiles/blatant'..vape.Place..'.txt') and isfile('pistonware/profiles/legit'..vape.Place..'.txt')
 	end
 
 	--[[
@@ -3229,10 +3202,160 @@ function build.lists()
 		return (ok and type(merged) == 'string') and merged or content
 	end
 
-	-- Pinned to the commit the check reported rather than to the branch path: raw.githubusercontent
-	-- serves CDN-cached content for a few minutes after a push, so a branch-head fetch can quietly
-	-- reinstall the old profiles and then get stamped with the new commit, blocking every later sync.
-	local function downloadProfileFile(path, commit)
+	--[[
+		GitHub profile sync, shared by the Sync button and the Load Blatant / Load Legit buttons.
+
+		Every API request goes through the executor's request function with a User-Agent, as
+		loader.lua's own API calls do. api.github.com answers a request without one with a
+		plain-text 403 ("Request forbidden by administrative rules"), and game:HttpGet sends none
+		on some executors -- Potassium among them -- so the sync failed at its first request there
+		and never downloaded anything. HttpGet stays as the fallback for executors without request.
+	]]
+	local profileSync = {
+		Headers = {['User-Agent'] = 'pistonware', Accept = 'application/vnd.github+json'}
+	}
+
+	-- A short reason for the notification. The rate-limit message names the caller's IP, so it is
+	-- replaced rather than shown.
+	function profileSync.describe(status, body)
+		local message
+		pcall(function()
+			local decoded = httpService:JSONDecode(body)
+			if type(decoded) == 'table' and type(decoded.message) == 'string' then
+				message = decoded.message
+			end
+		end)
+		if message then
+			if message:lower():find('rate limit', 1, true) then
+				return 'GitHub rate limit reached, try again in a few minutes'
+			end
+			return 'GitHub: '..message:gsub('%d+%.%d+%.%d+%.%d+', '<ip>'):sub(1, 80)
+		end
+		return status and ('GitHub answered '..tostring(status)) or 'GitHub refused the request'
+	end
+
+	-- The body, or nil and why not. Never throws.
+	function profileSync.get(url)
+		local reason
+		local ok, res = pcall(pistonwareRequest, {Url = url, Method = 'GET', Headers = profileSync.Headers})
+		if ok and type(res) == 'table' and type(res.Body) == 'string' then
+			local status = tonumber(res.StatusCode) or 200
+			if status >= 200 and status < 300 and res.Body ~= '' then
+				return res.Body
+			end
+			reason = profileSync.describe(status, res.Body)
+		end
+		local got, body = pcall(pistonwareHttpGet, url, true)
+		if got and type(body) == 'string' and body ~= '' and body ~= '404: Not Found' then
+			return body, reason
+		end
+		return nil, reason or 'could not reach GitHub'
+	end
+
+	function profileSync.json(url)
+		local body, reason = profileSync.get(url)
+		if not body then return nil, reason end
+		local ok, decoded = pcall(function()
+			return httpService:JSONDecode(body)
+		end)
+		if not (ok and type(decoded) == 'table') then
+			return nil, reason or 'GitHub sent an unreadable response'
+		end
+		-- An error object that came through HttpGet, which hides the status code.
+		if type(decoded.message) == 'string' then
+			return nil, profileSync.describe(nil, body)
+		end
+		return decoded
+	end
+
+	-- pistonware/profiles is stamped with what it was last synced to (see run below).
+	function profileSync.localStamp()
+		local suc, res = pcall(readfile, 'pistonware/profiles/profilecommit.txt')
+		if not (suc and type(res) == 'string') then return nil end
+		res = res:gsub('%s', '')
+		return res ~= '' and res or nil
+	end
+
+	-- Being current is not enough on its own: the sync exists to put both shipped configs for this
+	-- place on disk, so a missing one has to let it through regardless.
+	function profileSync.hasBothConfigs()
+		return isfile('pistonware/profiles/blatant'..vape.Place..'.txt') and isfile('pistonware/profiles/legit'..vape.Place..'.txt')
+	end
+
+	-- The newest commit that touched profiles/, so every file below comes from one snapshot.
+	function profileSync.latestCommit()
+		local body, reason = profileSync.json('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1')
+		if body and type(body[1]) == 'table' and type(body[1].sha) == 'string' then
+			return body[1].sha
+		end
+		-- The API is out (rate limit, a blocked host). The branch head from git's own ref
+		-- advertisement costs no API request and pins the files just as well.
+		local refs = profileSync.get('https://github.com/themagicpiston/pistonware.git/info/refs?service=git-upload-pack')
+		if refs then
+			for line in refs:gmatch('[^\n]+') do
+				local hex, ref = line:match('^(%x+) (%S+)')
+				if ref then
+					local nul = ref:find('\0', 1, true)
+					if nul then ref = ref:sub(1, nul - 1) end
+					if ref == 'refs/heads/main' and #hex >= 40 then
+						return hex:sub(-40)
+					end
+				end
+			end
+		end
+		return nil, reason
+	end
+
+	-- Every file in profiles/ at that commit, with the blob sha the stamp is made from.
+	function profileSync.listFiles(commit)
+		local body, reason = profileSync.json('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles'..(commit and ('?ref='..commit) or ''))
+		local files = {}
+		if body then
+			for _, v in body do
+				if type(v) == 'table' and v.type == 'file' and type(v.path) == 'string' then
+					table.insert(files, {path = v.path, sha = v.sha})
+				end
+			end
+		end
+		if #files > 0 then return files end
+		-- The loader read the repository tree at the start of the session, and it names the same
+		-- files. Their shas belong to that commit, so they are left out and make no stamp.
+		local tree = shared.PistonwareRepoTree
+		if type(tree) == 'table' and type(tree.tree) == 'table' then
+			for _, v in tree.tree do
+				if type(v) == 'table' and v.type == 'blob' and type(v.path) == 'string'
+					and v.path:sub(1, 9) == 'profiles/' and not v.path:find('/', 10, true) then
+					table.insert(files, {path = v.path})
+				end
+			end
+		end
+		if #files > 0 then return files end
+		return nil, reason or 'the repo has no profiles'
+	end
+
+	--[[ The same stamp loader.lua writes: djb2 over the sorted path:sha of every file in
+	profiles/, 'p1-' prefixed. This used to write the commit sha instead, which the loader reads
+	as its old scheme and adopts without looking -- so after one sync from here, the loader's
+	"sync to the latest config?" check never fired again, however much the profiles changed. ]]
+	function profileSync.fingerprint(files)
+		local parts = {}
+		for _, v in files do
+			if type(v.sha) ~= 'string' then return nil end
+			table.insert(parts, v.path..':'..v.sha)
+		end
+		if #parts == 0 then return nil end
+		table.sort(parts)
+		local joined = table.concat(parts, '\n')
+		local h = 5381
+		for i = 1, #joined do
+			h = (h * 33 + string.byte(joined, i)) % 4294967296
+		end
+		return ('p1-%08x'):format(h)
+	end
+
+	-- Pinned to the commit rather than the branch: raw.githubusercontent serves CDN-cached content
+	-- for a few minutes after a push, so a branch fetch can quietly reinstall the old profiles.
+	function profileSync.downloadFile(path, commit)
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local content
 		for attempt = 1, 4 do
@@ -3256,41 +3379,13 @@ function build.lists()
 		return (pcall(writefile, path, content))
 	end
 
-	local function downloadProfiles(commit)
-		local reqSuc, res = pcall(function()
-			-- listing pinned too, so it can never describe a different commit than the files below
-			return pistonwareHttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles'..(commit and ('?ref='..commit) or ''), true)
-		end)
-		if not (reqSuc and res and res ~= '' and res ~= '404: Not Found') then
-			return nil, 'Profile sync failed (could not reach GitHub).'
-		end
-
-		local bodySuc, body = pcall(function()
-			return httpService:JSONDecode(res)
-		end)
-		if not (bodySuc and typeof(body) == 'table') then
-			return nil, 'Profile sync failed (unreadable response).'
-		end
-
-		local files = {}
-		for _, v in body do
-			if type(v) == 'table' and v.type == 'file' and type(v.path) == 'string' then
-				table.insert(files, v)
-			end
-		end
-		if #files <= 0 then
-			return nil, 'Profile sync failed (the repo has no profiles).'
-		end
-
-		-- Downloaded in parallel like the loader does, rather than one blocking request per file.
+	-- In parallel like the loader, joined on a deadline so one stuck request cannot hold the button.
+	function profileSync.download(files, commit)
 		local synced, failed = 0, 0
 		local total = #files
 		for _, v in files do
 			task.spawn(function()
-				-- pcall'd so a worker that throws is still counted. It used to decrement the
-				-- counter only on the success path and join on a BindableEvent with no timeout, so
-				-- one file that errored left the sync button spinning for the rest of the session.
-				local ok, got = pcall(downloadProfileFile, 'pistonware/'..({v.path:gsub(' ', '%%20')})[1], commit)
+				local ok, got = pcall(profileSync.downloadFile, 'pistonware/'..({v.path:gsub(' ', '%%20')})[1], commit)
 				if ok and got then
 					synced += 1
 				else
@@ -3302,15 +3397,34 @@ function build.lists()
 		while synced + failed < total and os.clock() < deadline do
 			task.wait(0.05)
 		end
+		return synced, total - synced
+	end
 
+	--[[ How many files landed, or nil and why not. 0 means nothing was new: only the Load buttons
+	ask for that check; the Sync button forces a fresh copy, which is what it says it does. ]]
+	function profileSync.run(force)
+		local commit, reason = profileSync.latestCommit()
+		local files, listReason = profileSync.listFiles(commit)
+		if not files then
+			return nil, 'Profile sync failed ('..(listReason or reason or 'could not reach GitHub')..').'
+		end
+		local stamp = profileSync.fingerprint(files)
+		if not force and stamp and stamp == profileSync.localStamp() and profileSync.hasBothConfigs() then
+			return 0, 'Profiles are already up to date.'
+		end
+		local synced, failed = profileSync.download(files, commit)
 		if synced <= 0 then
 			return nil, 'Profile sync failed (nothing downloaded).'
+		end
+		-- Stamped only when every file landed, so a partial sync is retried next time.
+		if stamp and failed == 0 then
+			pcall(writefile, 'pistonware/profiles/profilecommit.txt', stamp)
 		end
 		return synced, 'Synced '..synced..' file'..(synced == 1 and '' or 's')..' from GitHub'..(failed > 0 and ' ('..failed..' failed).' or '.')
 	end
 
 	do
-		local syncing = false
+		local busy = false
 		-- Set once a download lands. From then until a config is picked the buttons below own the
 		-- reinject, so syncing and choosing stay one flow rather than two reloads.
 		local pending, syncmessage = false, nil
@@ -3348,42 +3462,39 @@ function build.lists()
 		local syncbutton = pillButton('Sync profiles from GitHub', 1, 'Redownloads the shipped profiles, then pick a config to load one')
 		syncbutton.Name = 'SyncProfiles'
 
-		syncbutton.MouseButton1Click:Connect(function()
-			if syncing then return end
-			syncing = true
-			syncbutton.Text = 'Checking...'
-
-			-- One request to compare commits, rather than a dozen to redownload files that have not
-			-- moved. A folder that is already current is turned away before the listing request.
-			local latest = latestProfileCommit()
-			if latest and latest == localProfileCommit() and hasBothConfigs() then
-				syncing = false
-				syncbutton.Text = 'Profiles already up to date'
-				vape:CreateNotification('Pistonware', 'Profiles are already on the latest commit, nothing to sync.', 10)
-				return
-			end
-
-			syncbutton.Text = 'Syncing...'
-			-- Flush what is in memory first so a download that only half lands cannot strand the
-			-- GUI between two states -- whatever does arrive replaces this a moment later.
+		--[[ What is in memory is flushed first, then saving is held off for the download: a save
+		queued by a toggle a moment earlier would otherwise land in the middle of it and write the
+		pre-sync config back over the file just downloaded. Once anything has landed, saving stays
+		off for the rest of the session -- the reload builds a fresh vape -- and otherwise it is put
+		back as it was. ]]
+		local function runSync(force)
 			pcall(function() vape:Save() end)
+			local wasBlocked = vape.SaveBlocked
+			vape:BlockSaving()
+			local ok, synced, message = pcall(profileSync.run, force)
+			if not ok then
+				synced, message = nil, 'Profile sync failed ('..tostring(synced)..').'
+			end
+			if synced and synced > 0 then
+				vape.Save = function() end
+				vape.SaveNeeded = nil
+			else
+				vape.SaveBlocked = wasBlocked
+			end
+			return synced, message
+		end
 
-			local synced, message = downloadProfiles(latest)
-			syncing = false
+		syncbutton.MouseButton1Click:Connect(function()
+			if busy then return end
+			busy = true
+			syncbutton.Text = 'Syncing...'
+			local synced, message = runSync(true)
+			busy = false
 			if not synced then
 				syncbutton.Text = 'Sync profiles from GitHub'
 				vape:CreateNotification('Pistonware', message, 10, 'alert')
 				return
 			end
-			-- Stamped only once the files are down, and only when the commit was readable.
-			if latest then
-				pcall(writefile, 'pistonware/profiles/profilecommit.txt', latest)
-			end
-
-			-- Saving stops here rather than at the reload, so nothing writes the pre-sync state
-			-- back over the files that were just downloaded. The reload builds a fresh vape.
-			vape.Save = function() end
-			vape.SaveNeeded = nil
 
 			pending, syncmessage = true, message
 			syncbutton.Text = 'Synced, choose a config'
@@ -3412,7 +3523,24 @@ function build.lists()
 		end
 
 		local function selectConfig(name)
+			if busy then return end
+			busy = true
+			--[[ The newest shipped profiles are fetched first, so the config picked here is the one on
+			GitHub rather than whatever copy is on disk. Skipped straight after the Sync button, which
+			has just done exactly that. ]]
+			if not pending then
+				syncbutton.Text = 'Checking for new profiles...'
+				local synced, message = runSync(false)
+				if synced and synced > 0 then
+					pending, syncmessage = true, message
+				elseif not synced then
+					vape:CreateNotification('Pistonware', message..' Loading the copy already on disk.', 10, 'alert')
+				end
+			end
 			if not isfile('pistonware/profiles/'..name..vape.Place..'.txt') then
+				busy = false
+				syncbutton.Text = pending and 'Synced, choose a config' or 'Sync profiles from GitHub'
+				refreshConfigButtons()
 				vape:CreateNotification('Pistonware', 'There is no '..name..' config for this game yet, press Sync profiles first.', 10, 'alert')
 				return
 			end
@@ -3450,7 +3578,14 @@ function build.lists()
 			shared.PistonwareSyncResult = syncmessage
 			shared.VapeCustomProfile = name
 			shared.vapereload = true
-			reinjectThroughLoader()
+			if reinjectThroughLoader() == false then
+				-- Nothing reloaded. A reload flag left standing would make the next manual run headless,
+				-- with no way to ask for a key. Saving stays off so nothing overwrites the new files.
+				shared.vapereload = nil
+				shared.VapeCustomProfile = nil
+				busy = false
+				syncbutton.Text = 'Sync profiles from GitHub'
+			end
 		end
 
 		for index, config in {{Key = 'blatant', Text = 'Load Blatant'}, {Key = 'legit', Text = 'Load Legit'}} do
