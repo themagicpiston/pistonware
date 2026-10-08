@@ -620,7 +620,7 @@ local setclipboard = setclipboard or toclipboard or (Clipboard and Clipboard.set
 
 local Watermark = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.'
 
-local SCRIPT_ID   = '2fb6964a070d89a7650354a0dcce302c'
+local SCRIPT_ID   = 'a17b484e156ebbb2a7679f3d7d821e2d'
 --[[ The ad links a key can come from, one per provider. Both end at LuaArmor either way -- it
 is what issues the key; the provider only decides whose checkpoints you sit through getting
 there -- so adding another is a URL here and an entry in the links list at the gate, nothing
