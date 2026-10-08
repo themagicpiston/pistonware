@@ -2004,6 +2004,187 @@ vape.Libraries = {
 	getfontsize = getfontbounds,
 }
 
+--[[
+	Where the mobile button sits.
+
+	It used to be a hardcoded (1, -90) from the right edge, measured against a top bar that no
+	longer looks like that. The current client draws its buttons out of TopBarAppGui.TopBarApp,
+	and where that cluster ends moves with the device, the notch, the buttons the game itself
+	turns on and whether the player is in a menu -- so on plenty of phones our button landed on
+	top of one of Roblox's own.
+
+	So measure rather than guess: find where the run of buttons on the right of the bar BEGINS,
+	and sit immediately to its left, 7px clear -- the same gap the client puts between its own
+	buttons, so ours reads as one more of them. Where that run begins is walked rather than
+	guessed at, because the count and the widths both vary: the lobby adds a wide Patch Notes
+	button, and mobile shows one more than PC. If TopBarAppGui is not there at all -- older
+	clients, which is what mobile executors repackage -- nothing is measured and the old offset
+	stands.
+]]
+local topbarGap = 7
+-- How far apart two boxes can be and still count as the same run of buttons. The client spaces
+-- its own by topbarGap; the slack is for the padding a wrapper adds around one. It has to stay
+-- well under the empty stretch between the right cluster and the chat button on the far left,
+-- or the walk below would cross the bar and anchor to the wrong end.
+local topbarClusterSlack = 20
+local vapeButtonSize = 32
+local vapeButtonFallback = UDim2.new(1, -90, 0, 4)
+
+local function vapeButtonPosition()
+	local players = cloneref(game:GetService('Players'))
+	local localPlayer = players.LocalPlayer
+	local playerGui = localPlayer and localPlayer:FindFirstChildOfClass('PlayerGui')
+	local topbarGui = playerGui and playerGui:FindFirstChild('TopBarAppGui')
+	local topbar = topbarGui and topbarGui:FindFirstChild('TopBarApp')
+	if not (topbar and topbar:IsA('GuiObject')) or topbar.AbsoluteSize.X <= 0 then
+		return nil
+	end
+
+	--[[
+		Descendants, not children: TopBarApp's own children are layout containers, as wide as the
+		stretch of bar they own rather than as wide as the buttons inside them. The buttons sit a
+		level or two further down.
+
+		Bounded by height, which is what separates a button from the full-height wrapper around it.
+		An inner icon or label passes the test too, but it lives inside its button's box and so can
+		never move either edge of it.
+	]]
+	local boxes = {}
+	for _, obj in topbar:GetDescendants() do
+		if
+			obj:IsA('GuiObject') and obj.Visible
+			and obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0 and obj.AbsoluteSize.Y <= 60
+		then
+			-- A visible button inside a hidden wrapper is still not on screen, and Visible is
+			-- per-object -- the client hides whole clusters by the wrapper, never the buttons.
+			local shown = true
+			local parent = obj.Parent
+			while parent and parent ~= topbar do
+				if parent:IsA('GuiObject') and not parent.Visible then
+					shown = false
+					break
+				end
+				parent = parent.Parent
+			end
+
+			if shown then
+				table.insert(boxes, {
+					Left = obj.AbsolutePosition.X,
+					Right = obj.AbsolutePosition.X + obj.AbsoluteSize.X,
+					Top = obj.AbsolutePosition.Y,
+					Height = obj.AbsoluteSize.Y
+				})
+			end
+		end
+	end
+
+	if #boxes <= 0 then return nil end
+
+	--[[
+		Walk the run of buttons leftwards from the right edge of the bar.
+
+		Picking "the leftmost thing on the right half of the screen" is what put the button on top
+		of one of Roblox's: a wide button (the lobby's Patch Notes) has its centre left of the
+		screen middle, so it was skipped, and the run was measured from the button AFTER it.
+
+		Starting at the rightmost box and stepping left across every gap smaller than the slack
+		asks the question that actually matters -- where does this run of buttons begin -- and it
+		does not care how wide any one of them is, how many there are (mobile shows one more than
+		PC), or where the screen's midpoint happens to fall.
+
+		The repeat-until-settled walk is quadratic in the worst case, over a handful of boxes, once
+		a second. Sorting them to do it in one pass costs more than it saves at this size.
+	]]
+	local run
+	for _, box in boxes do
+		if not run or box.Right > run.Right then
+			run = box
+		end
+	end
+
+	local edge, row = run.Left, run
+	local extended = true
+	while extended do
+		extended = false
+		for _, box in boxes do
+			if box.Left < edge and box.Right >= (edge - topbarClusterSlack) then
+				edge = box.Left
+				row = box
+				extended = true
+			end
+		end
+	end
+
+	--[[
+		Our ScreenGui has IgnoreGuiInset set, so its offsets are true screen pixels. A ScreenGui
+		without it -- which TopBarAppGui may or may not be, depending on client version -- reports
+		AbsolutePosition with the inset already taken off, and lining the two up without adding it
+		back puts our button the height of the top bar too high.
+	]]
+	local inset = 0
+	if topbarGui:IsA('ScreenGui') and not topbarGui.IgnoreGuiInset then
+		inset = guiService:GetGuiInset().Y
+	end
+
+	-- The bar reports negative Y while the client has it slid off screen (in its own menu, or
+	-- mid-transition). Following it there would park our button off screen too, so only the
+	-- horizontal placement is taken from it and the row falls back to the default height.
+	local top = row.Top + inset + ((row.Height - vapeButtonSize) / 2)
+	if top < 0 then
+		top = 4
+	end
+
+	return UDim2.fromOffset(
+		math.max(math.floor(edge - topbarGap - vapeButtonSize), 0),
+		math.floor(top)
+	)
+end
+
+--[[
+	Polled rather than driven off a signal.
+
+	The top bar does not move by tweening one frame around: it rebuilds its children when the
+	game toggles a core GUI, when the player rotates the device, and when the client swaps to its
+	in-experience menu -- so the instance any connection was bound to is frequently the one that
+	just got destroyed. A second is imperceptible for a button that only has to be out of the way
+	by the time a thumb reaches for it, and the read is four AbsolutePosition lookups.
+]]
+local function anchorVapeButton(button)
+	local current
+
+	local function apply()
+		local position = vapeButtonPosition() or vapeButtonFallback
+		if current ~= position then
+			current = position
+			button.Position = position
+		end
+	end
+
+	--[[ Guarded like the loop below. This first call runs at the end of LoadGUI, and it reads
+	the client's own top bar: anything that throws in there escaped LoadGUI and failed the whole
+	menu on a phone, where the button already sits at the fallback and would have been fine. ]]
+	pcall(apply)
+
+	local thread = task.spawn(function()
+		while button.Parent do
+			task.wait(1)
+			pcall(apply)
+		end
+	end)
+
+	if vape.Clean then
+		vape:Clean(thread)
+	end
+end
+
+local function addCorner(parent, radius)
+	local corner = Instance.new('UICorner')
+	corner.CornerRadius = radius or UDim.new(0, 5)
+	corner.Parent = parent
+
+	return corner
+end
+
 local function addDragHandler(gui, window)
 	gui.InputBegan:Connect(function(input)
 		if window and not window.Visible then return end
