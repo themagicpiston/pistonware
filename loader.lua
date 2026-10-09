@@ -75,15 +75,26 @@ local function installPistonwareBuffer(developerMode)
 		return result
 	end
 
+	--[[ Automatic dumps are spaced at least this many seconds apart. Each one rewrites the whole
+	file from every entry, so an error repeating every frame used to cost a full dump per frame.
+	One that comes in sooner is put off until the gap has passed rather than dropped, so the file
+	still ends up holding every error. Explicit dump() and raise() calls are never held back. ]]
+	local autoDumpInterval = 5
+	local lastAutoDump
+
 	local function requestDump()
 		pendingDump = true
 		if not filesystemReady or dumping or dumpScheduled then return end
 		dumpScheduled = true
 		local function flush()
 			dumpScheduled = false
+			lastAutoDump = os.clock()
 			buffer.dump('automatic error')
 		end
-		if task and type(task.defer) == 'function' then
+		local holdFor = lastAutoDump and lastAutoDump + autoDumpInterval - os.clock() or 0
+		if holdFor > 0 and task and type(task.delay) == 'function' then
+			task.delay(holdFor, flush)
+		elseif task and type(task.defer) == 'function' then
 			task.defer(flush)
 		else
 			flush()
@@ -107,7 +118,10 @@ local function installPistonwareBuffer(developerMode)
 			dropped += 1
 		end
 
+		--[[ Formatted once, here, and kept on the entry: a dump writes this same text back out
+		instead of formatting all 512 entries again every time. ]]
 		local line = formatEntry(entry)
+		entry.line = line
 		if developerMode then
 			if entry.level == 'warn' or entry.level == 'error' or entry.level == 'fatal' then
 				pcall(nativeWarn, line)
@@ -199,7 +213,7 @@ local function installPistonwareBuffer(developerMode)
 				''
 			}
 			for _, entry in ipairs(orderedEntries()) do
-				lines[#lines + 1] = formatEntry(entry)
+				lines[#lines + 1] = entry.line
 			end
 			writefile(dumpPath, table.concat(lines, '\n')..'\n')
 			return dumpPath
@@ -332,6 +346,42 @@ local function appendText(path, text)
 	return pcall(writefile, path, previous..text)
 end
 
+--[[ Log and telemetry lines are held per file during the boot and written with one append per
+file at each boot phase, instead of one disk write per line. A warning, an error or a telemetry
+report writes out everything held straight away, so whatever led up to a failure is on disk even
+if the loader dies right after it. Once the boot has ended -- main.lua keeps reporting through the
+telemetry handed to it -- every line goes straight to disk again. ]]
+local heldLogText, heldLogOrder = {}, {}
+local holdingLogs = true
+
+local function writeLogText(path, text)
+	if not holdingLogs then
+		appendText(path, text)
+		return
+	end
+	local held = heldLogText[path]
+	if not held then
+		held = {}
+		heldLogText[path] = held
+		table.insert(heldLogOrder, path)
+	end
+	table.insert(held, text)
+end
+
+local function flushLogs()
+	if #heldLogOrder == 0 then return end
+	local order, held = heldLogOrder, heldLogText
+	heldLogText, heldLogOrder = {}, {}
+	for _, path in order do
+		appendText(path, table.concat(held[path]))
+	end
+end
+
+local function stopHoldingLogs()
+	holdingLogs = false
+	flushLogs()
+end
+
 local function placeId()
 	local value
 	pcall(function() value = tonumber(game.PlaceId) end)
@@ -408,8 +458,9 @@ function Logger:emit(level, event, message, details)
 	if #parts > 0 then line = line..' '..table.concat(parts, ' ') end
 	self.lastLine = line
 	for _, path in ipairs(logFiles) do
-		appendText(path, line..'\n')
+		writeLogText(path, line..'\n')
 	end
+	if level ~= 'info' then flushLogs() end
 	if self.console then
 		pcall(function() self.console:SetLine(line) end)
 	end
@@ -471,8 +522,9 @@ function Telemetry:report(event, message, details)
 	end
 	local encoded = jsonEncode(payload)
 	for _, path in ipairs(telemetryFiles) do
-		appendText(path, encoded..'\n')
+		writeLogText(path, encoded..'\n')
 	end
+	flushLogs()
 
 	local endpoint = self.endpoint
 	local requestFn = self.requestFn
@@ -523,6 +575,7 @@ local function stopExecution(console, stage, err, trace, display)
 	if loaderStopped then return false end
 	loaderStopped = true
 	local message = reportError(stage, err, trace, true)
+	stopHoldingLogs()
 	shared.PistonwareLoaderBoot = nil
 	shared.vapereload = nil
 	if console then
@@ -555,11 +608,10 @@ if PUBLIC_BUILD then
 	shared.PistonwareDeveloper = nil
 	pcall(function()
 		if getmetatable(shared) ~= nil then return end
+		--[[ __newindex alone is the lock. __index only runs for a key the table does not hold, so it
+		could only ever answer nil -- while costing a function call on every read of an unset shared
+		flag for the rest of the session. ]]
 		setmetatable(shared, {
-			__index = function(self, key)
-				if key == 'PistonwareDeveloper' then return nil end
-				return rawget(self, key)
-			end,
 			__newindex = function(self, key, value)
 				if key == 'PistonwareDeveloper' then return end
 				rawset(self, key, value)
@@ -583,6 +635,7 @@ local function phase(name)
 	logger:info('boot.phase', name..' completed', {seconds = ('%.2f'):format(elapsed)})
 	if isDeveloper then pistonwareBuffer.print('boot.phase', name..' completed', {seconds = ('%.2f'):format(elapsed)}) end
 	phaseClock = now
+	flushLogs()
 end
 
 --[[ A boot parked on the key prompt is the one exception to the duplicate guard. That prompt
@@ -784,22 +837,38 @@ function would otherwise never fetch again. For a .lua file that means a chunk t
 does nothing; for an asset it means getcustomasset producing an invalid content id, which
 throws 'ContentId formatting failed' and kills the GUI. Both states used to survive every
 retry, because everything that could have repaired them asked isfile and was told the file
-was fine -- so the only remedy was reinstalling the script. ]]
-local function hasContent(path)
+was fine -- so the only remedy was reinstalling the script.
+
+Returns the body it read, and for a .lua file the chunk it compiled to prove it intact. Given the
+name the file will run under, it compiles under that name, so the caller can run this chunk
+instead of compiling the same source a second time with identical error traces. ]]
+local function hasContent(path, chunkName)
 	if not isfile(path) then return false end
 	local ok, body = pcall(readfile, path)
 	if not ok or type(body) ~= 'string' or body == '' then return false end
 	if path:match('%.lua$') then
-		local compileOk, chunk = pcall(loadstring, body, path)
-		return compileOk and type(chunk) == 'function'
+		local compileOk, chunk = pcall(loadstring, body, chunkName or path)
+		if not (compileOk and type(chunk) == 'function') then return false end
+		return body, chunk
 	end
-	return true
+	return body
 end
 
-local function downloadFile(path, func)
-	if not (release.cacheReady and hasContent(path)) then
+--[[ Paths the update pass rewrote at the release commit during this boot. The release marker
+only moves once the whole boot has succeeded, so until then release.cacheReady stays false and
+downloadFile used to fetch every one of these again straight after they were written. Only a
+refresh whose write landed is listed, so a failed write still downloads as before. ]]
+local refreshedThisBoot = {}
+
+local function downloadFile(path, func, chunkName)
+	local body, chunk
+	if release.cacheReady or refreshedThisBoot[path] then
+		body, chunk = hasContent(path, chunkName)
+	end
+	if not body then
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local isBedwars = relPath == 'games/bedwars.lua'
+		local isLua = path:find('%.lua$') ~= nil
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
@@ -808,9 +877,18 @@ local function downloadFile(path, func)
 				end
 				return game:HttpGet(projectRawUrl(relPath), true)
 			end)
-			if suc and res and res ~= '' and res ~= '404: Not Found' and (not path:find('%.lua$') or loadstring(res) ~= nil) then
-				content = res
-				break
+			if suc and res and res ~= '' and res ~= '404: Not Found' then
+				if not isLua then
+					content = res
+				elseif chunkName then
+					--[[ Checked exactly as it will be cached and run -- watermark line and chunk name
+					included -- so the compile check is also the chunk the caller runs. ]]
+					chunk = loadstring(Watermark..'\n'..res, chunkName)
+					if chunk then content = res end
+				elseif loadstring(res) ~= nil then
+					content = res
+				end
+				if content then break end
 			end
 			if attempt < 4 then
 				task.wait(attempt)
@@ -821,7 +899,7 @@ local function downloadFile(path, func)
 			reportError('source.download', message, nil, false)
 			error(message, 2)
 		end
-		if path:find('%.lua$') then
+		if isLua then
 			content = Watermark..'\n'..content
 		end
 		local wrote, writeError = pcall(writefile, path, content)
@@ -829,13 +907,19 @@ local function downloadFile(path, func)
 			reportError('source.cache.write', writeError, nil, false)
 			error(writeError, 2)
 		end
+		body = content
 	end
-	return (func or readfile)(path)
+	if func then return func(path) end
+	--[[ The text already in hand, not a second readfile of what was just read or written. The
+	chunk goes back only to a caller that named one, so every existing one-argument caller
+	still gets exactly one value. ]]
+	if chunkName then return body, chunk end
+	return body
 end
 
 if not isDeveloper then
-	shared.PistonwareDevLoadSource = function(path)
-		return downloadFile(path)
+	shared.PistonwareDevLoadSource = function(path, chunkName)
+		return downloadFile(path, nil, chunkName)
 	end
 end
 
@@ -1360,7 +1444,9 @@ local function updateCachedFiles(onProgress)
 					end)
 					--[[ compile check: never overwrite a working cached file with an error page ]]
 					if suc and res and res ~= '' and res ~= '404: Not Found' and loadstring(res) ~= nil then
-						pcall(writefile, 'pistonware/'..path, Watermark..'\n'..res)
+						if pcall(writefile, 'pistonware/'..path, Watermark..'\n'..res) then
+							refreshedThisBoot['pistonware/'..path] = true
+						end
 						manifest[path] = remote[path]
 						done = true
 						changed = true
@@ -1515,6 +1601,8 @@ local function deleteInstall()
 	--[[ every cancel/abort path comes through here, so a cancelled boot immediately frees the
 	duplicate-execution guard for the next manual run ]]
 	releaseBoot()
+	--[[ Before the wipe, so held lines land where they would have been written all along. ]]
+	stopHoldingLogs()
 	if not freshInstall then return end
 	pcall(function()
 		if delfolder then
@@ -1695,7 +1783,10 @@ local function createConsole()
 	title.Font = Enum.Font.Code
 	title.Parent = titlebar
 
-	local closed, aborted = false, false
+	--[[ `finished` is raised by Finish(): from then on the boot is complete and the window is only
+	counting itself out. ]]
+	local closed, aborted, finished = false, false, false
+	local console
 	local function destroy()
 		if closed then return end
 		--[[ Set first: the reveal thread and every wait loop below key off it, so they stop
@@ -1710,13 +1801,27 @@ local function createConsole()
 		if shared.PistonwareLoaderTeardown == destroy then
 			shared.PistonwareLoaderTeardown = nil
 		end
+		--[[ The logger outlives the window (a download that fails after the boot still reports
+		through it), so it lets go of this one instead of holding the destroyed tree for the rest
+		of the session. ]]
+		if logger.console == console then
+			logger.console = nil
+		end
 	end
 
 	--[[ Closing the window by hand is a cancel, not a dismissal: the boot stops at the next
 	checkpoint, and on a first install everything the run wrote is deleted so a half-finished
 	install can't be left behind (and no config gets silently picked for you). On an existing
-	install deleteInstall refuses to wipe, so cancelling a reinject just stops the boot. ]]
+	install deleteInstall refuses to wipe, so cancelling a reinject just stops the boot.
+
+	Except once Finish() has run. The injection has succeeded and pistonware is running out of
+	that folder, so [x] or ctrl+c during the countdown only closes the window early -- wiping a
+	fresh install there deleted the profiles and cache from under the live GUI. ]]
 	local function cancel()
+		if finished then
+			destroy()
+			return
+		end
 		if aborted then return end
 		aborted = true
 		destroy()
@@ -1814,11 +1919,16 @@ local function createConsole()
 		if maximized then return end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging, dragStart, dragOrigin = true, input.Position, window.Position
-			input.Changed:Connect(function()
+			--[[ Dropped when this press ends. The mouse hands every click the same InputObject, so
+			a handler left connected here outlived the window, one more for every drag. Tracked as
+			well, so a window destroyed mid-drag drops it too. ]]
+			local release
+			release = track(input.Changed:Connect(function()
 				if input.UserInputState == Enum.UserInputState.End then
 					dragging = false
+					release:Disconnect()
 				end
-			end)
+			end))
 		end
 	end)
 	track(inputService.InputChanged:Connect(function(input)
@@ -2037,7 +2147,7 @@ local function createConsole()
 		end
 	end
 
-	local console = {}
+	console = {}
 
 	--[[ `chevron` is the glyph in front of the status word. It points forward ('>') for every
 	step of the boot itself, and backward ('<') for the key gate, which is the one phase that
@@ -2277,6 +2387,8 @@ local function createConsole()
 	--[[ Draws whatever rows are still missing, and only once the face is whole flips the header
 	to '> DONE' and counts the window out. ]]
 	function console:Finish(message, seconds)
+		--[[ Raised before anything yields: closing the window from here on is a dismissal (see cancel). ]]
+		finished = true
 		if closed then return end
 		self:SetProgress(1)
 		local drawn = os.clock() + 2
@@ -2774,6 +2886,9 @@ do
 			turned away in silence. Stamped rather than a bare true so only the boot that
 			raised it can lower it again. ]]
 			shared.PistonwareKeyPrompt = bootStamp
+			--[[ The prompt has no timeout, so what the boot has logged so far is written now rather
+			than held for as long as somebody takes to fetch a key. ]]
+			flushLogs()
 
 			local key = console:AskKey({
 				message = reason or notice or t('enter_key'),
@@ -3250,7 +3365,13 @@ end)
 --[[ Protected so a failure surfaces on the console line instead of leaving the window stuck on
 'Loading pistonware...'; the buffer retains the diagnostic without public executor output. ]]
 local ok, result = xpcall(function()
-	local chunk, compileError = loadstring(downloadFile('pistonware/main.lua'), 'main')
+	--[[ downloadFile already compiled main.lua under this name to validate it; that chunk runs
+	as it is rather than the same source being compiled again. ]]
+	local source, chunk = downloadFile('pistonware/main.lua', nil, 'main')
+	local compileError
+	if not chunk then
+		chunk, compileError = loadstring(source, 'main')
+	end
 	if not chunk then
 		error(compileError or 'main.lua did not compile', 0)
 	end
@@ -3258,6 +3379,7 @@ local ok, result = xpcall(function()
 end, errorTrace)
 injecting = false
 phase('main.lua')
+stopHoldingLogs()
 --[[ Consumed only now: main.lua reads the flag itself while loading (it suppresses the 'Finished
 Loading' notification on a reload). Left set it would leak into the rest of the session,
 since main.lua never clears it and the next teleport/reinject sets it again anyway. ]]

@@ -927,6 +927,20 @@ local function updateVelocity(force)
 			frictionConnection:Disconnect()
 		end
 		if newState then
+			--[[ Parts a previous character left behind. A respawn lands here with the module
+			still on, and their entries used to stay until the last friction user turned off,
+			holding every dead character of the match. They are put back the way the disable
+			below would, then let go. Weak keys are no answer: an Instance's Lua handle can be
+			collected while the part is still alive, which would drop a part we still owe a
+			restore to. ]]
+			for part, props in oldfrict do
+				if not part:IsDescendantOf(game) then
+					oldfrict[part] = nil
+					pcall(function()
+						part.CustomPhysicalProperties = props ~= 'none' and props or nil
+					end)
+				end
+			end
 			if entitylib.isAlive then
 				for _, v in entitylib.character.Character:GetDescendants() do
 					modifyVelocity(v)
@@ -1111,6 +1125,27 @@ run(function()
 		}
 	end
 
+	--[[ WaitForChild, polled. A restart cancels every builder still waiting (entitylib.stop
+	does it), and a builder parked in WaitForChild is held by the engine, which still tries to
+	resume it when the child turns up -- the likely source of the "cannot resume dead coroutine"
+	at boot. Parked on task.wait, a cancel always lands on a yield it owns. Same answer as
+	WaitForChild: the child, or nil once the timeout has passed. ]]
+	local function waitForNamedChild(parent, name, timeout)
+		local check = os.clock() + timeout
+		repeat
+			local child = parent:FindFirstChild(name)
+			if child or check < os.clock() then return child end
+			task.wait()
+		until false
+	end
+
+	--[[ The local character's attribute forwarder. Each local build used to add one to
+	entitylib.Connections, where it stayed until the library stopped, so every character you had
+	been this match stayed referenced by its listener. Only the newest is kept: the previous one
+	goes when the next is connected, never on death, so the live character forwards for exactly
+	as long as it did. ]]
+	local localForwarder
+
 	--[[ Same thread-tracking rule as the library's own addEntity, for the same reason:
 	a build that finishes without yielding -- which is every character that is already
 	streamed in -- would otherwise leave a dead thread in EntityThreads, and the next
@@ -1122,17 +1157,17 @@ run(function()
 			if plr then
 				hum = waitForChildOfType(char, 'Humanoid', 10)
 				humrootpart = hum and waitForChildOfType(hum, 'RootPart', workspace.StreamingEnabled and 9e9 or 10, true)
-				head = char:WaitForChild('Head', 10) or humrootpart
+				head = waitForNamedChild(char, 'Head', 10) or humrootpart
 			else
 				hum = {HipHeight = 0.5}
 				humrootpart = waitForRootPart(char, 10)
 				head = humrootpart
 			end
 			local updateobjects = plr and plr ~= lplr and {
-				char:WaitForChild('ArmorInvItem_0', 5),
-				char:WaitForChild('ArmorInvItem_1', 5),
-				char:WaitForChild('ArmorInvItem_2', 5),
-				char:WaitForChild('HandInvItem', 5)
+				waitForNamedChild(char, 'ArmorInvItem_0', 5),
+				waitForNamedChild(char, 'ArmorInvItem_1', 5),
+				waitForNamedChild(char, 'ArmorInvItem_2', 5),
+				waitForNamedChild(char, 'HandInvItem', 5)
 			} or {}
 
 			if hum and humrootpart then
@@ -1161,9 +1196,17 @@ run(function()
 					entitylib.character = entity
 					entitylib.isAlive = true
 					entitylib.Events.LocalAdded:Fire(entity)
-					table.insert(entitylib.Connections, char.AttributeChanged:Connect(function(attr)
+					if localForwarder then
+						local index = table.find(entitylib.Connections, localForwarder)
+						if index then
+							table.remove(entitylib.Connections, index)
+						end
+						localForwarder:Disconnect()
+					end
+					localForwarder = char.AttributeChanged:Connect(function(attr)
 						vapeEvents.AttributeChanged:Fire(attr)
-					end))
+					end)
+					table.insert(entitylib.Connections, localForwarder)
 				else
 					entity.Targetable = entitylib.targetCheck(entity)
 
@@ -3484,17 +3527,19 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		end)
 	end
 	
-	vape:Clean(bedwars.ZapNetworking.EntityDamageEventZap.On(function(...)
+	-- Named rather than picked out with select, which walks the arguments again for every field.
+	vape:Clean(bedwars.ZapNetworking.EntityDamageEventZap.On(function(entityInstance, damage, damageType, fromPosition, fromEntity, knockbackMultiplier, knockbackId, attackData, ...)
 		vapeEvents.EntityDamageEvent:Fire({
-			entityInstance = ...,
-			damage = select(2, ...),
-			damageType = select(3, ...),
-			fromPosition = select(4, ...),
-			fromEntity = select(5, ...),
-			knockbackMultiplier = select(6, ...),
-			knockbackId = select(7, ...),
-			attackData = select(8, ...),
-			disableDamageHighlight = select(13, ...)
+			entityInstance = entityInstance,
+			damage = damage,
+			damageType = damageType,
+			fromPosition = fromPosition,
+			fromEntity = fromEntity,
+			knockbackMultiplier = knockbackMultiplier,
+			knockbackId = knockbackId,
+			attackData = attackData,
+			-- the 13th argument: the eight named above, then four this does not use
+			disableDamageHighlight = select(5, ...)
 		})
 	end))
 
@@ -3711,23 +3756,6 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			kills:Increment()
 		end
 	end))
-
-	task.spawn(function()
-		repeat
-			if entitylib.isAlive then
-				entitylib.character.AirTime = entitylib.character.Humanoid.FloorMaterial ~= Enum.Material.Air and os.clock() or entitylib.character.AirTime
-			end
-
-			for _, v in entitylib.List do
-				v.LandTick = math.abs(v.RootPart.Velocity.Y) < 0.1 and v.LandTick or os.clock()
-				if (os.clock() - v.LandTick) > 0.2 and v.Jumps ~= 0 then
-					v.Jumps = 0
-					v.Jumping = false
-				end
-			end
-			task.wait()
-		until vape.Loaded == nil
-	end)
 
 	task.spawn(function()
 		local deadline = os.clock() + 60
@@ -4195,21 +4223,33 @@ run(function()
 		end
 	end
 
+	-- True once this placer has nothing left to patch: there is no placer, or its selector is done.
 	local function patchPlacer(placer)
 		local ok, selector = pcall(function()
 			local manager = placer and placer.clientManager
 			return manager and manager:getBlockSelector()
 		end)
 		if ok then patchSelector(selector) end
+		return not placer or (ok and selector ~= nil and patchedSelectors[selector] ~= nil)
 	end
 
 	local function patchPlaceReach()
+		local covered = false
 		callWithThreadFix(function()
-			patchPlacer(store.blockPlacer)
+			local storeCovered = patchPlacer(store.blockPlacer)
 			local controller = bedwars.BlockPlacementController
-			patchPlacer(controller and controller.blockPlacer)
+			covered = patchPlacer(controller and controller.blockPlacer) and storeCovered
 		end)
+		return covered
 	end
+
+	--[[ The two placers the Heartbeat below last patched. A selector is made once, with the
+	client manager its placer is built around, so while both placers are the same objects and
+	both were fully patched there is nothing new to reach -- and the identity switch and the two
+	selector lookups are skipped for that frame. A placer that could not be patched yet is
+	retried every frame, as before. ]]
+	local coveredStorePlacer, coveredControllerPlacer
+	local placersCovered = false
 
 	local function restorePlaceReach()
 		local restore = {}
@@ -4232,6 +4272,8 @@ run(function()
 			placeReachConnection = nil
 		end
 		restorePlaceReach()
+		-- restorePlaceReach forgot every selector, so the next start patches from scratch
+		placersCovered = false
 	end
 
 	local function startPlaceReach()
@@ -4239,7 +4281,12 @@ run(function()
 		if not placeReachConnection then
 			placeReachConnection = runService.Heartbeat:Connect(function()
 				if Reach.Enabled and PlaceBlocks and PlaceBlocks.Enabled then
-					patchPlaceReach()
+					local controller = bedwars.BlockPlacementController
+					local storePlacer, controllerPlacer = store.blockPlacer, controller and controller.blockPlacer
+					if not placersCovered or storePlacer ~= coveredStorePlacer or controllerPlacer ~= coveredControllerPlacer then
+						coveredStorePlacer, coveredControllerPlacer = storePlacer, controllerPlacer
+						placersCovered = patchPlaceReach()
+					end
 				else
 					stopPlaceReach()
 				end
@@ -4970,14 +5017,17 @@ run(function()
 	--[[ Name of the block currently under the crosshair, read through the same block
 	selector AutoTool and Schematica use. Mode 1 is SELECT (the block being looked
 	at); mode 0 is PLACE, which resolves to the empty cell in front of it instead. ]]
+	local function readTargetedBlock()
+		local breaker = bedwars.BlockBreakController.blockBreaker
+		local info = breaker.clientManager:getBlockSelector():getMouseInfo(1)
+		local target = info and info.target
+		local block = target and target.blockInstance
+		return block and block.Name
+	end
+
+	-- The read is its own function, not a closure made for each pcall: with a blacklist on, this runs every frame.
 	local function targetedBlockName()
-		local ok, name = pcall(function()
-			local breaker = bedwars.BlockBreakController.blockBreaker
-			local info = breaker.clientManager:getBlockSelector():getMouseInfo(1)
-			local target = info and info.target
-			local block = target and target.blockInstance
-			return block and block.Name
-		end)
+		local ok, name = pcall(readTargetedBlock)
 		return ok and name or nil
 	end
 
@@ -5131,6 +5181,20 @@ run(function()
 	local wasGrounded
 
 	vape:Clean(runService.Heartbeat:Connect(function()
+		--[[ Everyone else's jump count, settled once they have been still for a fifth of a
+		second. This and the grounded AirTime below used to be a loop of their own, a second
+		per-frame thread for the whole session. Only an entity mid-jump is walked: LandTick is
+		read nowhere else, and the jump that makes Jumps non-zero sets it fresh. ]]
+		for _, v in entitylib.List do
+			if v.Jumps ~= 0 and v.RootPart then
+				v.LandTick = math.abs(v.RootPart.Velocity.Y) < 0.1 and v.LandTick or os.clock()
+				if (os.clock() - v.LandTick) > 0.2 then
+					v.Jumps = 0
+					v.Jumping = false
+				end
+			end
+		end
+
 		if not entitylib.isAlive then
 			wasGrounded = nil
 			GroundWatcher.grounded = false
@@ -5145,6 +5209,10 @@ run(function()
 
 		local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
 		GroundWatcher.grounded = grounded
+		-- TPDown's Air Time reads this as zero for as long as you stand on something
+		if grounded then
+			character.AirTime = os.clock()
+		end
 
 		if wasGrounded == nil then
 			wasGrounded = grounded
@@ -5324,6 +5392,9 @@ run(function()
 	local PopBalloons
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
+	--[[ What rayCheck's filter was last built from. It is only cast with Wall Check on, and its
+	parts change on a respawn at most, so it is rebuilt then rather than every physics step. ]]
+	local filterChar, filterCamera, filterAntiFall
 	local up, down, old = 0, 0
 
 	Fly = vape.Categories.Blatant:CreateModule({
@@ -5355,10 +5426,13 @@ run(function()
 						local root, moveDirection = char.RootPart, char.Humanoid.MoveDirection
 						local velo = getSpeed()
 						local destination = (moveDirection * math.max(Value.Value - velo, 0) * dt)
-						rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera, AntiFallPart}
-						rayCheck.CollisionGroup = root.CollisionGroup
 
 						if WallCheck.Enabled then
+							if filterChar ~= lplr.Character or filterCamera ~= gameCamera or filterAntiFall ~= AntiFallPart then
+								filterChar, filterCamera, filterAntiFall = lplr.Character, gameCamera, AntiFallPart
+								rayCheck.FilterDescendantsInstances = {filterChar, filterCamera, filterAntiFall}
+							end
+							rayCheck.CollisionGroup = root.CollisionGroup
 							local ray = workspace:Raycast(root.Position, destination, rayCheck)
 							if ray then
 								destination = ((ray.Position + ray.Normal) - root.Position)
@@ -5469,6 +5543,8 @@ run(function()
 	local JumpMargin
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
+	-- What rayCheck's filter was last built from; see Fly's, which is kept the same way.
+	local filterChar, filterCamera, filterAntiFall
 	local up, down = 0, 0
 	local activeMode
 	local modeGeneration = 0
@@ -5666,10 +5742,13 @@ run(function()
 		end
 		local walk = math.min(velo, speed)
 		local destination = moveDirection * (speed - walk) * dt
-		rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera, AntiFallPart}
-		rayCheck.CollisionGroup = root.CollisionGroup
 
 		if WallCheck.Enabled then
+			if filterChar ~= lplr.Character or filterCamera ~= gameCamera or filterAntiFall ~= AntiFallPart then
+				filterChar, filterCamera, filterAntiFall = lplr.Character, gameCamera, AntiFallPart
+				rayCheck.FilterDescendantsInstances = {filterChar, filterCamera, filterAntiFall}
+			end
+			rayCheck.CollisionGroup = root.CollisionGroup
 			local ray = workspace:Raycast(root.Position, destination, rayCheck)
 			if ray then
 				destination = (ray.Position + ray.Normal) - root.Position
@@ -6441,23 +6520,30 @@ run(function()
 	local SafeWalk
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
-	local module, old
-	
+	--[[ The hook this enable installed: {Active, Hook, Previous}. TargetStrafe and AutoWin wrap the
+	same slot, so turning off puts Previous back only while our hook is still on top; otherwise it
+	stays in the chain as a pass-through and the wrappers above it keep working. ]]
+	local module, current
+
 	SafeWalk = vape.Categories.World:CreateModule({
 		Name = 'SafeWalk',
 		Tab = 'Move',
 		Function = function(callback)
 			if callback then
 				if not module then
-					local suc = pcall(function() 
-						module = require(lplr.PlayerScripts.PlayerModule).controls 
+					local suc = pcall(function()
+						module = require(lplr.PlayerScripts.PlayerModule).controls
 					end)
 					if not suc then module = {} end
 				end
-				
-				old = module.moveFunction
-				module.moveFunction = function(self, vec, face)
-					if entitylib.isAlive then
+
+				local old = module.moveFunction
+				-- No movement function to wrap (the controls did not load): nothing to hook.
+				if type(old) ~= 'function' then return end
+				local state = {Active = true, Previous = old}
+				current = state
+				state.Hook = function(self, vec, face)
+					if state.Active and entitylib ~= nil and entitylib.isAlive then
 						rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera}
 						local root = entitylib.character.RootPart
 						local movedir = root.Position + vec
@@ -6469,12 +6555,17 @@ run(function()
 							end
 						end
 					end
-	
+
 					return old(self, vec, face)
 				end
+				module.moveFunction = state.Hook
 			else
-				if module and old then
-					module.moveFunction = old
+				if current then
+					current.Active = false
+					if module and module.moveFunction == current.Hook then
+						module.moveFunction = current.Previous
+					end
+					current = nil
 				end
 			end
 		end,
@@ -6766,7 +6857,7 @@ run(function()
 		end
 
 		local teamName, teamColor = teamInfo(bed, teamId)
-		local ref = {Objects = {}, TeamColor = teamColor, Label = teamName..' Bed', HealthAt = 0, TeamId = teamId, TeamAt = 0}
+		local ref = {Objects = {}, Points = {}, TeamColor = teamColor, Label = teamName..' Bed', HealthAt = 0, TeamId = teamId, TeamAt = 0}
 		local color = colorOf(ref)
 		local ok = pcall(function()
 			local objects = ref.Objects
@@ -6830,10 +6921,25 @@ run(function()
 		end
 	end
 
+	--[[ Visibility is written only when it changes: Priority Only hides your own bed on every
+	frame. ref.Shown is nil while a write is under way, so one that throws part way is redone
+	in full next time rather than trusted. ]]
 	local function hide(ref)
+		if ref.Shown == false then return end
+		ref.Shown = nil
 		for _, object in ref.Objects do
 			object.Visible = false
 		end
+		ref.Shown = false
+	end
+
+	local function show(ref)
+		if ref.Shown == true then return end
+		ref.Shown = nil
+		for _, object in ref.Objects do
+			object.Visible = true
+		end
+		ref.Shown = true
 	end
 
 	-- The bed's team, looked up again twice a second until it is known. A bed added before
@@ -6907,7 +7013,8 @@ run(function()
 			end
 
 			-- Every corner on screen space; one behind the camera would flip the box inside out.
-			local points, minX, minY, maxX, maxY = {}, math.huge, math.huge, -math.huge, -math.huge
+			-- The points table is the bed's own, refilled each frame: only a full pass reads it.
+			local points, minX, minY, maxX, maxY = ref.Points, math.huge, math.huge, -math.huge, -math.huge
 			local behind = false
 			for index, corner in CORNERS do
 				local screen = camera:WorldToViewportPoint(cframe:PointToWorldSpace(corner * size / 2))
@@ -6924,18 +7031,20 @@ run(function()
 				hide(ref)
 				continue
 			end
-			for _, object in ref.Objects do
-				object.Visible = true
-			end
+			show(ref)
 
 			local posX, posY = minX // 1, minY // 1
 			local sizeX, sizeY = math.max((maxX - minX) // 1, 2), math.max((maxY - minY) // 1, 2)
+			--[[ The rectangle the 2D box, the bar and the name were last drawn against. Standing
+			still with the camera still, nothing below would change, so those writes are skipped;
+			the 3D lines follow every corner and are always written. ]]
+			local moved = posX ~= ref.DrawnX or posY ~= ref.DrawnY or sizeX ~= ref.DrawnW or sizeY ~= ref.DrawnH
 			if ref.Lines then
 				for index, edge in EDGES do
 					ref.Lines[index].From = points[edge[1]]
 					ref.Lines[index].To = points[edge[2]]
 				end
-			elseif ref.Main then
+			elseif ref.Main and moved then
 				ref.Main.Position = Vector2.new(posX, posY)
 				ref.Main.Size = Vector2.new(sizeX, sizeY)
 				if ref.Border then
@@ -6959,22 +7068,31 @@ run(function()
 					ref.Fraction = (health and maxHealth and maxHealth > 0) and math.clamp(health / maxHealth, 0, 1) or 1
 					ref.HealthLine.Color = Color3.fromHSV(ref.Fraction / 2.5, 0.89, 0.75)
 				end
-				local barX = posX - 5
-				ref.HealthBorder.From = Vector2.new(barX, posY - 1)
-				ref.HealthBorder.To = Vector2.new(barX, posY + sizeY + 1)
-				ref.HealthLine.From = Vector2.new(barX, posY + sizeY)
-				ref.HealthLine.To = Vector2.new(barX, posY + sizeY - (sizeY * (ref.Fraction or 1)) // 1)
+				if moved or ref.DrawnFraction ~= ref.Fraction then
+					local barX = posX - 5
+					ref.HealthBorder.From = Vector2.new(barX, posY - 1)
+					ref.HealthBorder.To = Vector2.new(barX, posY + sizeY + 1)
+					ref.HealthLine.From = Vector2.new(barX, posY + sizeY)
+					ref.HealthLine.To = Vector2.new(barX, posY + sizeY - (sizeY * (ref.Fraction or 1)) // 1)
+					ref.DrawnFraction = ref.Fraction
+				end
 			end
 
 			if ref.Text then
-				local textPos = Vector2.new(posX + sizeX / 2, posY - ref.Text.TextBounds.Y - 4) // 1
-				ref.Text.Position = textPos
-				ref.Drop.Position = textPos + Vector2.new(1, 1)
-				if ref.TextBKG then
-					ref.TextBKG.Size = ref.Text.TextBounds + Vector2.new(8, 4)
-					ref.TextBKG.Position = textPos - Vector2.new(4 + ref.Text.TextBounds.X / 2, 0)
+				-- Read once a frame rather than three times; the label changes it when the team lands.
+				local bounds = ref.Text.TextBounds
+				if moved or bounds ~= ref.DrawnBounds then
+					local textPos = Vector2.new(posX + sizeX / 2, posY - bounds.Y - 4) // 1
+					ref.Text.Position = textPos
+					ref.Drop.Position = textPos + Vector2.new(1, 1)
+					if ref.TextBKG then
+						ref.TextBKG.Size = bounds + Vector2.new(8, 4)
+						ref.TextBKG.Position = textPos - Vector2.new(4 + bounds.X / 2, 0)
+					end
+					ref.DrawnBounds = bounds
 				end
 			end
+			ref.DrawnX, ref.DrawnY, ref.DrawnW, ref.DrawnH = posX, posY, sizeX, sizeY
 		end
 	end
 
@@ -7237,8 +7355,15 @@ run(function()
 						label.Visible = not clickGui.Visible
 					end))
 				end
+				--[[ Every attribute change on your character lands here, and most of them leave the
+				health alone; the label is only written when its text actually changes. ]]
+				local shownText = label.Text
 				Health:Clean(vapeEvents.AttributeChanged.Event:Connect(function()
-					label.Text = healthText()
+					local text = healthText()
+					if text ~= shownText then
+						shownText = text
+						label.Text = text
+					end
 				end))
 			end
 		end,
@@ -7653,6 +7778,36 @@ run(function()
 	local rightIcons = {'Kit', 'RankIcon', 'EnchantIcon'}
 	local equipmentIcons = {'Hand', 'Helmet', 'Chestplate', 'Boots'}
 
+	--[[ Each tag's icons, in row order, found once. positionIcons runs every time a moving
+	player's distance ticks over, and it looked all seven up by name each time; the set never
+	changes after the build that made them, which creates every one before its first
+	positionIcons. Weak, so a destroyed tag takes its entry with it -- Reference holds every
+	live one. ]]
+	local TagIcons = setmetatable({}, {__mode = 'k'})
+	-- positionIcons never yields, so one scratch list serves every call
+	local carried = {}
+
+	local function iconsOf(nametag)
+		local icons = TagIcons[nametag]
+		if not icons then
+			icons = {Right = {}, Equipment = {}}
+			for _, name in rightIcons do
+				local icon = nametag:FindFirstChild(name)
+				if icon then
+					table.insert(icons.Right, icon)
+				end
+			end
+			for _, name in equipmentIcons do
+				local icon = nametag:FindFirstChild(name)
+				if icon then
+					table.insert(icons.Equipment, icon)
+				end
+			end
+			TagIcons[nametag] = icons
+		end
+		return icons
+	end
+
 	--[[ `height` is the nametag's own pixel height, so the icons scale with the tag instead
 	of staying pinned at 30px. That was the other half of the mismatch: the text follows the
 	Scale slider and a fixed 30 did not, so the icons drifted out of line with the tag the
@@ -7660,16 +7815,14 @@ run(function()
 	local function positionIcons(nametag, width, height)
 		local iconSize = height or ICON_SIZE
 		local offset = width + 10
-		for _, name in rightIcons do
-			local icon = nametag:FindFirstChild(name)
-			if icon then
-				local shown = icon.Image ~= ''
-				icon.Visible = shown
-				if shown then
-					icon.Size = UDim2.fromOffset(iconSize, iconSize)
-					icon.Position = UDim2.fromOffset(offset, 0)
-					offset += iconSize
-				end
+		local icons = iconsOf(nametag)
+		for _, icon in icons.Right do
+			local shown = icon.Image ~= ''
+			icon.Visible = shown
+			if shown then
+				icon.Size = UDim2.fromOffset(iconSize, iconSize)
+				icon.Position = UDim2.fromOffset(offset, 0)
+				offset += iconSize
 			end
 		end
 
@@ -7678,15 +7831,12 @@ run(function()
 		icon left of the tag's edge with every slot kept, so a weapon alone hung off the tag's
 		corner, and at a fixed 30px per Scale it outgrew the tag. Centred on the tag's middle, the
 		row stays centred as the distance changes the tag's width. ]]
-		local carried = {}
-		for _, name in equipmentIcons do
-			local icon = nametag:FindFirstChild(name)
-			if icon then
-				local shown = icon.Image ~= ''
-				icon.Visible = shown
-				if shown then
-					table.insert(carried, icon)
-				end
+		table.clear(carried)
+		for _, icon in icons.Equipment do
+			local shown = icon.Image ~= ''
+			icon.Visible = shown
+			if shown then
+				table.insert(carried, icon)
 			end
 		end
 		for index, icon in carried do
@@ -7787,9 +7937,11 @@ run(function()
 	end
 
 	-- The same three for how far away they are: green past 30 studs, yellow from 10, red closer.
+	-- Their hex is made once; this runs every time a moving player's distance ticks over.
+	local TAG_GREEN_HEX, TAG_YELLOW_HEX, TAG_RED_HEX = TAG_GREEN:ToHex(), TAG_YELLOW:ToHex(), TAG_RED:ToHex()
 	local function distanceText(studs)
-		local colour = studs > 30 and TAG_GREEN or studs >= 10 and TAG_YELLOW or TAG_RED
-		return '<font color="#'..colour:ToHex()..'">'..studs..'m</font>'
+		local hex = studs > 30 and TAG_GREEN_HEX or studs >= 10 and TAG_YELLOW_HEX or TAG_RED_HEX
+		return '<font color="#'..hex..'">'..studs..'m</font>'
 	end
 
 	--[[ A team's name and colour for this match, from its queue meta, as the Block ESP names beds;
@@ -8274,14 +8426,33 @@ run(function()
 		end
 	}
 	
+	--[[ The re-measure after a distance change, on a thread of its own. getfontsize is
+	GetTextBoundsAsync, and with the distance in the text most strings are new to its cache, so
+	it yields -- and inside the render loop that yield held up every tag after this one until it
+	came back, with the next frame's loop already running over the same tags. Same measure and
+	the same writes, in the same order once it returns; the loop just no longer waits on it. It
+	reads the label's text at once, before any yield, so it measures what was just written.
+
+	A measure that comes back after the text has moved on is dropped. Whatever moved it has a
+	measure of its own coming, and with Sizes already set to the new distance nothing would
+	measure again: an older string finishing last would leave the tag sized for the wrong text
+	until the distance next changed. ]]
+	local function measureTag(nametag)
+		local text = nametag.Text
+		local size = getfontsize(removeTags(text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+		if nametag.Text ~= text then return end
+		nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
+		positionIcons(nametag, size.X, size.Y + 7)
+	end
+
 	--[[ One tag's worth of work, under its own pcall.
 
 	The comment inside spells out why a throw here used to freeze every tag after it in the
 	iteration. The RootPart read it describes is guarded now, but that was never the only
 	thing in here that can throw: ent.HipHeight is arithmetic on a field nothing guarantees,
-	string.format walks a Strings entry that has to carry a %s, and getfontsize is handed a
-	FontFace. Any one of them abandoning the frame leaves every remaining tag exactly where
-	it was last drawn -- and it repeats every frame, so they stay there while you walk away.
+	and string.format walks a Strings entry that has to carry a %s. Either one abandoning the
+	frame leaves every remaining tag exactly where it was last drawn -- and it repeats every
+	frame, so they stay there while you walk away.
 
 	A pcall per tag per frame is a handful of nanoseconds against sixteen tags. Losing one
 	tag for a frame is a flicker; losing the rest of the list is the bug being reported. ]]
@@ -8336,10 +8507,8 @@ run(function()
 			local mag = selfPos and math.floor((selfPos - rootPos).Magnitude) or 0
 			if Sizes[ent] ~= mag then
 				nametag.Text = string.format(Strings[ent], distanceText(mag))
-				local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
-				positionIcons(nametag, size.X, size.Y + 7)
 				Sizes[ent] = mag
+				task.spawn(pcall, measureTag, nametag)
 			end
 		end
 		nametag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
@@ -8757,6 +8926,10 @@ run(function()
 	-- Pending: chests still waiting on their contents value, so the sweep does not start a
 	-- second wait on the same one.
 	local Pending = {}
+	--[[ Per chest: the contents listeners its billboard was built with. They used to go only
+	when the module turned off, so a chest that left and came back (streaming, a re-tag) kept
+	the old pair as well, still refreshing a billboard that had been destroyed. ]]
+	local ChestWatch = {}
 
 	--[[ Every billboard here lives in Pistonware's GUI -- under CoreGui or gethui wherever the
 	identity can be raised -- and every way into this module (its own thread, the chest tag,
@@ -8890,16 +9063,18 @@ run(function()
 			return
 		end
 		Reference[v] = billboard
-		StorageESP:Clean(chest.ChildAdded:Connect(function(item)
-			if table.find(List.ListEnabled, item.Name) or nearStorageItem(item.Name) then
-				refreshAdornee(billboard)
-			end
-		end))
-		StorageESP:Clean(chest.ChildRemoved:Connect(function(item)
-			if table.find(List.ListEnabled, item.Name) or nearStorageItem(item.Name) then
-				refreshAdornee(billboard)
-			end
-		end))
+		ChestWatch[v] = {
+			chest.ChildAdded:Connect(function(item)
+				if table.find(List.ListEnabled, item.Name) or nearStorageItem(item.Name) then
+					refreshAdornee(billboard)
+				end
+			end),
+			chest.ChildRemoved:Connect(function(item)
+				if table.find(List.ListEnabled, item.Name) or nearStorageItem(item.Name) then
+					refreshAdornee(billboard)
+				end
+			end)
+		}
 		task.spawn(refreshAdornee, billboard)
 	end
 	
@@ -8936,6 +9111,10 @@ run(function()
 							connection:Disconnect()
 						end
 						AmountWatch[billboard] = nil
+						for _, connection in ChestWatch[v] or {} do
+							connection:Disconnect()
+						end
+						ChestWatch[v] = nil
 						pcall(function() billboard:Destroy() end)
 						Reference[v] = nil
 					end
@@ -8962,6 +9141,12 @@ run(function()
 					end
 				end
 				table.clear(AmountWatch)
+				for _, list in ChestWatch do
+					for _, connection in list do
+						connection:Disconnect()
+					end
+				end
+				table.clear(ChestWatch)
 				table.clear(Reference)
 				table.clear(Pending)
 				Folder:ClearAllChildren()
@@ -9039,13 +9224,21 @@ run(function()
 				repeat task.wait(0.1) until store.matchState ~= 0 or (not AutoBalloon.Enabled)
 				if not AutoBalloon.Enabled then return end
 	
+				--[[ Every block on the map, tens of thousands of them, which in one go is a hitch
+				right as the match starts. A copy is walked a slice per frame instead: the live list
+				swap-removes, so a block broken mid-walk could slide an unread one into a slot
+				already passed. The copy is the map as it stood at this moment, as before. ]]
 				local lowestpoint = math.huge
-				for _, v in store.blocks do
+				for index, v in table.clone(store.blocks) do
 					local point = (v.Position.Y - (v.Size.Y / 2)) - 50
 					if point < lowestpoint then 
 						lowestpoint = point 
 					end
+					if index % 2000 == 0 then
+						task.wait()
+					end
 				end
+				if not AutoBalloon.Enabled then return end
 	
 				repeat
 					if entitylib.isAlive then
@@ -9345,13 +9538,18 @@ run(function()
 				repeat task.wait(0.1) until store.matchState ~= 0 or (not AutoVoidDrop.Enabled)
 				if not AutoVoidDrop.Enabled then return end
 	
+				-- A slice per frame over a copy, for the reason AutoBalloon gives.
 				local lowestpoint = math.huge
-				for _, v in store.blocks do
+				for index, v in table.clone(store.blocks) do
 					local point = (v.Position.Y - (v.Size.Y / 2)) - 50
 					if point < lowestpoint then
 						lowestpoint = point
 					end
+					if index % 2000 == 0 then
+						task.wait()
+					end
 				end
+				if not AutoVoidDrop.Enabled then return end
 	
 				repeat
 					if entitylib.isAlive then
@@ -9464,19 +9662,25 @@ run(function()
 				repeat
 					if entitylib.isAlive then
 						local localPosition = entitylib.character.RootPart.Position
+						--[[ Once per pass rather than once per drop: nothing in the loop below yields,
+						so neither the clock nor your health moves in between. ]]
+						local now = tick()
+						local pullDrops = Network.Enabled and entitylib.character.Humanoid.Health > 0
 						for _, v in items do
 							--[[ A stack the bank is holding for you carries PistonwareBankOwner (set on this
 							client only), and is never grabbed here, whatever its ClientDropTime says: once
 							that marker was missing, Network TP pulled the parked stack down to your feet
 							every pass and picked it up, un-banking it behind the bank's back. ]]
 							if v:GetAttribute('PistonwareBankOwner') ~= nil then continue end
-							if tick() - (v:GetAttribute('ClientDropTime') or 0) < 2 then continue end
-							if (Network.Enabled and isnetworkowner(v)) and (entitylib.character.Humanoid.Health > 0) then 
+							if now - (v:GetAttribute('ClientDropTime') or 0) < 2 then continue end
+							if pullDrops and isnetworkowner(v) then
 								v.CFrame = CFrame.new(localPosition - Vector3.new(0, 3, 0)) 
 							end
 							
-							if (localPosition - v.Position).Magnitude <= Range.Value then
-								if Lower.Enabled and (localPosition.Y - v.Position.Y) < (entitylib.character.HipHeight - 1) then continue end
+							-- read after the pull above, which moves it
+							local dropPosition = v.Position
+							if (localPosition - dropPosition).Magnitude <= Range.Value then
+								if Lower.Enabled and (localPosition.Y - dropPosition.Y) < (entitylib.character.HipHeight - 1) then continue end
 
 								--[[ One request per drop per Delay, rather than one per pass.
 								This loop runs at 10hz and had nothing holding it back, so
@@ -9487,8 +9691,8 @@ run(function()
 								the overflow, which is why pickups died with it enabled.
 								The first sighting is still instant: an unseen drop has no
 								entry here, so it goes out on the pass that spots it. ]]
-								if (pickups[v] or 0) >= tick() then continue end
-								pickups[v] = tick() + Delay.Value
+								if (pickups[v] or 0) >= now then continue end
+								pickups[v] = now + Delay.Value
 
 								task.spawn(function()
 									bedwars.Client:Get(remotes.PickupItem):CallServerAsync({
@@ -12536,9 +12740,19 @@ run(function()
 		return v
 	end
 	
+	--[[ Each layout slot's item, resolved once per pass rather than once for every inventory
+	item asked about it: the wool slot clones and sorts the whole inventory to answer. Only a
+	dispatch changes the inventory part way through a pass, so that is where it is dropped. ]]
+	local resolvedSlots = {}
+	
 	local function findItemInTable(tab, item)
 		for slot, v in tab do
-			if item.itemType == getCustomItem(v) then
+			local resolved = resolvedSlots[slot]
+			if resolved == nil then
+				resolved = getCustomItem(v)
+				resolvedSlots[slot] = resolved
+			end
+			if item.itemType == resolved then
 				return tonumber(slot)
 			end
 		end
@@ -12563,10 +12777,12 @@ run(function()
 	local function dispatch(...)
 		bedwars.Store:dispatch(...)
 		vapeEvents.InventoryChanged.Event:Wait()
+		table.clear(resolvedSlots)
 	end
 	
 	local function sortHotbar()
 		local items = (List.Hotbars[List.Selected] and List.Hotbars[List.Selected].Hotbar or {})
+		table.clear(resolvedSlots)
 	
 		for _, v in store.inventory.inventory.items do
 			local slot = findItemInTable(items, v)

@@ -866,13 +866,16 @@ local function loopClean(tbl)
 	end
 end
 
-local function waitForChildOfType(obj, name, timeout, prop)
+-- `wanted`, when given, is asked after every frame waited: a build that has been dropped stops
+-- polling there instead of spinning out the rest of its timeout.
+local function waitForChildOfType(obj, name, timeout, prop, wanted)
 	local checktick = tick() + timeout
 	local returned
 	repeat
 		returned = prop and obj[name] or obj:FindFirstChildOfClass(name)
 		if returned or checktick < tick() then break end
 		task.wait()
+		if wanted and not wanted() then return nil end
 	until false
 	return returned
 end
@@ -1085,13 +1088,16 @@ local function entityPartIsEligible(entity, settings, partName)
 	return part
 end
 
+-- The origin is not part of the key. Each entry remembers where its list was built and is only
+-- reused from within half its spare margin of that spot (getPositionCandidates below), so the
+-- key never had to. Keyed on it, a caller passing its own position every frame matched nothing
+-- it had stored before and pushed everyone else's entry out of the eight slots.
 local function getPositionCacheKey(settings, partName, range)
 	for _, key in positionCacheOrder do
 		if key.Players == settings.Players
 			and key.NPCs == settings.NPCs
 			and key.Part == partName
 			and key.Range == range
-			and key.Origin == settings.Origin
 			and key.Sort == settings.Sort
 			and key.Wallcheck == settings.Wallcheck
 			and key.Limit == settings.Limit then
@@ -1103,7 +1109,6 @@ local function getPositionCacheKey(settings, partName, range)
 		NPCs = settings.NPCs,
 		Part = partName,
 		Range = range,
-		Origin = settings.Origin,
 		Sort = settings.Sort,
 		Wallcheck = settings.Wallcheck,
 		Limit = settings.Limit
@@ -1502,31 +1507,49 @@ entitylib.getEntity = function(char)
 	return nil
 end
 
---[[ Records the builder thread ONLY while it is still running.
+--[[ A build is owned by a token in EntityThreads, not by its thread.
 
-task.spawn runs the body up to its first yield before it ever returns, and the body
-below has no yield at all when the character is already streamed in: WaitForChild
-returns instantly for a child that exists, and waitForChildOfType breaks before its
-task.wait on the first hit. So the whole build finishes -- including the
-`EntityThreads[char] = nil` on its last line -- and only THEN does task.spawn hand
-back a thread that is already dead, which the assignment writes straight back into
-the table it just cleared.
+The builder can sit in WaitForChild for up to ten seconds, and a stale one used to be ended
+with task.cancel from removeEntity and stop(). Cancelling a thread the engine is still holding
+for a wait is not safe -- the engine still means to resume it -- so nothing kills this builder
+any more. removeEntity, stop() and removePlayer only take its token away, and the builder
+checks after every wait and walks away once the token is no longer its own.
 
-That entry is poison. task.cancel throws on a thread that is not suspended, so the
-next removeEntity for this character died on the cancel and never reached
-Events.EntityRemoved -- leaving the entity in entitylib.List and every module's
-per-entity state pointing at a character that had gone. Nametags parked over empty
-ground came from here. The guard above compounds it: a character carrying a dead
-entry can never be added again either.
+It also walks away once its player has left. removePlayer looks the entity up by Player while
+a build in flight is keyed by character, so that build was never found there and finished
+afterwards, leaving an entity in the list that nothing would ever take out.
 
-Storing it only when it is genuinely suspended costs one status read. ]]
+The token is stored BEFORE task.spawn. The body has no yield at all when the character is
+already streamed in -- WaitForChild returns at once for a child that exists, and
+waitForChildOfType breaks before its first task.wait -- so the whole build, its release of the
+entry included, is over by the time task.spawn returns. An entry written after that would
+belong to a build that has already finished, and the guard on the first line would refuse the
+character from then on. ]]
 entitylib.addEntity = function(char, plr, teamfunc, spawntime)
 	if not char or entitylib.EntityByCharacter[char] or entitylib.EntityThreads[char] then return end
 
-	local builder = task.spawn(function()
-		local hum = waitForChildOfType(char, 'Humanoid', 10)
-		local humrootpart = hum and waitForChildOfType(hum, 'RootPart', workspace.StreamingEnabled and 9e9 or 10, true)
+	-- Held as a local: kill() strips every field off entitylib, and a builder still waiting
+	-- when that happens has to find its entry gone, not index a table that is no longer there.
+	local threads = entitylib.EntityThreads
+	local token = {}
+	threads[char] = token
+	local function wanted()
+		return threads[char] == token and not (plr and plr.Parent == nil)
+	end
+	-- Only ever clears its own entry: a newer build for the same character may own it by now.
+	local function release()
+		if threads[char] == token then
+			threads[char] = nil
+		end
+	end
+
+	task.spawn(function()
+		local hum = waitForChildOfType(char, 'Humanoid', 10, nil, wanted)
+		if not wanted() then return release() end
+		local humrootpart = hum and waitForChildOfType(hum, 'RootPart', workspace.StreamingEnabled and 9e9 or 10, true, wanted)
+		if not wanted() then return release() end
 		local head = char:WaitForChild('Head', 10) or humrootpart
+		if not wanted() then return release() end
 
 		if hum and humrootpart then
 			local entity = {
@@ -1594,12 +1617,8 @@ entitylib.addEntity = function(char, plr, teamfunc, spawntime)
 			end))]]
 		end
 
-		entitylib.EntityThreads[char] = nil
+		release()
 	end)
-
-	if coroutine.status(builder) ~= 'dead' then
-		entitylib.EntityThreads[char] = builder
-	end
 end
 
 entitylib.removeEntity = function(char, isLocal)
@@ -1628,13 +1647,16 @@ entitylib.removeEntity = function(char, isLocal)
 	end
 
 	if char then
-		--[[ Cleared BEFORE the cancel, and only cancelled while suspended: everything
-		below this point -- the List removal and Events.EntityRemoved -- has to run even
-		if the entry is stale, or the entity outlives its character. ]]
+		--[[ Clearing the entry is all the library's own builder needs: it looks for its
+		token after every wait and stops once it is gone. An entry that is still a thread
+		comes from a game file's own addEntity, which has no such check and would finish
+		its build anyway, so that one is still cancelled -- cleared first, and only while
+		suspended, because everything below this point (the List removal and
+		Events.EntityRemoved) has to run even if the entry is stale. ]]
 		local builder = entitylib.EntityThreads[char]
 		if builder then
 			entitylib.EntityThreads[char] = nil
-			if coroutine.status(builder) == 'suspended' then
+			if type(builder) == 'thread' and coroutine.status(builder) == 'suspended' then
 				pcall(task.cancel, builder)
 			end
 		end
@@ -1709,6 +1731,14 @@ entitylib.removePlayer = function(plr)
 		entitylib.PlayerConnections[plr] = nil
 	end
 
+	-- A build still waiting on this player's character is keyed by the character, which the
+	-- lookup by Player below never finds. Taking its token stops it after its current wait.
+	local char = plr.Character
+	local builder = char and entitylib.EntityThreads[char]
+	if builder and type(builder) ~= 'thread' then
+		entitylib.EntityThreads[char] = nil
+	end
+
 	entitylib.removeEntity(plr)
 end
 
@@ -1756,8 +1786,9 @@ entitylib.stop = function()
 		entitylib.removeEntity(entity.Character)
 	end
 
+	-- Tokens need nothing here: clearing the table below is what stops those builders.
 	for _, thread in entitylib.EntityThreads do
-		if coroutine.status(thread) == 'suspended' then
+		if type(thread) == 'thread' and coroutine.status(thread) == 'suspended' then
 			pcall(task.cancel, thread)
 		end
 	end

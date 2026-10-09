@@ -484,6 +484,8 @@ end
 and over -- a module name every redraw of the overlay -- so answers are kept by face, size and
 text. An Enum font is converted rather than ignored; nothing given means the menu's own face. ]]
 local measureCache, measureCount = {}, 0
+-- The generation before: a hit here moves back into the current one, so hot strings survive the turnover.
+local measureOld = {}
 local function getfontbounds(text, size, font)
 	if typeof(font) == 'EnumItem' then
 		local ok, converted = pcall(Font.fromEnum, font)
@@ -495,6 +497,11 @@ local function getfontbounds(text, size, font)
 	local key = tostring(font.Family)..'|'..tostring(font.Weight)..'|'..tostring(size)..'|'..tostring(text)
 	local cached = measureCache[key]
 	if cached then return cached end
+	cached = measureOld[key]
+	if cached then
+		measureCache[key] = cached
+		return cached
+	end
 
 	fontsize.Text = text
 	fontsize.Size = size
@@ -502,7 +509,8 @@ local function getfontbounds(text, size, font)
 	local bounds = textService:GetTextBoundsAsync(fontsize)
 	measureCount += 1
 	if measureCount > 4000 then
-		table.clear(measureCache)
+		measureOld = measureCache
+		measureCache = {}
 		measureCount = 0
 	end
 	measureCache[key] = bounds
@@ -698,7 +706,12 @@ do
 			existing:Cancel()
 		end
 
-		if obj.Parent and (obj:IsA('UIStroke') or obj.Visible) then
+		--[[ Inside the menu while it is shut -- a module switched by its key, a profile applying --
+		nobody can see the animation, so the end state is set at once, as it already was for an
+		object that is itself hidden. The menu opens by appearing, never by animating in, so what
+		it shows when it opens is the same. ]]
+		if obj.Parent and (obj:IsA('UIStroke') or obj.Visible)
+			and not (clickgui and not clickgui.Visible and obj:IsDescendantOf(clickgui)) then
 			local playing = tweenService:Create(obj, info, goal)
 			registry[obj] = playing
 			playing.Completed:Once(function()
@@ -1101,6 +1114,7 @@ function fonts.settle(changed)
 		if not (vape.gui and vape.gui.Parent) then return end
 		if changed then
 			table.clear(measureCache)
+			table.clear(measureOld)
 			measureCount = 0
 		end
 		local resize = {}
@@ -2214,7 +2228,7 @@ local function addDragHandler(gui, window)
 			end)
 
 			releaseConnection = input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
+				if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then
 					moveConnection:Disconnect()
 					releaseConnection:Disconnect()
 					vape:RequestSave()
@@ -2645,7 +2659,21 @@ function ui.showingNotifications()
 end
 
 -- Moves every notification still showing to its place, after one arrives or leaves or the corner changes.
+--[[ Asked for by every arrival and departure, and by the Position option: run once at the end of
+the frame however many asked, so a burst moves each pill once instead of once per pill. ]]
 function ui.restackNotifications()
+	if ui.restackQueued then return end
+	ui.restackQueued = true
+	task.defer(function()
+		ui.restackQueued = false
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		pcall(ui.restackNow)
+	end)
+end
+
+function ui.restackNow()
 	local before = 0
 	for index, notif in ui.showingNotifications() do
 		local anchor, position = ui.notificationPlace(index, false, before)
@@ -3088,10 +3116,13 @@ function vape:LoadLate()
 end
 
 function vape:LoadOptions(obj, data)
+	-- Every option saves a table; anything else in a hand-edited or older file is passed over,
+	-- rather than throwing and stopping the whole profile part way through.
+	if type(data) ~= 'table' or type(obj.Options) ~= 'table' then return end
 	for name, componentData in data do
 		local component = obj.Options[name]
 
-		if component then
+		if component and type(componentData) == 'table' then
 			component:Load(componentData)
 		end
 	end
@@ -4986,10 +5017,14 @@ function build.settings()
 		whatever came later.
 	]]
 	vape.Categories.Main.Options = setmetatable({}, {
-		__index = function(_, key)
+		__index = function(self, key)
 			for _, pane in vape.Settings do
 				local ok, options = pcall(function() return pane.Options end)
 				if ok and type(options) == 'table' and options[key] ~= nil then
+					--[[ Kept once found: these are read on entity and render paths, every frame, and
+					each read walked every pane. An option never moves once made, and only keys that
+					exist are kept, so one added by a later pane is still found. ]]
+					rawset(self, key, options[key])
 					return options[key]
 				end
 			end
@@ -5598,6 +5633,9 @@ function build.modOverlay()
 	local PaddingX
 	local PaddingY
 	local Rounding
+	local PositionX
+	local PositionY
+	local placeList
 	local Shadow
 	local Gradient
 	local GradientV4
@@ -5626,6 +5664,12 @@ function build.modOverlay()
 	local function refresh()
 		if vape.UpdateTextGUI then
 			vape:UpdateTextGUI()
+		end
+	end
+	-- The part of vape:UpdateGUI these colours affect, with its gates: the overlay's own colours.
+	local function recolorTextGUI()
+		if vape.Loaded ~= nil and not vape.GUIColor.Rainbow and TextGUI and TextGUI.Button.Enabled and TextGUI.UpdateColor then
+			TextGUI:UpdateColor(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value)
 		end
 	end
 
@@ -5669,7 +5713,7 @@ function build.modOverlay()
 		Name = 'Padding X',
 		Min = 0,
 		Max = 8,
-		Default = 5,
+		Default = 6,
 		Function = refresh
 	})
 	PaddingY = TextGUI:CreateSlider({
@@ -5688,6 +5732,32 @@ function build.modOverlay()
 		Function = refresh,
 		Tooltip = '0 turns the rounding off'
 	})
+	--[[ Where the list sits, in screen pixels: in from the right edge, and down from the top. Both
+	start at 0, flush in the corner, where the logo watermark has the top of the screen to itself and
+	the list follows straight under it. ]]
+	local function movedList()
+		if placeList then
+			placeList()
+		end
+	end
+	PositionX = TextGUI:CreateSlider({
+		Name = 'Position X',
+		Min = 0,
+		Max = 1000,
+		Default = 0,
+		Suffix = 'px',
+		Function = movedList,
+		Tooltip = 'How far in from the right edge of the screen the list sits'
+	})
+	PositionY = TextGUI:CreateSlider({
+		Name = 'Position Y',
+		Min = 0,
+		Max = 1000,
+		Default = 0,
+		Suffix = 'px',
+		Function = movedList,
+		Tooltip = 'How far down from the top of the screen the list sits'
+	})
 	-- The text colour, starting on the accent. Changing it by hand switches the list from following
 	-- the accent to this colour; a profile loading its saved value does not.
 	ColorSlider = TextGUI:CreateColorSlider({
@@ -5700,7 +5770,7 @@ function build.modOverlay()
 			if vape.Loaded and ColorMode and ColorMode.Value ~= 'Custom color' then
 				ColorMode:SetValue('Custom color')
 			end
-			vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value)
+			recolorTextGUI()
 		end
 	})
 	DetailsColor = TextGUI:CreateColorSlider({
@@ -5866,7 +5936,7 @@ function build.modOverlay()
 		Name = 'Set custom text color',
 		Function = function(enabled)
 			CustomTextColorSlider.Object.Visible = enabled
-			vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value)
+			recolorTextGUI()
 		end,
 		Darker = true,
 		Visible = false
@@ -5874,7 +5944,7 @@ function build.modOverlay()
 	CustomTextColorSlider = TextGUI:CreateColorSlider({
 		Name = 'Color of custom text',
 		Function = function()
-			vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value)
+			recolorTextGUI()
 		end,
 		Darker = true,
 		Visible = false
@@ -5890,16 +5960,22 @@ function build.modOverlay()
 		local option = TextGUI.Options.Scale
 		Scale.Scale = (option and option.Value or 0.8) * ui.hudZoom()
 	end
-	--[[ The list's corner: under Roblox's top bar instead of inside it, and on a phone clear of the >_
-	button too, which sits in that bar, with a little room from the screen's rounded edge. ]]
-	local function placeList()
+	--[[ The list's corner: Position X in from the right edge of the screen and Position Y down from its
+	top. A phone's corner belongs to the screen's rounded edge, Roblox's top bar and the >_ button in
+	it, so there the list keeps a little room from the edge and stays under both. ]]
+	function placeList()
 		local s = math.max(scale.Scale, 0.05)
-		local top = ui.insetUnits() + 4 / s
-		local button = vape.VapeButton
-		if button and button.Parent then
-			top = math.max(top, (button.AbsolutePosition.Y + button.AbsoluteSize.Y + 4) / s)
+		local x = PositionX and PositionX.Value or 0
+		local top = (PositionY and PositionY.Value or 0) / s
+		if isMobile() then
+			x += 8
+			top = math.max(top, ui.insetUnits() + 4 / s)
+			local button = vape.VapeButton
+			if button and button.Parent then
+				top = math.max(top, (button.AbsolutePosition.Y + button.AbsoluteSize.Y + 4) / s)
+			end
 		end
-		TextGUI.Object.Position = UDim2.new(1, isMobile() and -math.floor(8 / s) or 0, 0, math.floor(top))
+		TextGUI.Object.Position = UDim2.new(1, -math.floor(x / s), 0, math.floor(top))
 	end
 	applyTextSize()
 	placeList()
@@ -5923,6 +5999,17 @@ function build.modOverlay()
 	local LogoGradient = Instance.new('UIGradient')
 	LogoGradient.Rotation = 90
 	LogoGradient.Parent = Logo
+	--[[ A black outline round the name, so it reads over a bright sky. Contextual, so it follows the
+	letters rather than the label's box; the gradient tints the letters only, never the stroke. ]]
+	local function outlineText(label)
+		local stroke = Instance.new('UIStroke')
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+		stroke.Color = Color3.new()
+		stroke.Thickness = 1.5
+		stroke.Parent = label
+		return stroke
+	end
+	outlineText(Logo)
 	local LogoShadow = ui.text(TextGUI.Children, {Text = 'Pistonware', Size = 24, Weight = 'Bold', Color = Color3.new(), Props = {
 		AutomaticSize = Enum.AutomaticSize.X,
 		Size = UDim2.fromOffset(0, 28),
@@ -5966,6 +6053,7 @@ function build.modOverlay()
 	}})
 	ascii.TextGradient = Instance.new('UIGradient')
 	ascii.TextGradient.Parent = ascii.Text
+	outlineText(ascii.Text)
 
 	local LabelCustom = Instance.new('TextLabel')
 	LabelCustom.BackgroundTransparency = 1
@@ -6036,7 +6124,62 @@ function build.modOverlay()
 	end
 
 	local textGUIGeneration = 0
+	--[[ The list's lines live as long as their module is listed: one line per module, kept and
+	updated in place. The list used to be destroyed and rebuilt on every redraw -- each toggle and
+	every Killaura hand change -- which made and destroyed up to nine instances a line and measured
+	every name again. A redraw now measures only text that changed, reshapes only the lines whose
+	own or neighbouring width changed, and adds or removes only the lines that come or go. The look,
+	the order and the slide in and out are the same. ]]
+	local Lines = {}
+	--[[ Redraws are requests. Any number in a frame cost one, run after the callers' code and never
+	on their thread: a toggle, Killaura's frame or a profile load no longer waits on a text
+	measurement, and a burst (a profile apply, a restart pair) draws once. `afterload` carries over. ]]
+	local textGUIQueued, textGUIAfterLoad = false, false
+	local rebuildTextGUI
 	function vape:UpdateTextGUI(afterload)
+		if afterload then
+			textGUIAfterLoad = true
+		end
+		if textGUIQueued then return end
+		textGUIQueued = true
+		task.defer(function()
+			textGUIQueued = false
+			local carried = textGUIAfterLoad
+			textGUIAfterLoad = false
+			if vape.Loaded == nil then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			pcall(rebuildTextGUI, carried)
+		end)
+	end
+
+	local function sameSize(a, b)
+		return a ~= nil and b ~= nil and a.X.Scale == b.X.Scale and a.X.Offset == b.X.Offset
+			and a.Y.Scale == b.Y.Scale and a.Y.Offset == b.Y.Offset
+	end
+
+	-- A line's background: the windows and fills shapePill (below) made for it.
+	local function clearShape(line)
+		for _, part in line.Parts do
+			part:Destroy()
+		end
+		table.clear(line.Parts)
+		table.clear(line.Fills)
+		line.LastTint = nil
+		line.ShapeKey = nil
+	end
+
+	local function removeLine(name)
+		local line = Lines[name]
+		if line then
+			tween:Cancel(line.Object)
+			line.Object:Destroy()
+			Lines[name] = nil
+		end
+	end
+
+	function rebuildTextGUI(afterload)
 		if not afterload and not vape.Loaded then return end
 		if TextGUI.Button.Enabled then
 			--[[ A measure below can yield, and a rebuild that starts meanwhile owns the list from then on:
@@ -6078,6 +6221,17 @@ function build.modOverlay()
 			The list starts under the watermark and the custom text. ]]
 			local px = math.max(scale.Scale, 0.05) * math.max(Scale.Scale, 0.05)
 			local listHeight = TextGUI.Children.Size.Y.Offset * px
+			--[[ Widths the same way: a share of the holder's width on screen (the overlay's width at
+			the menu's scale; the holder undoes the Text size), so each line's free end lands on a
+			whole pixel too. In units it fell part way through one, and the stair edge drew soft. ]]
+			local listWidth = TextGUI.Object.Size.X.Offset * math.max(scale.Scale, 0.05)
+			local function pixelWidth(units)
+				local pixels = math.max(math.floor(units * px + 0.5), 1)
+				if listWidth > 0 then
+					return UDim.new(pixels / listWidth, 0)
+				end
+				return UDim.new(0, units)
+			end
 			local function pixelHeight(units)
 				local pixels = math.max(math.floor(units * px + 0.5), 1)
 				if listHeight > 0 then
@@ -6091,18 +6245,11 @@ function build.modOverlay()
 			end
 			LabelHolder.Position = top > 0 and UDim2.new(UDim.new(0, 0), (pixelHeight(top))) or UDim2.new()
 
-			local Previous = {}
-			for _, label in Labels do
-				if label.Enabled then
-					table.insert(Previous, label.Object.Name)
-				end
-
-				label.Object:Destroy()
-			end
-			table.clear(Labels)
-
 			local padX, padY = PaddingX.Value, PaddingY.Value
 			local detailsHex = hexOf(Color3.fromHSV(DetailsColor.Hue, DetailsColor.Sat, DetailsColor.Value))
+			local fontFace = FontOption.Value
+			local listed = {}
+			table.clear(Labels)
 			for name, module in orderedModules(vape.ModuleOrder) do
 				if HideModules.Enabled then
 					local hidden = false
@@ -6132,7 +6279,11 @@ function build.modOverlay()
 					continue
 				end
 
-				if module.Enabled or table.find(Previous, name) then
+				local line = Lines[name]
+				-- On last time: kept, or slides out if it is off now. Off last time (or never listed)
+				-- and off now: not listed, and a line left from its slide out goes below.
+				local wasShown = line ~= nil and line.Enabled
+				if module.Enabled or wasShown then
 					--[[ ExtraText belongs to the game script, not to this file, and it is called
 					here for every enabled module on every redraw. A module whose state is not
 					ready yet would otherwise throw and abort the whole rebuild. ]]
@@ -6148,81 +6299,110 @@ function build.modOverlay()
 						shown = shown:lower()
 						extra = extra:lower()
 					end
+					local text = escape(shown)..(extra ~= '' and " <font color='"..detailsHex.."'>"..escape(extra)..'</font>' or '')
 
-					local holder = Instance.new('Frame')
-					holder.BackgroundTransparency = 1
-					holder.ClipsDescendants = true
-					holder.Name = name
-					holder.Size = UDim2.fromOffset()
-					holder.Parent = LabelHolder
+					if not line then
+						local holder = Instance.new('Frame')
+						holder.BackgroundTransparency = 1
+						holder.ClipsDescendants = true
+						holder.Name = name
+						holder.Size = UDim2.fromOffset()
+						holder.Parent = LabelHolder
 
-					-- The background is shaped once the list is sorted (shapePill, below): its corners depend on
-					-- the lines above and below. The text draws over it.
-					local label = Instance.new('TextLabel')
-					label.BackgroundTransparency = 1
-					label.BorderSizePixel = 0
-					label.FontFace = FontOption.Value
-					label.ZIndex = 2
-					label.RichText = true
-					label.Text = escape(shown)..(extra ~= '' and " <font color='"..detailsHex.."'>"..escape(extra)..'</font>' or '')
-					label.TextSize = 20
-					label.TextXAlignment = Enum.TextXAlignment.Left
-
-					local size = getfontbounds(contentText(label), label.TextSize, label.FontFace)
-					if textGUIGeneration ~= generation then
-						-- Not in Labels yet, so nothing else would remove it.
-						holder:Destroy()
-						return
-					end
-					label.Size = UDim2.fromOffset(size.X, size.Y)
-					--[[ A line is 1.2 em plus the padding: Slinky's list at 1080p puts its lines 23 px apart
-					for about 16 px text (Text size 0.8, Padding Y 2 here). The old 0.9 em packed them
-					tight enough that the letters met the pills' edges. The glyphs sit at 0.59 of the
-					label's height, so the label is placed to centre them in the box. ]]
-					local boxScale, boxHeight, boxPixels = pixelHeight(math.floor(label.TextSize * 1.2 + 0.5) + padY * 2)
-					local textY = math.floor(boxHeight / 2 - size.Y * 0.587 + 0.5)
-					label.Position = UDim2.fromOffset(padX, textY)
-
-					if Shadow.Enabled then
+						-- The background is shaped once the list is sorted (shapePill, below): its corners depend on
+						-- the lines above and below. The text draws over it, and over its shadow, which is
+						-- parented first so it draws underneath; it is hidden while Shadow is off.
+						local label = Instance.new('TextLabel')
+						label.BackgroundTransparency = 1
+						label.BorderSizePixel = 0
+						label.FontFace = fontFace
+						label.ZIndex = 2
+						label.RichText = true
+						label.TextSize = 20
+						label.TextXAlignment = Enum.TextXAlignment.Left
 						local shadowlabel = label:Clone()
-						shadowlabel.Position = UDim2.fromOffset(padX + 1, textY + 1)
-						shadowlabel.Text = contentText(label)
 						shadowlabel.TextColor3 = Color3.new()
 						shadowlabel.TextTransparency = 0.5
+						shadowlabel.Visible = false
 						shadowlabel.Parent = holder
+						label.Parent = holder
+						line = {Object = holder, Text = label, Shadow = shadowlabel, Fills = {}, Parts = {}, Enabled = false}
+						Lines[name] = line
+					end
+					listed[name] = true
+					local label, shadowlabel = line.Text, line.Shadow
+
+					-- Measured again only when the text or font changed. Recorded once measured, so a
+					-- rebuild that takes over during the measure measures it itself.
+					if line.Markup ~= text or line.Font ~= fontFace then
+						label.FontFace = fontFace
+						label.Text = text
+						local size = getfontbounds(contentText(label), label.TextSize, label.FontFace)
+						if textGUIGeneration ~= generation then return end
+						label.Size = UDim2.fromOffset(size.X, size.Y)
+						shadowlabel.FontFace = fontFace
+						shadowlabel.Text = contentText(label)
+						shadowlabel.Size = label.Size
+						line.Markup, line.Font, line.Measure = text, fontFace, size
+					end
+					local size = line.Measure
+
+					--[[ A line is 1 em plus the padding: Slinky's list at 1080p puts its lines 19 px apart
+					for 16 px text, which is Text size 0.8 with Padding Y 2 here. The glyphs sit at 0.59
+					of the label's height, so the label is placed to centre them in the box. ]]
+					local boxScale, boxHeight, boxPixels = pixelHeight(label.TextSize + padY * 2)
+					local textY = math.floor(boxHeight / 2 - size.Y * 0.587 + 0.5)
+					if line.PadX ~= padX or line.TextY ~= textY then
+						line.PadX, line.TextY = padX, textY
+						label.Position = UDim2.fromOffset(padX, textY)
+						shadowlabel.Position = UDim2.fromOffset(padX + 1, textY + 1)
+					end
+					if shadowlabel.Visible ~= Shadow.Enabled then
+						shadowlabel.Visible = Shadow.Enabled
 					end
 
-					label.Parent = holder
-
-					local tweenSize = UDim2.new(UDim.new(0, size.X + padX * 2), boxScale)
+					local holder = line.Object
+					local tweenSize = UDim2.new(pixelWidth(size.X + padX * 2), boxScale)
 					if Animations.Enabled then
-						if not table.find(Previous, name) then
+						if not wasShown then
+							-- Coming in (new, or back while still sliding out): from nothing, as a new line did.
+							tween:Cancel(holder)
+							holder.Size = UDim2.fromOffset()
 							tween:Tween(holder, info, {
 								Size = tweenSize
 							})
-						else
-							holder.Size = tweenSize
-							if not module.Enabled then
-								tween:Tween(holder, info, {
-									Size = UDim2.fromOffset()
-								})
+						elseif module.Enabled then
+							-- Staying: a new width applies at once; a slide in still running carries on.
+							if not sameSize(line.Target, tweenSize) then
+								tween:Cancel(holder)
+								holder.Size = tweenSize
 							end
+						else
+							-- Leaving: from where it is to nothing; it goes with the next redraw.
+							tween:Tween(holder, info, {
+								Size = UDim2.fromOffset()
+							})
 						end
 					else
+						tween:Cancel(holder)
 						holder.Size = module.Enabled and tweenSize or UDim2.fromOffset()
 					end
 
-					table.insert(Labels, {
-						Fills = {},
-						Enabled = module.Enabled,
-						Object = holder,
-						Text = label,
-						Width = size.X,
-						Height = boxHeight,
-						Pixels = boxPixels,
-						Display = shown,
-						Size = module.Enabled and tweenSize or UDim2.fromOffset()
-					})
+					line.Enabled = module.Enabled
+					line.Target = tweenSize
+					line.Width = size.X
+					line.Height = boxHeight
+					line.Pixels = boxPixels
+					line.Display = shown
+					line.Size = module.Enabled and tweenSize or UDim2.fromOffset()
+					table.insert(Labels, line)
+				end
+			end
+
+			-- Lines whose module left the list, or that finished sliding out, go now.
+			for name in Lines do
+				if not listed[name] then
+					removeLine(name)
 				end
 			end
 
@@ -6238,23 +6418,42 @@ function build.modOverlay()
 			end
 
 			for index, label in Labels do
-				label.Object.LayoutOrder = index
+				if label.Object.LayoutOrder ~= index then
+					label.Object.LayoutOrder = index
+				end
 			end
 
 			--[[ Rounded the way Slinky rounds its list: only the corners that stick out -- a line's top
 			corner when the line above is narrower or there is none, its bottom corner when the line
 			below is -- so where the stair steps in, the two lines meet square and the outline runs
-			smooth. Roblox rounds all four corners of a frame or none, so each background is two
+			smooth. A corner rounds no further than its step is wide: two names a few pixels apart
+			used to get the full radius, which curved in past the line under it and bit a notch out of
+			the stair. Roblox rounds all four corners of a frame or none, so each background is two
 			halves, each a clipped window onto a frame the height of the whole line that is rounded or
 			not; the split falls on a whole pixel, so the halves leave no seam. The side against the
-			screen edge is never rounded. Rounding is in Slinky's units, 1.6 pixels each. ]]
+			screen edge is never rounded. Rounding is in Slinky's units, 1.6 pixels each. A line is
+			reshaped only when something its shape is made from changed. ]]
 			local radius = math.floor(Rounding.Value * 1.6 + 0.5)
-			local function shapePill(label, roundTop, roundBottom)
+			local transparency = BackgroundTransparency.Value
+			local tinted = BackgroundTint.Enabled
+			-- How far a corner may round against the line beside it: all the way at the list's ends.
+			local function stepRadius(label, other)
+				if not other then return radius end
+				return math.clamp(math.floor(label.Width - other.Width), 0, radius)
+			end
+			local function shapePill(label, topRadius, bottomRadius)
 				local pixels = math.max(label.Pixels or 1, 1)
 				local split = pixels > 1 and math.floor(pixels / 2) / pixels or 1
-				local corner = math.min(radius, math.floor((label.Height or 0) / 2))
+				local most = math.floor((label.Height or 0) / 2)
+				-- The tint is in the key: a fill that was tinted goes back to the plain colour by being made again.
+				local key = table.concat({topRadius, bottomRadius, most, pixels, isRight and 1 or 0, transparency, tinted and 1 or 0}, ':')
+				if label.ShapeKey == key then return end
+				clearShape(label)
+				label.ShapeKey = key
 				for half = 1, split < 1 and 2 or 1 do
 					local share = half == 1 and split or 1 - split
+					-- One frame for the whole line takes the larger of the two.
+					local corner = math.min(split < 1 and (half == 1 and topRadius or bottomRadius) or math.max(topRadius, bottomRadius), most)
 					local window = Instance.new('Frame')
 					window.BackgroundTransparency = 1
 					window.BorderSizePixel = 0
@@ -6265,17 +6464,18 @@ function build.modOverlay()
 					window.Parent = label.Object
 					local fill = Instance.new('Frame')
 					fill.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
-					fill.BackgroundTransparency = BackgroundTransparency.Value
+					fill.BackgroundTransparency = transparency
 					fill.BorderSizePixel = 0
 					fill.Position = UDim2.new(0, isRight and 0 or -corner, half == 1 and 0 or 1 - 1 / share, 0)
 					fill.Size = UDim2.new(1, corner, 1 / share, 0)
 					fill.ZIndex = 1
 					fill.Parent = window
-					if corner > 0 and ((half == 1 and roundTop) or (half == 2 and roundBottom) or (split >= 1 and (roundTop or roundBottom))) then
+					if corner > 0 then
 						local round = Instance.new('UICorner')
 						round.CornerRadius = UDim.new(0, corner)
 						round.Parent = fill
 					end
+					table.insert(label.Parts, window)
 					table.insert(label.Fills, fill)
 				end
 			end
@@ -6286,28 +6486,44 @@ function build.modOverlay()
 						table.insert(showing, label)
 					else
 						-- On its way out; it closes to nothing either way.
-						shapePill(label, true, true)
+						shapePill(label, radius, radius)
 					end
 				end
 				for index, label in showing do
 					local above, below = showing[index - 1], showing[index + 1]
-					shapePill(label, not above or above.Width < label.Width, not below or below.Width < label.Width)
+					shapePill(label, stepRadius(label, above), stepRadius(label, below))
+				end
+			else
+				for _, label in Labels do
+					if label.ShapeKey then
+						clearShape(label)
+					end
 				end
 			end
 		end
 
-		self:UpdateGUI(self.GUIColor.Hue, self.GUIColor.Sat, self.GUIColor.Value, true)
+		--[[ A profile load recolours the whole menu, as it always has. Any other redraw changes only
+		the list, so only the list is recoloured -- with UpdateGUI's own gates. Recolouring the menu
+		too, on every toggle and every Killaura hand change, repainted every card in it. ]]
+		if afterload then
+			vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
+		elseif vape.Loaded ~= nil and TextGUI.Button.Enabled then
+			TextGUI:UpdateColor(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
+		end
 	end
 
 	function TextGUI:UpdateColor(hue, sat, val, default)
 		local base = Color3.fromHSV(hue, sat, val)
 		local v4 = Gradient.Enabled and GradientV4.Enabled
 		local fade = Gradient.Enabled and Color3.fromHSV(vape:Color((hue - (v4 and 0.15 or 0.075)) % 1)) or base
-		LogoGradient.Rotation = v4 and 0 or 90
-		LogoGradient.Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, base),
-			ColorSequenceKeypoint.new(1, fade)
-		})
+		-- The logo gradients only while a watermark shows; turning one on redraws, which lands here.
+		if Logo.Visible or ascii.Frame.Visible then
+			LogoGradient.Rotation = v4 and 0 or 90
+			LogoGradient.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, base),
+				ColorSequenceKeypoint.new(1, fade)
+			})
+		end
 		--[[ The piston keeps its own colours unless Gradient is on: then it is tinted from the GUI
 		colour to the fade, down the face, or across it with V4 Gradient. ]]
 		if ascii.Frame.Visible then
@@ -6319,7 +6535,9 @@ function build.modOverlay()
 			ascii.TextGradient.Rotation = LogoGradient.Rotation
 			ascii.TextGradient.Color = LogoGradient.Color
 		end
-		LabelCustom.TextColor3 = CustomTextColor.Enabled and Color3.fromHSV(CustomTextColorSlider.Hue, CustomTextColorSlider.Sat, CustomTextColorSlider.Value) or base
+		if LabelCustom.Visible then
+			LabelCustom.TextColor3 = CustomTextColor.Enabled and Color3.fromHSV(CustomTextColorSlider.Hue, CustomTextColorSlider.Sat, CustomTextColorSlider.Value) or base
+		end
 
 		local isCustom = ColorMode.Value == 'Custom color' and Color3.fromHSV(ColorSlider.Hue, ColorSlider.Sat, ColorSlider.Value) or nil
 		for index, label in Labels do
@@ -6333,11 +6551,19 @@ function build.modOverlay()
 					textColor = base
 				end
 			end
-			label.Text.TextColor3 = textColor
+			-- Written only when it changed: a redraw that moved nothing recolours nothing.
+			if label.LastColor ~= textColor then
+				label.LastColor = textColor
+				label.Text.TextColor3 = textColor
+			end
 
 			if BackgroundTint.Enabled then
-				for _, fill in label.Fills or {} do
-					fill.BackgroundColor3 = color.Dark(textColor, 0.75)
+				local tint = color.Dark(textColor, 0.75)
+				if label.LastTint ~= tint then
+					label.LastTint = tint
+					for _, fill in label.Fills or {} do
+						fill.BackgroundColor3 = tint
+					end
 				end
 			end
 		end
@@ -6383,6 +6609,22 @@ function build.targetInfo()
 	local localPlayer = cloneref(game:GetService('Players')).LocalPlayer
 	-- backgroundOn: the card is drawn. carded: it is solid enough for the card's quiet styling.
 	local backgroundOn, carded = true, true
+
+	--[[ The game scripts record every hit here whether or not the card is on, and only Update (which
+	runs while it is) let expired ones go: with it off they piled up for the whole session. ]]
+	vape:Clean(task.spawn(function()
+		repeat
+			task.wait(2)
+			if not (TargetInfoOverlay and TargetInfoOverlay.Button and TargetInfoOverlay.Button.Enabled) then
+				local now = tick()
+				for target, expire in targetinfo.Targets do
+					if type(expire) ~= 'number' or expire < now then
+						targetinfo.Targets[target] = nil
+					end
+				end
+			end
+		until false
+	end))
 
 	TargetInfoOverlay = vape:CreateOverlay({
 		Name = 'Target Info',
@@ -6877,11 +7119,24 @@ function build.loops()
 				continue
 			end
 
+			--[[ One at a time, each protected: a slider that throws (or one whose module was
+			removed, which leaves no SetValue) used to end this thread, and every rainbow colour
+			froze for the rest of the session. A slider with nothing left to call is dropped after
+			the pass, since dropping one moves another into its place. ]]
+			local stale
 			for _, component in vape.RainbowSliders do
-				if component.Type == 'GUISlider' then
-					component:SetValue(vape:Color(hue))
+				if type(component.SetValue) ~= 'function' then
+					stale = stale or {}
+					table.insert(stale, component)
+				elseif component.Type == 'GUISlider' then
+					pcall(component.SetValue, component, vape:Color(hue))
 				else
-					component:SetValue(hue)
+					pcall(component.SetValue, component, hue)
+				end
+			end
+			if stale then
+				for _, component in stale do
+					removeRainbowSlider(component)
 				end
 			end
 
@@ -6904,7 +7159,15 @@ function build.loops()
 			end
 		end
 
-		vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
+		--[[ Opening the menu repaints it only if a colour pass was skipped while it was shut, or
+		something was added to it since the last one: otherwise every card already shows these
+		colours, and the pass walked every option of every module for nothing. Closing it touches
+		only the overlay, which was all that call ever reached with the menu shut. ]]
+		if clickgui.Visible and (not layout or layout.ColorDirty ~= false) then
+			vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
+		elseif vape.Loaded ~= nil and TextGUI and TextGUI.Button and TextGUI.Button.Enabled then
+			TextGUI:UpdateColor(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
+		end
 
 		if clickgui.Visible and inputService.MouseEnabled then
 			if cursorConnection then
@@ -6956,14 +7219,41 @@ function build.loops()
 		ui.clampAllHud()
 	end
 
-	if gameCamera then
-		vape:Clean(gameCamera:GetPropertyChangedSignal('ViewportSize'):Connect(applyAutoScale))
+	--[[ A resize changes the camera's ViewportSize and the ScreenGui's AbsoluteSize together, and
+	each ran the whole rescale: now they ask for one, run once at the end of the frame. A new
+	camera is watched in place of the old one, whose size never changes again. ]]
+	local autoScaleQueued, viewportConnection = false, nil
+	local function queueAutoScale()
+		if autoScaleQueued then return end
+		autoScaleQueued = true
+		task.defer(function()
+			autoScaleQueued = false
+			if vape.Loaded == nil then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			applyAutoScale()
+		end)
 	end
+	local function watchCamera()
+		if viewportConnection then
+			viewportConnection:Disconnect()
+		end
+		viewportConnection = gameCamera and gameCamera:GetPropertyChangedSignal('ViewportSize'):Connect(queueAutoScale) or nil
+	end
+	watchCamera()
+	vape:Clean(function()
+		if viewportConnection then
+			viewportConnection:Disconnect()
+			viewportConnection = nil
+		end
+	end)
 	vape:Clean(workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(function()
 		gameCamera = workspace.CurrentCamera
+		watchCamera()
 		applyAutoScale()
 	end))
-	vape:Clean(gui:GetPropertyChangedSignal('AbsoluteSize'):Connect(applyAutoScale))
+	vape:Clean(gui:GetPropertyChangedSignal('AbsoluteSize'):Connect(queueAutoScale))
 
 	vape:Clean(notifications.ChildRemoved:Connect(function()
 		ui.restackNotifications()
@@ -7103,6 +7393,22 @@ function vape:Remove(obj)
 		local isModule = component.Type == 'Module'
 		if self.ThreadFix then
 			setthreadidentity(8)
+		end
+
+		--[[ Switched off first, quietly, as a toggle would: that runs the module's own shutdown and
+		disconnects what it connected. Wiping the table below only forgot those connections, and
+		they went on firing for the rest of the session. Its rainbow colours stop with it. ]]
+		if component.Enabled and type(component.Toggle) == 'function' then
+			if isModule then
+				pcall(component.Toggle, component, nil, true)
+			elseif component.Type == 'LegitModule' then
+				pcall(component.Toggle, component)
+			end
+		end
+		if type(component.Options) == 'table' then
+			for _, option in component.Options do
+				removeRainbowSlider(option)
+			end
 		end
 
 		if component.Destroy then
@@ -7450,7 +7756,13 @@ function vape:UpdateGUI(hue, sat, val, default)
 		TextGUI:UpdateColor(hue, sat, val, default)
 	end
 
-	if not clickgui or not clickgui.Visible then return end
+	if not clickgui or not clickgui.Visible then
+		-- Painted when the menu next opens instead (its Visible handler, in build.loops).
+		if layout then
+			layout.ColorDirty = true
+		end
+		return
+	end
 	local isRainbow = vape.GUIColor.Rainbow and vape.RainbowMode ~= nil and vape.RainbowMode.Value ~= 'Retro'
 
 	if vape.RecolorProfileCards then
@@ -7461,11 +7773,12 @@ function vape:UpdateGUI(hue, sat, val, default)
 		component:Color(hue, sat, val, isRainbow)
 	end
 
-	-- Every bind badge, wherever it sits: module cards, settings rows, profile cards.
+	-- Every bind badge, wherever it sits: module cards, settings rows, profile cards. Only a bound
+	-- one is drawn in the accent; NONE and PRESS A KEY... are the same in every theme.
 	if layout and layout.Binds then
 		for bind in layout.Binds do
 			-- a removed module's bind can be emptied before the weak key lets go
-			if bind.Repaint then
+			if bind.Repaint and (bind.Binding or (bind.Keys and #bind.Keys > 0)) then
 				bind:Repaint()
 			end
 		end
@@ -7496,6 +7809,10 @@ function vape:UpdateGUI(hue, sat, val, default)
 			component:Color(hue, sat, val, isRainbow)
 		end
 	end
+
+	if layout then
+		layout.ColorDirty = false
+	end
 end
 
 --[[ Every container (category, module, legit module, overlay, window) binds the whole
@@ -7510,6 +7827,9 @@ local function bindComponents(component, children)
 
 	for index, comp in components do
 		component['Create'..index] = function(_, props)
+			if layout then
+				layout.ColorDirty = true
+			end
 			return comp(props, children, component)
 		end
 	end
@@ -7534,6 +7854,8 @@ local TAB_OF_CATEGORY = {
 	Utility = 'Utility', Inventory = 'Utility', Minigames = 'Kits', Legit = 'Visual', Overlay = 'Visual'
 }
 layout = {
+	-- Set when a colour pass was skipped with the menu shut or something was added; see build.loops.
+	ColorDirty = true,
 	Entries = {},
 	Pages = {},
 	Dirty = {},
@@ -7689,7 +8011,7 @@ local function trackDrag(input, track, onMove, onEnd)
 		end
 	end)
 	releaseConnection = input.Changed:Connect(function()
-		if input.UserInputState == Enum.UserInputState.End then
+		if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then
 			moveConnection:Disconnect()
 			releaseConnection:Disconnect()
 			if onEnd then onEnd(last) end
@@ -8611,6 +8933,11 @@ components.CategoryList = function(props, children, api)
 				ring.Visible = true
 				rightStroke.Color, leftStroke.Color = theme.Accent(), theme.Accent()
 				stepper = runService.RenderStepped:Connect(function(dt)
+					-- The list rebuilt its rows mid-hold: this card is gone, and so is its profile's row.
+					if not loadButton.Parent then
+						stop()
+						return
+					end
 					progress = math.clamp(progress + (holding and dt or -dt * 2) / HOLD_TIME, 0, 1)
 					paint(progress)
 					if progress >= 1 then
@@ -10158,7 +10485,7 @@ components.GUI = function(props, children, api)
 	function component:Color(hue, sat, val, isRainbow) end
 
 	function component:Load(data)
-		for name, paneData in data.Settings do
+		for name, paneData in type(data.Settings) == 'table' and data.Settings or {} do
 			local pane = vape.Settings[name]
 			if pane then
 				pane:Load(paneData)
@@ -10760,6 +11087,9 @@ components.LegitWindow = function(props, children, api)
 	bindComponents(component, window)
 
 	function component:CreateModule(props)
+		if layout then
+			layout.ColorDirty = true
+		end
 		return components.LegitModule(props, window, component)
 	end
 
@@ -10822,9 +11152,6 @@ components.Module = function(props, children, api)
 		if self.Enabled then
 			view.Switch:Color(accentFor(self.Index, 0.025, hue, sat, val, isRainbow))
 		end
-		if self.Bind and #self.Bind.Keys > 0 then
-			self.Bind:Repaint()
-		end
 
 		for _, option in self.Options do
 			if option.Color then
@@ -10877,23 +11204,26 @@ components.Module = function(props, children, api)
 		end
 	end
 
-	function component:Toggle(multiple, quiet)
+	function component:Toggle(multiple, quiet, fromBind)
 		if vape.ThreadFix then
 			setthreadidentity(8)
 		end
 
 		self.Enabled = not self.Enabled
+		-- Read once: the module's function gets the state this toggle set, even if another
+		-- toggle lands before it starts.
+		local enabled = self.Enabled
 		view.Switch:Set(self.Enabled, liveAccent(self.Index, 0.025))
 		-- A placed on-screen button shows the state whatever switched the module: its card, a key, another module.
 		if self.Bind and self.Bind.Mobile then
 			self.Bind.Mobile.BackgroundColor3 = self.Enabled and theme.Accent() or theme.Bar
 		end
 
-		--[[ 'Enabled Reach' / 'Disabled Reach' whichever way a module is switched -- its card, its
-		key, or a module turning another off -- as Slinky shows it. Not while a profile is loading
-		(that reports itself once, with how many it enabled), nor while unloading, nor when a module
-		switches one quietly on its own behalf (Clutch borrowing SafeWalk, NoFall resetting on spawn). ]]
-		if not quiet and vape.Loaded and not vape.Applying and vape.ToggleNotifications and vape.ToggleNotifications.Enabled then
+		--[[ 'Enabled Reach' / 'Disabled Reach' when a module is switched by its own key (or its on-screen
+		button on a phone), as the old GUI did. Every other way a module changes -- its card, another
+		module, a restart after a setting changed -- stays quiet: those alerts built and restacked a
+		notification on every programmatic toggle. Never while a profile is loading or unloading. ]]
+		if fromBind and not quiet and vape.Loaded and not vape.Applying and vape.ToggleNotifications and vape.ToggleNotifications.Enabled then
 			vape:CreateNotification('Pistonware', (self.Enabled and 'Enabled ' or 'Disabled ')..(self.DisplayName or props.Name), 2)
 		end
 
@@ -10904,24 +11234,15 @@ components.Module = function(props, children, api)
 			table.clear(self.Connections)
 		end
 
-		if multiple then
-			if not vape.TextGUIThread then
-				vape.TextGUIThread = task.defer(function()
-					if vape.Loaded ~= nil then
-						vape:UpdateTextGUI()
-					end
-
-					vape.TextGUIThread = nil
-				end)
-			end
-		else
+		-- A request: the list redraws once at the end of the frame, however many modules changed.
+		if vape.Loaded ~= nil then
 			vape:UpdateTextGUI()
 		end
 
 		vape:RequestSave()
 		-- Deferred while applying, for the reason set out at the other module toggle: with
 		-- task.spawn the module's setup runs inline inside the apply loop.
-		if vape.Applying and self.Enabled then
+		if vape.Applying and enabled then
 			-- Only the newest queued start runs, and only if the module is still on when it does.
 			local token = {}
 			self.StartToken = token
@@ -10932,7 +11253,7 @@ components.Module = function(props, children, api)
 			end)
 		else
 			self.StartToken = nil
-			task.spawn(props.Function, self.Enabled)
+			task.spawn(props.Function, enabled)
 		end
 	end
 
@@ -10964,14 +11285,14 @@ components.Module = function(props, children, api)
 		Cover = true
 	})
 
-	-- The notification comes from Toggle itself, for every way a module is switched.
+	-- The module's own key (or its on-screen button): the one toggle that reports itself.
 	bind.Triggered:Connect(function(isDown)
 		if bind.Hold then
 			if component.Enabled ~= isDown then
-				component:Toggle(true)
+				component:Toggle(true, nil, true)
 			end
 		else
-			component:Toggle(true)
+			component:Toggle(true, nil, true)
 		end
 	end)
 
@@ -11080,7 +11401,7 @@ function ui.dragBy(handle, target, enabled)
 			end
 		end)
 		releaseConnection = input.Changed:Connect(function()
-			if input.UserInputState == Enum.UserInputState.End then
+			if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then
 				moveConnection:Disconnect()
 				releaseConnection:Disconnect()
 				-- Where it was dropped is saved; nothing else asks for a save after a drag.
@@ -11831,6 +12152,8 @@ components.TextBox = function(props, children, api)
 	end)
 
 	inputbox:GetPropertyChangedSignal('Text'):Connect(function()
+		-- SetValue writes the text this listens to; that echo carries nothing new.
+		if inputbox.Text == component.Value then return end
 		component:SetValue(inputbox.Text)
 	end)
 
@@ -12103,6 +12426,7 @@ components.Toggle = function(props, children, api)
 end
 
 components.TwoSlider = function(props, children, api)
+	local knobTween = TweenInfo.new(0.1)
 	local component = {
 		Index = getTableSize(api.Options),
 		Max = props.Max,
@@ -12250,12 +12574,12 @@ components.TwoSlider = function(props, children, api)
 		minvalue.Text = tostring(self.ValueMin)
 
 		local low, high = sliderFraction(self.ValueMin), sliderFraction(self.ValueMax)
-		tween:Tween(fill, TweenInfo.new(0.1), {
+		tween:Tween(fill, knobTween, {
 			Position = UDim2.fromScale(math.min(low, high), 0),
 			Size = UDim2.fromScale(math.abs(high - low), 1)
 		})
-		tween:Tween(knob, TweenInfo.new(0.1), {Position = UDim2.fromScale(low, 0.5)})
-		tween:Tween(knobmax, TweenInfo.new(0.1), {Position = UDim2.fromScale(high, 0.5)})
+		tween:Tween(knob, knobTween, {Position = UDim2.fromScale(low, 0.5)})
+		tween:Tween(knobmax, knobTween, {Position = UDim2.fromScale(high, 0.5)})
 		bubbleMin:SetText(tostring(self.ValueMin))
 		bubbleMax:SetText(tostring(self.ValueMax))
 
@@ -12278,7 +12602,11 @@ components.TwoSlider = function(props, children, api)
 		dragging = true
 		showBubbles()
 		trackDrag(input, holder, function(position)
-			component:SetValue(maxCheck, math.floor((props.Min + (props.Max - props.Min) * position) * props.Decimal) / props.Decimal)
+			local value = math.floor((props.Min + (props.Max - props.Min) * position) * props.Decimal) / props.Decimal
+			-- Every pointer move lands here; one that leaves the value on the same step changes nothing.
+			if value ~= component[maxCheck and 'ValueMax' or 'ValueMin'] then
+				component:SetValue(maxCheck, value)
+			end
 		end, function()
 			dragging = false
 			showBubbles()
@@ -12349,6 +12677,9 @@ vape.Components = setmetatable(components, {
 		indexed nil or drew itself into the wrong place. ]]
 		for component, children in componentChildren do
 			rawset(component, 'Create'..index, function(_, props)
+				if layout then
+					layout.ColorDirty = true
+				end
 				return callback(props, children, component)
 			end)
 		end

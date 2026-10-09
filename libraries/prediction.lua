@@ -284,6 +284,13 @@ end
 
 local LAND_LIFT = 0.1      -- probe from just above the feet, so a target standing on a floor finds it
 local LAND_SEGMENTS = 40
+local LAND_LIFT_OFFSET = Vector3.new(0, LAND_LIFT, 0)
+
+-- Where a root starting at `pos` with `vel` is after falling `tt` seconds under `grav`. A plain
+-- function rather than a closure made inside findLanding, which AimAssist calls every frame.
+local function fallingAt(pos, vel, grav, tt)
+	return pos + vel * tt - Vector3.new(0, 0.5 * grav * tt * tt, 0)
+end
 
 --[[ When the falling target's feet (`height` below the root) first meet a floor, within
 `tEnd` seconds. The arc is walked in short chords rather than one straight ray from the root:
@@ -297,21 +304,17 @@ local function findLanding(pos, vel, grav, height, params, tEnd)
 
 	local step = math.max(0.05, (tEnd - t) / LAND_SEGMENTS)
 	local feet = Vector3.new(0, height, 0)
-	local lift = Vector3.new(0, LAND_LIFT, 0)
-	local function at(tt)
-		return pos + vel * tt - Vector3.new(0, 0.5 * grav * tt * tt, 0)
-	end
 
 	while t < tEnd do
 		local t2 = math.min(t + step, tEnd)
-		local a = at(t) - feet + lift
-		local hit = castPastCharacters(a, at(t2) - feet - a, params)
+		local a = fallingAt(pos, vel, grav, t) - feet + LAND_LIFT_OFFSET
+		local hit = castPastCharacters(a, fallingAt(pos, vel, grav, t2) - feet - a, params)
 		if hit and hit.Normal.Y > 0.5 then
 			-- The exact moment the feet reach that surface on the way down.
 			local disc = vel.Y * vel.Y - 2 * grav * (hit.Position.Y - (pos.Y - height))
 			local tl = disc >= 0 and (vel.Y + math.sqrt(disc)) / grav or t
 			tl = math.clamp(tl, t, t2)
-			local landed = at(tl)
+			local landed = fallingAt(pos, vel, grav, tl)
 			return tl, Vector3.new(landed.X, hit.Position.Y + height, landed.Z)
 		end
 		t = t2

@@ -318,6 +318,27 @@ local function getTableSize(tab)
 	return ind
 end
 
+--[[ Setting FilterDescendantsInstances copies the whole list into the engine. The filters rebuilt
+every physics step (the camera and every character in the server) are almost always the list the
+step before set, so a list is only handed over when an entry differs from the last one set on
+those params. ]]
+local appliedFilters = setmetatable({}, {__mode = 'k'})
+local function setFilter(params, list)
+	local last = appliedFilters[params]
+	if last and #last == #list then
+		local same = true
+		for i = 1, #list do
+			if last[i] ~= list[i] then
+				same = false
+				break
+			end
+		end
+		if same then return end
+	end
+	params.FilterDescendantsInstances = list
+	appliedFilters[params] = list
+end
+
 local function ensureSessionInfo()
 	local current = vape.Libraries.sessioninfo
 	if type(current) == 'table' and type(current.Objects) == 'table' and type(current.AddItem) == 'function' then
@@ -1476,6 +1497,9 @@ run(function()
 	local defaultIgnoredScripts = {'ControlScript', 'ControlModule'}
 	local fireoffset, rand, delayCheck = CFrame.identity, Random.new(), tick()
 	local oldnamecall, oldray
+	-- Bumped on every switch, so the loop left over from a Method restart or a quick off and on
+	-- stops at its next check instead of auto firing beside the new one.
+	local generation = 0
 
 	local function getTarget(origin, obj)
 		if rand.NextNumber(rand, 0, 100) > (AutoFire.Enabled and 100 or HitChance.GetRandomValue()) then return end
@@ -1551,6 +1575,7 @@ run(function()
 	SilentAim = vape.Categories.Combat:CreateModule({
 		Name = 'SilentAim',
 		Function = function(callback)
+			generation += 1
 			if CircleObject then
 				CircleObject.Visible = callback and Mode.Value == 'Mouse'
 			end
@@ -1599,6 +1624,7 @@ run(function()
 					end)
 				end
 
+				local gen = generation
 				repeat
 					if CircleObject then
 						CircleObject.Position = inputService:GetMouseLocation()
@@ -1638,7 +1664,7 @@ run(function()
 					end
 
 					task.wait()
-				until not SilentAim.Enabled
+				until not SilentAim.Enabled or generation ~= gen
 			else
 				if oldnamecall then
 					hookmetamethod(game, '__namecall', oldnamecall)
@@ -1952,7 +1978,10 @@ run(function()
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
 	local part
-	
+	-- Bumped on every switch, so the part loop left over from a Method restart or a quick off and
+	-- on stops at its next check instead of running on beside the new mode.
+	local generation = 0
+
 	AntiFall = vape.Categories.Blatant:CreateModule({
 		Name = 'AntiFall',
 		ExtraText = function()
@@ -1960,6 +1989,7 @@ run(function()
 			return Method.Value == 'Part' and Mode and Mode.Value or Method.Value
 		end,
 		Function = function(callback)
+			generation += 1
 			if callback then
 				if Method.Value == 'Part' then
 					local debounce = tick()
@@ -1985,7 +2015,8 @@ run(function()
 							end
 						end
 					end))
-	
+
+					local gen = generation
 					repeat
 						if entitylib.isAlive then
 							local root = entitylib.character.RootPart
@@ -1998,7 +2029,7 @@ run(function()
 						end
 	
 						task.wait(0.1)
-					until not AntiFall.Enabled
+					until not AntiFall.Enabled or generation ~= gen
 				else
 					local lastpos
 					AntiFall:Clean(runService.PreSimulation:Connect(function()
@@ -3287,7 +3318,45 @@ run(function()
 	overlapCheck.MaxParts = 9e9
 	local modified, fflag = {}
 	local teleported
-	
+	-- The parts Part mode found around you this step, as a set to check modified against.
+	local inBox = {}
+	--[[ Character mode makes your own parts passable every step. Walking the whole character for
+	them each step costs a GetDescendants and an IsA per accessory and armour piece, so they are
+	listed once, and again only when the character is replaced or gains or loses a piece. ]]
+	local charParts, charPartsOf, charPartsStale = {}, nil, true
+	local charWatch = {}
+
+	local function dropCharacterParts()
+		for _, connection in charWatch do
+			connection:Disconnect()
+		end
+		table.clear(charWatch)
+		table.clear(charParts)
+		charPartsOf, charPartsStale = nil, true
+	end
+
+	local function characterParts(char)
+		if char ~= charPartsOf then
+			dropCharacterParts()
+			charPartsOf = char
+			local function markStale()
+				charPartsStale = true
+			end
+			table.insert(charWatch, char.DescendantAdded:Connect(markStale))
+			table.insert(charWatch, char.DescendantRemoving:Connect(markStale))
+		end
+		if charPartsStale then
+			charPartsStale = false
+			table.clear(charParts)
+			for _, part in char:GetDescendants() do
+				if part:IsA('BasePart') then
+					table.insert(charParts, part)
+				end
+			end
+		end
+		return charParts
+	end
+
 	local function grabClosestNormal(ray)
 		local partCF, mag, closest = ray.Instance.CFrame, 0, Enum.NormalId.Top
 	
@@ -3310,6 +3379,8 @@ run(function()
 			part.CanCollide = true
 		end
 		table.clear(modified)
+		table.clear(inBox)
+		dropCharacterParts()
 		fflag = nil
 	end
 
@@ -3326,26 +3397,28 @@ run(function()
 			for _, v in entitylib.List do
 				table.insert(chars, v.Character)
 			end
-			overlapCheck.FilterDescendantsInstances = chars
-	
+			setFilter(overlapCheck, chars)
+
 			local parts = workspace:GetPartBoundsInBox(entitylib.character.RootPart.CFrame + Vector3.new(0, 1, 0), entitylib.character.RootPart.Size + Vector3.new(7, entitylib.character.HipHeight, 7), overlapCheck)
+			table.clear(inBox)
 			for _, part in parts do
+				inBox[part] = true
 				if part.CanCollide and (not Spider.Enabled or SpiderShift) then
 					modified[part] = true
 					part.CanCollide = false
 				end
 			end
-	
+
 			for part in modified do
-				if not table.find(parts, part) then
+				if not inBox[part] then
 					modified[part] = nil
 					part.CanCollide = true
 				end
 			end
 		end,
 		Character = function()
-			for _, part in lplr.Character:GetDescendants() do
-				if part:IsA('BasePart') and part.CanCollide and (not Spider.Enabled or SpiderShift) then
+			for _, part in characterParts(lplr.Character) do
+				if part.CanCollide and (not Spider.Enabled or SpiderShift) then
 					modified[part] = true
 					part.CanCollide = Spider.Enabled and not SpiderShift
 				end
@@ -3356,8 +3429,8 @@ run(function()
 			for _, v in entitylib.List do
 				table.insert(chars, v.Character)
 			end
-			rayCheck.FilterDescendantsInstances = chars
-			overlapCheck.FilterDescendantsInstances = chars
+			setFilter(rayCheck, chars)
+			setFilter(overlapCheck, chars)
 	
 			local ray = workspace:Raycast(entitylib.character.Head.CFrame.Position, entitylib.character.Humanoid.MoveDirection * 1.1, rayCheck)
 			if ray and (not Spider.Enabled or SpiderShift) then
@@ -3612,6 +3685,15 @@ run(function()
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
 	local Active, Truss
+	local trussAt, trussPos
+
+	-- The truss is anchored and only moved from here, so a write that would not move it is skipped.
+	local function placeTruss(pos)
+		if trussAt ~= Truss or trussPos ~= pos then
+			Truss.Position = pos
+			trussAt, trussPos = Truss, pos
+		end
+	end
 
 	-- While AutoWin is on it picks the climbs (a safe step ahead) and sets
 	-- Spider.AutoWinClimb for them; anywhere else Spider stays on but holds off.
@@ -3644,7 +3726,7 @@ run(function()
 					if heldByAutoWin() then
 						Active = nil
 						if Truss then
-							Truss.Position = Vector3.zero
+							placeTruss(Vector3.zero)
 						end
 					elseif entitylib.isAlive then
 						local root = entitylib.character.RootPart
@@ -3652,9 +3734,9 @@ run(function()
 						for _, v in entitylib.List do
 							table.insert(chars, v.Character)
 						end
-	
+
 						SpiderShift = inputService:IsKeyDown(Enum.KeyCode.LeftShift)
-						rayCheck.FilterDescendantsInstances = chars
+						setFilter(rayCheck, chars)
 						rayCheck.CollisionGroup = root.CollisionGroup
 	
 						if Mode.Value ~= 'Part' then
@@ -3684,9 +3766,9 @@ run(function()
 						else
 							local ray = workspace:Raycast(root.Position - Vector3.new(0, entitylib.character.HipHeight - 0.5, 0), entitylib.character.RootPart.CFrame.LookVector * 2, rayCheck)
 							if ray and (not Phase.Enabled or not SpiderShift) then
-								Truss.Position = ray.Position - ray.Normal * 0.9 or Vector3.zero
+								placeTruss(ray.Position - ray.Normal * 0.9 or Vector3.zero)
 							else
-								Truss.Position = Vector3.zero
+								placeTruss(Vector3.zero)
 							end
 						end
 					end
@@ -3850,8 +3932,13 @@ run(function()
 	local YFactor
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
-	local module, old
-	
+	--[[ The hook this enable put on the movement function: {Active, Hook, Previous}. Other modules
+	(SafeWalk, AutoWin) wrap the same slot, so turning off only puts Previous back while our hook is
+	still the top of the chain. Otherwise it stays where it is as a pass-through (Active = false),
+	and the wrappers above it keep a working Previous. Writing Previous back blindly dropped
+	whatever had wrapped us since, and left our wrapper running while the module showed off. ]]
+	local module, current
+
 	TargetStrafe = vape.Categories.Blatant:CreateModule({
 		Name = 'TargetStrafe',
 		ExtraText = function()
@@ -3863,15 +3950,20 @@ run(function()
 					local suc = pcall(function() module = require(lplr.PlayerScripts.PlayerModule).controls end)
 					if not suc then module = nil end
 				end
-	
-				old = module and module.moveFunction
+
+				local old = module and module.moveFunction
 				if type(old) ~= 'function' then
 					module = nil
-					old = nil
 					return
 				end
+				local state = {Active = true, Previous = old}
+				current = state
 				local flymod, ang, oldent = vape.Modules.Fly or {Enabled = false}
-				module.moveFunction = function(self, vec, face)
+				state.Hook = function(self, vec, face)
+					-- Off, or uninjected (entitylib is cleared then): pass the movement straight on.
+					if not state.Active or entitylib == nil then
+						return old(self, vec, face)
+					end
 					local wallcheck = Targets.Walls.Enabled
 					local ent = not inputService:IsKeyDown(Enum.KeyCode.S) and entitylib.EntityPosition({
 						Range = SearchRange.Value,
@@ -3926,12 +4018,17 @@ run(function()
 	
 					TargetStrafeVector = ent and vec or nil
 					oldent = ent
-	
+
 					return old(self, vec, face)
 				end
+				module.moveFunction = state.Hook
 			else
-				if module and old then
-					module.moveFunction = old
+				if current then
+					current.Active = false
+					if module and module.moveFunction == current.Hook then
+						module.moveFunction = current.Previous
+					end
+					current = nil
 				end
 				TargetStrafeVector = nil
 			end
@@ -4787,8 +4884,27 @@ run(function()
 	local HURT_COLOR = Color3.fromRGB(255, 40, 40)
 
 	local function ESPWorldToViewport(pos)
-		local newpos = gameCamera:WorldToViewportPoint(gameCamera.CFrame:pointToWorldSpace(gameCamera.CFrame:PointToObjectSpace(pos)))
+		local newpos = gameCamera:WorldToViewportPoint(pos)
 		return Vector2.new(newpos.X, newpos.Y)
+	end
+
+	--[[ Every Drawing property write is a call into the executor, and most of what is drawn each
+	frame (visibility, colours, a box that has not moved) is what was drawn the frame before. So the
+	frame loop writes through set, which skips a write when the value matches the last one written.
+	Only this module writes these drawings, so the last write is what each drawing holds. ]]
+	local Written = setmetatable({}, {__mode = 'k'})
+
+	local function set(obj, key, value)
+		local last = Written[obj]
+		if last[key] ~= value then
+			obj[key] = value
+			last[key] = value
+		end
+	end
+
+	local function setLine(line, from, to)
+		set(line, 'From', from)
+		set(line, 'To', to)
 	end
 
 	local function passes(ent)
@@ -4855,6 +4971,7 @@ run(function()
 		for key, value in props do
 			obj[key] = value
 		end
+		Written[obj] = table.clone(props)
 		return obj
 	end
 
@@ -4867,12 +4984,10 @@ run(function()
 	local function drawHealthBar(EntityESP, ent, left, top, bottom)
 		local fraction = healthFraction(ent)
 		local x = left - 5
-		EntityESP.HealthBorder.From = Vector2.new(x, top - 1) // 1
-		EntityESP.HealthBorder.To = Vector2.new(x, bottom + 1) // 1
-		EntityESP.HealthLine.Visible = fraction > 0
-		EntityESP.HealthLine.From = Vector2.new(x, bottom) // 1
-		EntityESP.HealthLine.To = Vector2.new(x, bottom - (bottom - top) * fraction) // 1
-		EntityESP.HealthLine.Color = Color3.fromHSV(fraction / 2.5, 0.89, 0.75)
+		setLine(EntityESP.HealthBorder, Vector2.new(x, top - 1) // 1, Vector2.new(x, bottom + 1) // 1)
+		set(EntityESP.HealthLine, 'Visible', fraction > 0)
+		setLine(EntityESP.HealthLine, Vector2.new(x, bottom) // 1, Vector2.new(x, bottom - (bottom - top) * fraction) // 1)
+		set(EntityESP.HealthLine, 'Color', Color3.fromHSV(fraction / 2.5, 0.89, 0.75))
 	end
 
 	local function nameText(ent)
@@ -4963,6 +5078,7 @@ run(function()
 			end
 			Reference[ent] = nil
 			eachDrawing(EntityESP, function(obj)
+				Written[obj] = nil
 				pcall(function()
 					obj.Visible = false
 					obj:Remove()
@@ -4985,24 +5101,29 @@ run(function()
 			if vape.ThreadFix then
 				setthreadidentity(8)
 			end
-			EntityESP.Text.Text = nameText(ent)
-			EntityESP.Drop.Text = EntityESP.Text.Text
+			local text = nameText(ent)
+			set(EntityESP.Text, 'Text', text)
+			set(EntityESP.Drop, 'Text', text)
 		end
 	end
 
 	local function setAll(EntityESP, visible)
-		eachDrawing(EntityESP, function(obj)
-			obj.Visible = visible
-		end)
+		for key, obj in EntityESP do
+			if key == 'Lines' or key == 'Faces' then
+				for _, line in obj do
+					set(line, 'Visible', visible)
+				end
+			else
+				set(obj, 'Visible', visible)
+			end
+		end
 	end
 
-	-- Hidden when out of range or off screen; otherwise the root position on screen.
-	local function screenRoot(ent, EntityESP, origin)
+	-- Hidden when out of range or off screen; otherwise the root on screen and where it is.
+	local function screenRoot(ent, EntityESP, origin, menuOpen)
 		-- hidden while the menu is open; the first frame after it closes redraws them
-		if clickGuiOpen() then
-			eachDrawing(EntityESP, function(obj)
-				if obj.Visible then obj.Visible = false end
-			end)
+		if menuOpen then
+			setAll(EntityESP, false)
 			return nil
 		end
 		local root = ent.RootPart
@@ -5010,13 +5131,14 @@ run(function()
 			setAll(EntityESP, false)
 			return nil
 		end
-		if origin and (origin - root.Position).Magnitude > Range.Value then
+		local position = root.Position
+		if origin and (origin - position).Magnitude > Range.Value then
 			setAll(EntityESP, false)
 			return nil
 		end
-		local rootPos, rootVis = gameCamera:WorldToViewportPoint(root.Position)
+		local rootPos, rootVis = gameCamera:WorldToViewportPoint(position)
 		setAll(EntityESP, rootVis)
-		return rootVis and rootPos or nil, root
+		return rootVis and rootPos or nil, position
 	end
 
 	local BOX_EDGES = {{1, 2}, {3, 4}, {5, 6}, {7, 8}, {1, 3}, {1, 5}, {5, 7}, {7, 3}, {2, 4}, {2, 6}, {6, 8}, {8, 4}}
@@ -5026,43 +5148,80 @@ run(function()
 		Vector3.new(1.5, 1, -1.5), Vector3.new(1.5, -1, -1.5), Vector3.new(-1.5, 1, -1.5), Vector3.new(-1.5, -1, -1.5)
 	}
 
+	--[[ Run through pcall by the skeleton loop, which costs no new closure per player each frame. A
+	part missing mid-respawn throws before any line moves, so the lines keep where they were. ]]
+	local function drawSkeleton(ent, lines)
+		local rigcheck = ent.Humanoid.RigType == Enum.HumanoidRigType.R6
+		local offset = rigcheck and CFrame.new(0, -0.8, 0) or CFrame.identity
+		local torso = ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame
+		local headCFrame = ent.Head.CFrame
+		local head = ESPWorldToViewport(headCFrame.p)
+		local headfront = ESPWorldToViewport((headCFrame * CFrame.new(0, 0, -0.5)).p)
+		local toplefttorso = ESPWorldToViewport((torso * CFrame.new(-1.5, 0.8, 0)).p)
+		local toprighttorso = ESPWorldToViewport((torso * CFrame.new(1.5, 0.8, 0)).p)
+		local toptorso = ESPWorldToViewport((torso * CFrame.new(0, 0.8, 0)).p)
+		local bottomtorso = ESPWorldToViewport((torso * CFrame.new(0, -0.8, 0)).p)
+		local bottomlefttorso = ESPWorldToViewport((torso * CFrame.new(-0.5, -0.8, 0)).p)
+		local bottomrighttorso = ESPWorldToViewport((torso * CFrame.new(0.5, -0.8, 0)).p)
+		local leftarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Arm' or 'LeftHand')].CFrame * offset).p)
+		local rightarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Arm' or 'RightHand')].CFrame * offset).p)
+		local leftleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Leg' or 'LeftFoot')].CFrame * offset).p)
+		local rightleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Leg' or 'RightFoot')].CFrame * offset).p)
+		setLine(lines.Head, toptorso, head)
+		setLine(lines.HeadFacing, head, headfront)
+		setLine(lines.UpperTorso, toplefttorso, toprighttorso)
+		setLine(lines.Torso, toptorso, bottomtorso)
+		setLine(lines.LowerTorso, bottomlefttorso, bottomrighttorso)
+		setLine(lines.LeftArm, toplefttorso, leftarm)
+		setLine(lines.RightArm, toprighttorso, rightarm)
+		setLine(lines.LeftLeg, bottomlefttorso, leftleg)
+		setLine(lines.RightLeg, bottomrighttorso, rightleg)
+	end
+
 	local ESPLoop = {
 		Drawing2D = function()
 			local now = os.clock()
-			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
+			local camera = gameCamera.CFrame
+			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or camera.Position
+			local menuOpen = clickGuiOpen()
 			for ent, EntityESP in Reference do
-				local rootPos, root = screenRoot(ent, EntityESP, origin)
+				local rootPos, position = screenRoot(ent, EntityESP, origin, menuOpen)
 				if not rootPos then continue end
 
-				local look = CFrame.lookAlong(root.Position, gameCamera.CFrame.LookVector)
+				local look = CFrame.lookAlong(position, camera.LookVector)
 				local topPos = gameCamera:WorldToViewportPoint((look * CFrame.new(2, ent.HipHeight, 0)).p)
 				local bottomPos = gameCamera:WorldToViewportPoint((look * CFrame.new(-2, -ent.HipHeight - 1, 0)).p)
 				local sizex, sizey = topPos.X - bottomPos.X, topPos.Y - bottomPos.Y
 				local posx, posy = (rootPos.X - sizex / 2), (rootPos.Y - sizey / 2)
+				local boxPos, boxSize = Vector2.new(posx, posy) // 1, Vector2.new(sizex, sizey) // 1
 				local color = entityColor(ent, now)
 				if EntityESP.Main then
-					EntityESP.Main.Position = Vector2.new(posx, posy) // 1
-					EntityESP.Main.Size = Vector2.new(sizex, sizey) // 1
-					EntityESP.Main.Color = color
-					EntityESP.Border.Position = EntityESP.Main.Position
-					EntityESP.Border.Size = EntityESP.Main.Size
+					set(EntityESP.Main, 'Position', boxPos)
+					set(EntityESP.Main, 'Size', boxSize)
+					set(EntityESP.Main, 'Color', color)
+					set(EntityESP.Border, 'Position', boxPos)
+					set(EntityESP.Border, 'Size', boxSize)
 				end
 				if EntityESP.Fill then
-					EntityESP.Fill.Position = Vector2.new(posx, posy) // 1
-					EntityESP.Fill.Size = Vector2.new(sizex, sizey) // 1
-					EntityESP.Fill.Color, EntityESP.Fill.Transparency = fillFor(ent, now, color, 0.25)
+					local fill, fillAlpha = fillFor(ent, now, color, 0.25)
+					set(EntityESP.Fill, 'Position', boxPos)
+					set(EntityESP.Fill, 'Size', boxSize)
+					set(EntityESP.Fill, 'Color', fill)
+					set(EntityESP.Fill, 'Transparency', fillAlpha)
 				end
 				if EntityESP.HealthLine then
 					local top, bottom = math.min(posy, posy + sizey), math.max(posy, posy + sizey)
 					drawHealthBar(EntityESP, ent, math.min(posx, posx + sizex), top, bottom)
 				end
 				if EntityESP.Text then
-					EntityESP.Text.Color = color
-					EntityESP.Text.Position = Vector2.new(posx + (sizex / 2), posy + (sizey - 28)) // 1
-					EntityESP.Drop.Position = EntityESP.Text.Position + Vector2.new(1, 1)
+					local textPos = Vector2.new(posx + (sizex / 2), posy + (sizey - 28)) // 1
+					set(EntityESP.Text, 'Color', color)
+					set(EntityESP.Text, 'Position', textPos)
+					set(EntityESP.Drop, 'Position', textPos + Vector2.new(1, 1))
 					if EntityESP.TextBKG then
-						EntityESP.TextBKG.Size = EntityESP.Text.TextBounds + Vector2.new(8, 4)
-						EntityESP.TextBKG.Position = EntityESP.Text.Position - Vector2.new(4 + (EntityESP.Text.TextBounds.X / 2), 0)
+						local bounds = EntityESP.Text.TextBounds
+						set(EntityESP.TextBKG, 'Size', bounds + Vector2.new(8, 4))
+						set(EntityESP.TextBKG, 'Position', textPos - Vector2.new(4 + (bounds.X / 2), 0))
 					end
 				end
 			end
@@ -5070,12 +5229,13 @@ run(function()
 		Drawing3D = function()
 			local now = os.clock()
 			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
+			local menuOpen = clickGuiOpen()
 			local points = {}
 			for ent, EntityESP in Reference do
-				local rootPos, root = screenRoot(ent, EntityESP, origin)
+				local rootPos, position = screenRoot(ent, EntityESP, origin, menuOpen)
 				if not rootPos then continue end
 
-				local position, height = root.Position, ent.HipHeight
+				local height = ent.HipHeight
 				local left, top, right, bottom = math.huge, math.huge, -math.huge, -math.huge
 				for i, corner in BOX_CORNERS do
 					local point = ESPWorldToViewport(position + Vector3.new(corner.X, corner.Y * height, corner.Z))
@@ -5086,17 +5246,18 @@ run(function()
 				local color = entityColor(ent, now)
 				for i, line in EntityESP.Lines do
 					local edge = BOX_EDGES[i]
-					line.From = points[edge[1]]
-					line.To = points[edge[2]]
-					line.Color = color
+					setLine(line, points[edge[1]], points[edge[2]])
+					set(line, 'Color', color)
 				end
 				local fill, fillAlpha = fillFor(ent, now, color, 0.15)
 				for i, face in EntityESP.Faces do
 					local corners = BOX_FACES[i]
-					face.PointA, face.PointB = points[corners[1]], points[corners[2]]
-					face.PointC, face.PointD = points[corners[3]], points[corners[4]]
-					face.Color = fill
-					face.Transparency = fillAlpha
+					set(face, 'PointA', points[corners[1]])
+					set(face, 'PointB', points[corners[2]])
+					set(face, 'PointC', points[corners[3]])
+					set(face, 'PointD', points[corners[4]])
+					set(face, 'Color', fill)
+					set(face, 'Transparency', fillAlpha)
 				end
 				if EntityESP.HealthLine then
 					drawHealthBar(EntityESP, ent, left, top, bottom)
@@ -5106,41 +5267,17 @@ run(function()
 		DrawingSkeleton = function()
 			local now = os.clock()
 			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
+			local menuOpen = clickGuiOpen()
 			for ent, EntityESP in Reference do
-				local rootPos = screenRoot(ent, EntityESP, origin)
+				local rootPos = screenRoot(ent, EntityESP, origin, menuOpen)
 				if not rootPos then continue end
 
 				local lines = EntityESP.Lines
 				local color = entityColor(ent, now)
 				for _, line in lines do
-					line.Color = color
+					set(line, 'Color', color)
 				end
-				pcall(function()
-					local rigcheck = ent.Humanoid.RigType == Enum.HumanoidRigType.R6
-					local offset = rigcheck and CFrame.new(0, -0.8, 0) or CFrame.identity
-					local torso = ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame
-					local head = ESPWorldToViewport((ent.Head.CFrame).p)
-					local headfront = ESPWorldToViewport((ent.Head.CFrame * CFrame.new(0, 0, -0.5)).p)
-					local toplefttorso = ESPWorldToViewport((torso * CFrame.new(-1.5, 0.8, 0)).p)
-					local toprighttorso = ESPWorldToViewport((torso * CFrame.new(1.5, 0.8, 0)).p)
-					local toptorso = ESPWorldToViewport((torso * CFrame.new(0, 0.8, 0)).p)
-					local bottomtorso = ESPWorldToViewport((torso * CFrame.new(0, -0.8, 0)).p)
-					local bottomlefttorso = ESPWorldToViewport((torso * CFrame.new(-0.5, -0.8, 0)).p)
-					local bottomrighttorso = ESPWorldToViewport((torso * CFrame.new(0.5, -0.8, 0)).p)
-					local leftarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Arm' or 'LeftHand')].CFrame * offset).p)
-					local rightarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Arm' or 'RightHand')].CFrame * offset).p)
-					local leftleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Leg' or 'LeftFoot')].CFrame * offset).p)
-					local rightleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Leg' or 'RightFoot')].CFrame * offset).p)
-					lines.Head.From, lines.Head.To = toptorso, head
-					lines.HeadFacing.From, lines.HeadFacing.To = head, headfront
-					lines.UpperTorso.From, lines.UpperTorso.To = toplefttorso, toprighttorso
-					lines.Torso.From, lines.Torso.To = toptorso, bottomtorso
-					lines.LowerTorso.From, lines.LowerTorso.To = bottomlefttorso, bottomrighttorso
-					lines.LeftArm.From, lines.LeftArm.To = toplefttorso, leftarm
-					lines.RightArm.From, lines.RightArm.To = toprighttorso, rightarm
-					lines.LeftLeg.From, lines.LeftLeg.To = bottomlefttorso, leftleg
-					lines.RightLeg.From, lines.RightLeg.To = bottomrighttorso, rightleg
-				end)
+				pcall(drawSkeleton, ent, lines)
 			end
 		end
 	}
@@ -5338,7 +5475,10 @@ run(function()
 	local Mode
 	local oldsettings = {}
 	local flag
-	
+	-- Bumped on every switch, so a light loop left over from a Mode restart or a quick off and on
+	-- stops at its next check instead of running beside the new one.
+	local generation = 0
+
 	local function ChangeLighting(prop)
 		if flag then
 			return
@@ -5355,6 +5495,7 @@ run(function()
 	Fullbright = vape.Categories.Render:CreateModule({
 		Name = 'Fullbright',
 		Function = function(callback)
+			generation += 1
 			if callback then
 				if Mode.Value == 'Lighting' then
 					for _, v in {'Ambient', 'OutdoorAmbient', 'Brightness'} do
@@ -5367,11 +5508,12 @@ run(function()
 					local inst = Instance.new('PointLight')
 					inst.Range = 1000
 					Fullbright:Clean(inst)
-	
+
+					local gen = generation
 					repeat
 						inst.Parent = entitylib.isAlive and entitylib.character.RootPart or nil
 						task.wait(0.1)
-					until not Fullbright.Enabled
+					until not Fullbright.Enabled or generation ~= gen
 				end
 			else
 				flag = false
@@ -5409,10 +5551,14 @@ run(function()
 	local flyingsound
 	local chairanim
 	local chair
-	
+	-- Bumped on every switch, so a loop left over from a quick off and on stops instead of
+	-- driving the new chair alongside the new loop.
+	local generation = 0
+
 	GamingChair = vape.Categories.Render:CreateModule({
 		Name = 'GamingChair',
 		Function = function(callback)
+			generation += 1
 			if callback then
 				if vape.ThreadFix then
 					setthreadidentity(8)
@@ -5502,6 +5648,7 @@ run(function()
 				chairanim = {Stop = function() end}
 				local oldmoving = false
 				local oldflying = false
+				local gen = generation
 				repeat
 					if entitylib.isAlive and entitylib.character.Humanoid.Health > 0 then
 						if not chairanim.IsPlaying then
@@ -5594,14 +5741,17 @@ run(function()
 						chair.Anchored = true
 						chairlegs.Anchored = true
 						chairfan.Anchored = true
-						repeat task.wait() until entitylib.isAlive and entitylib.character.Humanoid.Health > 0
+						--[[ Uninject clears entitylib while this waits for a respawn, and a stale loop must
+						not unanchor the new chair, so both stop here; switching off destroys the chair. ]]
+						repeat task.wait() until not (GamingChair.Enabled and generation == gen and entitylib) or entitylib.isAlive and entitylib.character.Humanoid.Health > 0
+						if not (GamingChair.Enabled and generation == gen and entitylib) then break end
 						chair.Anchored = false
 						chairlegs.Anchored = false
 						chairfan.Anchored = false
 						chairanim:Stop()
 					end
 					task.wait()
-				until not GamingChair.Enabled
+				until not GamingChair.Enabled or generation ~= gen
 			else
 				if chairanim then
 					chairanim:Stop()
@@ -5622,10 +5772,14 @@ end)
 	
 run(function()
 	local Health
-	
+	-- Bumped on every switch, so a loop left over from a quick off and on stops instead of
+	-- running beside the new one.
+	local generation = 0
+
 	Health = vape.Categories.Render:CreateModule({
 		Name = 'Health',
 		Function = function(callback)
+			generation += 1
 			if callback then
 				local label = Instance.new('TextLabel')
 				label.Size = UDim2.fromOffset(100, 20)
@@ -5637,7 +5791,8 @@ run(function()
 				vape.Libraries.fonts.track(label)
 				label.Parent = vape.gui
 				Health:Clean(label)
-				
+
+				local gen = generation
 				repeat
 					-- hidden while the menu is open
 					local show = not clickGuiOpen()
@@ -5645,7 +5800,7 @@ run(function()
 					label.Text = entitylib.isAlive and math.round(entitylib.character.Humanoid.Health)..' ❤️' or ''
 					label.TextColor3 = entitylib.isAlive and Color3.fromHSV((entitylib.character.Humanoid.Health / entitylib.character.Humanoid.MaxHealth) / 2.8, 0.86, 1) or Color3.new()
 					task.wait()
-				until not Health.Enabled
+				until not Health.Enabled or generation ~= gen
 			end
 		end,
 		Tooltip = 'Shows your health in the middle of the screen.'
@@ -5666,9 +5821,18 @@ run(function()
 	local DistanceCheck
 	local DistanceLimit
 	local Strings, Sizes, Reference = {}, {}, {}
+	-- What each tag's Visible and Position were last set to: the frame loop only writes a change.
+	local Shown, Placed = {}, {}
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
 	local methodused
+
+	local function showTag(ent, nametag, visible)
+		if Shown[ent] ~= visible then
+			nametag.Visible = visible
+			Shown[ent] = visible
+		end
+	end
 
 	--[[ Drawn like the mod overlay's lines: the tag's own text is hidden and two layers carry it, a
 	dark copy one pixel down and right with the coloured text over it -- layers, because a child
@@ -5774,6 +5938,7 @@ run(function()
 			shadeTag(nametag)
 			nametag.Parent = Folder
 			Reference[ent] = nametag
+			Shown[ent] = false
 		end
 	}
 	
@@ -5787,6 +5952,8 @@ run(function()
 				Reference[ent] = nil
 				Strings[ent] = nil
 				Sizes[ent] = nil
+				Shown[ent] = nil
+				Placed[ent] = nil
 				v:Destroy()
 			end
 		end
@@ -5824,33 +5991,38 @@ run(function()
 			local hidden = clickGuiOpen()
 			for ent, nametag in Reference do
 				if hidden then
-					if nametag.Visible then nametag.Visible = false end
+					showTag(ent, nametag, false)
 					continue
 				end
 				if DistanceCheck.Enabled then
 					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
 					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-						nametag.Visible = false
+						showTag(ent, nametag, false)
 						continue
 					end
 				end
-	
+
 				local headPos, headVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position + Vector3.new(0, ent.HipHeight + 1, 0))
-				nametag.Visible = headVis
+				showTag(ent, nametag, headVis)
 				if not headVis then
 					continue
 				end
-	
+
 				if Distance.Enabled then
 					local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
 					if Sizes[ent] ~= mag then
-						nametag.Text = string.format(Strings[ent], distanceText(mag))
-						local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+						local text = string.format(Strings[ent], distanceText(mag))
+						nametag.Text = text
+						local size = getfontsize(removeTags(text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
 						nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 						Sizes[ent] = mag
 					end
 				end
-				nametag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
+				local position = UDim2.fromOffset(headPos.X, headPos.Y)
+				if Placed[ent] ~= position then
+					nametag.Position = position
+					Placed[ent] = position
+				end
 			end
 		end
 	}
@@ -6245,9 +6417,11 @@ run(function()
 					if bar.BackgroundColor3 ~= accent then
 						bar.BackgroundColor3 = accent
 					end
-					for ent, dot in Reference do
-						if entitylib.isAlive then
-							local dt = CFrame.lookAlong(entitylib.character.RootPart.Position, gameCamera.CFrame.LookVector * Vector3.new(1, 0, 1)):PointToObjectSpace(ent.RootPart.Position)
+					if entitylib.isAlive and next(Reference) then
+						-- the same view for every dot this frame
+						local view = CFrame.lookAlong(entitylib.character.RootPart.Position, gameCamera.CFrame.LookVector * Vector3.new(1, 0, 1))
+						for ent, dot in Reference do
+							local dt = view:PointToObjectSpace(ent.RootPart.Position)
 							dot.Position = UDim2.fromOffset(Clamp.Enabled and math.clamp(108 + dt.X, 2, 214) or 108 + dt.X, Clamp.Enabled and math.clamp(108 + dt.Z, 8, 214) or 108 + dt.Z)
 						end
 					end
@@ -6360,8 +6534,8 @@ run(function()
 	local Color
 	local FillTransparency
 	local Reference = {}
-	local Candidates = {}
-	local CandidatesInitialized = false
+	-- The enabled names as a set, taken on each enable: every change to the list restarts Search.
+	local Names = {}
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
 
@@ -6382,9 +6556,9 @@ run(function()
 			end
 	end
 
+	-- Most of what reaches here is a block, projectile or effect with a name not on the list.
 	local function addCandidate(v)
-		if not (v:IsA('BasePart') or v:IsA('Model')) then return end
-		Candidates[v] = true
+		if not Names[v.Name] then return end
 		if Search and Search.Enabled then
 			Add(v)
 		end
@@ -6392,26 +6566,27 @@ run(function()
 
 	--[[ Watched only while Search is on. These two used to be connected for the whole session
 	whether or not Search was ever enabled, so every instance the game added to or removed from
-	the workspace -- each block, projectile, particle and effect -- ran through here, and every
-	part and model was kept in Candidates, for a module almost nobody has on. The candidate list
-	is rebuilt from the workspace each time Search turns on instead. ]]
+	the workspace -- each block, projectile, particle and effect -- ran through here, for a module
+	almost nobody has on. The workspace is walked again each time Search turns on instead. ]]
 	Search = vape.Categories.Render:CreateModule({
 		Name = 'Search',
 		Function = function(callback)
 			if callback then
+				table.clear(Names)
+				for _, name in List.ListEnabled do
+					Names[name] = true
+				end
 				Search:Clean(workspace.DescendantAdded:Connect(addCandidate))
 				Search:Clean(workspace.DescendantRemoving:Connect(function(v)
-					Candidates[v] = nil
 					if Reference[v] then
 						Reference[v]:Destroy()
 						Reference[v] = nil
 					end
 				end))
-				if not CandidatesInitialized then
-					for _, v in workspace:GetDescendants() do
-						addCandidate(v)
+				for _, v in workspace:GetDescendants() do
+					if Names[v.Name] then
+						Add(v)
 					end
-					CandidatesInitialized = true
 				end
 				-- the folder leaves the gui while the menu is open, so its boxes stop drawing
 				if vape.ThreadFix then
@@ -6428,9 +6603,6 @@ run(function()
 						Folder.Parent = (not clickGui.Visible) and vape.gui or nil
 					end))
 				end
-				for v in Candidates do
-					Add(v)
-				end
 			else
 			Folder:ClearAllChildren()
 			if vape.ThreadFix then
@@ -6438,10 +6610,6 @@ run(function()
 			end
 			Folder.Parent = vape.gui
 			table.clear(Reference)
-			--[[ Nothing tracks the workspace while off, so the list would go stale; the next
-			enable walks it again. ]]
-			table.clear(Candidates)
-			CandidatesInitialized = false
 		end
 		end,
 		Tooltip = 'Shows boxes around parts you name, even through walls.\nAdd part names to the list and pick the box color and transparency.'
@@ -7463,20 +7631,30 @@ run(function()
 	local modified = {}
 	local thread
 
+	-- Only called at the raised identity, from updatePrompt and updateAllPrompts below.
+	local function setPromptRange(prompt)
+		if originalRanges[prompt] == nil then
+			originalRanges[prompt] = prompt.MaxActivationDistance
+		end
+		prompt.MaxActivationDistance = Range.Value
+	end
+
+	--[[ Handed every instance added to the workspace, so anything that is not a prompt is turned
+	away before the identity raise, which costs a closure and two protected calls each time. ]]
 	local function updatePrompt(prompt)
+		if not prompt or not prompt:IsA('ProximityPrompt') then return end
 		callWithThreadFix(function()
-			if not prompt or not prompt:IsA('ProximityPrompt') then return end
-			if originalRanges[prompt] == nil then
-				originalRanges[prompt] = prompt.MaxActivationDistance
-			end
-			prompt.MaxActivationDistance = Range.Value
+			setPromptRange(prompt)
 		end)
 	end
 
+	-- One identity raise for the whole sweep, with each prompt still failing on its own.
 	local function updateAllPrompts()
 		callWithThreadFix(function()
 			for _, prompt in workspace:GetDescendants() do
-				updatePrompt(prompt)
+				if prompt:IsA('ProximityPrompt') then
+					pcall(setPromptRange, prompt)
+				end
 			end
 		end)
 	end
@@ -7605,13 +7783,17 @@ run(function()
 	local AutoSend
 	local AutoSendLength
 	local oldphys, oldsend
-	
+	-- Bumped on every switch, so a loop left over from a quick off and on stops instead of
+	-- setting the flags beside the new one.
+	local generation = 0
+
 	Blink = vape.Categories.Utility:CreateModule({
 		Name = 'Blink',
 		ExtraText = function()
 			return Type and (Type.Value == 'All' and 'All' or 'Movement') or nil
 		end,
 		Function = function(callback)
+			generation += 1
 			if callback then
 				local teleported
 				Blink:Clean(lplr.OnTeleport:Connect(function()
@@ -7619,7 +7801,8 @@ run(function()
 					setfflag('DataSenderRate', '60')
 					teleported = true
 				end))
-	
+
+				local gen = generation
 				repeat
 					local physicsrate, senderrate = '0', Type.Value == 'All' and '-1' or '60'
 					if AutoSend.Enabled and tick() % (AutoSendLength.Value + 0.1) > AutoSendLength.Value then
@@ -7633,7 +7816,7 @@ run(function()
 					end
 	
 					task.wait(0.03)
-				until not Blink.Enabled or teleported
+				until not Blink.Enabled or teleported or generation ~= gen
 			else
 				if setfflag then
 					setfflag('PhysicsSenderMaxBandwidthBps', '38760')
@@ -7677,10 +7860,14 @@ local Delay
 local Hide
 local RandomList = {}
 local oldchat
+-- Bumped on every switch, so the sender left over from a Hide restart or a quick off and on stops
+-- at its next check instead of sending beside the new one.
+local spamGeneration = 0
 
 ChatSpammer = vape.Categories.Utility:CreateModule({
 	Name = 'ChatSpammer',
 	Function = function(callback)
+		spamGeneration += 1
 		if callback then
 			if #Lines.ListEnabled == 0 then
 				notif('ChatSpammer', 'Add a line to send first.', 5, 'warning')
@@ -7710,6 +7897,7 @@ ChatSpammer = vape.Categories.Utility:CreateModule({
 			end
 
 			local index = 1
+			local gen = spamGeneration
 			repeat
 				--[[ Nothing is sent while the list is empty (it can be cleared mid-run). ]]
 				local message
@@ -7737,7 +7925,7 @@ ChatSpammer = vape.Categories.Utility:CreateModule({
 				end
 
 				task.wait(Delay.Value)
-			until not ChatSpammer.Enabled
+			until not ChatSpammer.Enabled or spamGeneration ~= gen
 		else
 			if oldchat then
 				hookfunction(getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnNewSystemMessage.OnClientEvent)[1].Function, oldchat)
@@ -7904,9 +8092,11 @@ run(function()
 	
 	local function playerAdded(plr)
 		if not vape.Loaded then
-			repeat task.wait() until vape.Loaded
+			-- Loaded goes nil on uninject; without that check this waited for a load that never came.
+			repeat task.wait() until vape.Loaded or vape.Loaded == nil
+			if not vape.Loaded then return end
 		end
-	
+
 		local user = table.find(Users.ListEnabled, tostring(plr.UserId))
 		if user or getRole(plr, tonumber(Group.Value) or 0) >= (tonumber(Role.Value) or 1) then
 			notif('StaffDetector', 'Staff Detected ('..(user and 'blacklisted_user' or 'staff_role')..'): '..plr.Name, 60, 'alert')
@@ -8209,28 +8399,30 @@ end)
 run(function()
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
-	local module, old
-	
+	-- The hook this enable installed; put back only while it is still on top (see TargetStrafe).
+	local module, current
+
 	vape.Categories.World:CreateModule({
 		Name = 'SafeWalk',
 		Tab = 'Move',
 		Function = function(callback)
 			if callback then
 				if not module then
-					local suc = pcall(function() 
-						module = require(lplr.PlayerScripts.PlayerModule).controls 
+					local suc = pcall(function()
+						module = require(lplr.PlayerScripts.PlayerModule).controls
 					end)
 					if not suc then module = nil end
 				end
-				
-				old = module and module.moveFunction
+
+				local old = module and module.moveFunction
 				if type(old) ~= 'function' then
 					module = nil
-					old = nil
 					return
 				end
-				module.moveFunction = function(self, vec, face)
-					if entitylib.isAlive then
+				local state = {Active = true, Previous = old}
+				current = state
+				state.Hook = function(self, vec, face)
+					if state.Active and entitylib ~= nil and entitylib.isAlive then
 						rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera}
 						local root = entitylib.character.RootPart
 						local movedir = root.Position + vec
@@ -8242,12 +8434,17 @@ run(function()
 							end
 						end
 					end
-	
+
 					return old(self, vec, face)
 				end
+				module.moveFunction = state.Hook
 			else
-				if module and old then
-					module.moveFunction = old
+				if current then
+					current.Active = false
+					if module and module.moveFunction == current.Hook then
+						module.moveFunction = current.Previous
+					end
+					current = nil
 				end
 			end
 		end,
@@ -8669,6 +8866,9 @@ run(function()
 	local part, motor, outline
 	-- The square Pistonware piston, when no texture is set.
 	local DEFAULT_CAPE = 'rbxassetid://73714636260061'
+	-- Bumped on every switch, so a loop left over from a quick off and on stops instead of
+	-- swinging the new cape beside the new loop.
+	local generation = 0
 
 	-- An outline round the cape: a Highlight with no fill, hidden behind walls like the cape itself.
 	local function paintOutline()
@@ -8695,6 +8895,7 @@ run(function()
 	Cape = vape.Legit:CreateModule({
 		Name = 'Cape',
 		Function = function(callback)
+			generation += 1
 			if callback then
 				part = Instance.new('Part')
 				part.Size = Vector3.new(2, 4, 0.1)
@@ -8743,7 +8944,8 @@ run(function()
 				if entitylib.isAlive then
 					createMotor(entitylib.character)
 				end
-	
+
+				local gen = generation
 				repeat
 					if motor and entitylib.isAlive then
 						local velo = math.min(entitylib.character.RootPart.Velocity.Magnitude, 90)
@@ -8752,7 +8954,7 @@ run(function()
 					capesurface.Enabled = (gameCamera.CFrame.Position - gameCamera.Focus.Position).Magnitude > 0.6
 					part.Transparency = (gameCamera.CFrame.Position - gameCamera.Focus.Position).Magnitude > 0.6 and 0 or 1
 					task.wait()
-				until not Cape.Enabled
+				until not Cape.Enabled or generation ~= gen
 			else
 				part = nil
 				motor = nil
@@ -8789,10 +8991,14 @@ run(function()
 	local Material
 	local Color
 	local hat
-	
+	-- Bumped on every switch, so a loop left over from a quick off and on stops instead of
+	-- running beside the new one.
+	local generation = 0
+
 	ChinaHat = vape.Legit:CreateModule({
 		Name = 'China Hat',
 		Function = function(callback)
+			generation += 1
 			if callback then
 				if vape.ThreadFix then
 					setthreadidentity(8)
@@ -8829,10 +9035,11 @@ run(function()
 					weld.Parent = hat
 				end))
 	
+				local gen = generation
 				repeat
 					hat.LocalTransparencyModifier = ((gameCamera.CFrame.Position - gameCamera.Focus.Position).Magnitude <= 0.6 and 1 or 0)
 					task.wait()
-				until not ChinaHat.Enabled
+				until not ChinaHat.Enabled or generation ~= gen
 			else
 				hat = nil
 			end
@@ -9286,20 +9493,25 @@ run(function()
 		Name = 'FPS',
 		Function = function(callback)
 			if callback then
-				local frames = {}
+				--[[ The frame times of the last second, oldest at first and newest at last. Dropping the
+				ones over a second old from the front replaces shifting every entry along each frame. ]]
+				local frames, first, last = {}, 1, 0
 				local startClock = os.clock()
 				local updateTick = tick()
-	
+
 				FPS:Clean(runService.Heartbeat:Connect(function()
 					local updateClock = os.clock()
-					for i = #frames, 1, -1 do
-						frames[i + 1] = frames[i] >= updateClock - 1 and frames[i] or nil
+					while first <= last and frames[first] < updateClock - 1 do
+						frames[first] = nil
+						first += 1
 					end
-	
-					frames[1] = updateClock
+
+					last += 1
+					frames[last] = updateClock
 					if updateTick < tick() then
 						updateTick = tick() + 1
-						label.Text = loaderStyle.unit(math.floor(os.clock() - startClock >= 1 and #frames or #frames / (os.clock() - startClock)), 'FPS')
+						local count = last - first + 1
+						label.Text = loaderStyle.unit(math.floor(os.clock() - startClock >= 1 and count or count / (os.clock() - startClock)), 'FPS')
 					end
 				end))
 			end
@@ -9558,7 +9770,10 @@ run(function()
 	local alreadypicked = {}
 	local beattick = tick()
 	local oldfov, songobj, songbpm, songtween
-	
+	-- Bumped on every switch, so the loop left over from a Beat FOV restart or a quick off and on
+	-- stops at its next check instead of picking songs beside the new one.
+	local generation = 0
+
 	local function choosesong()
 		local list = List.ListEnabled
 		if #alreadypicked >= #list then
@@ -9603,12 +9818,14 @@ run(function()
 		Name = 'Song Beats',
 		Tab = 'Utility',
 		Function = function(callback)
+			generation += 1
 			if callback then
 				songobj = Instance.new('Sound')
 				songobj.Volume = Volume.Value / 100
 				songobj.Parent = workspace
 				oldfov = gameCamera.FieldOfView
-	
+
+				local gen = generation
 				repeat
 					if not songobj.Playing then
 						choosesong()
@@ -9624,7 +9841,7 @@ run(function()
 					end
 	
 					task.wait()
-				until not SongBeats.Enabled
+				until not SongBeats.Enabled or generation ~= gen
 			else
 				if songobj then
 					songobj:Destroy()
@@ -9693,6 +9910,8 @@ run(function()
 				repeat
 					local lastpos = entitylib.isAlive and entitylib.character.HumanoidRootPart.Position * Vector3.new(1, 0, 1) or Vector3.zero
 					local dt = task.wait(0.2)
+					-- uninject clears entitylib while this waits
+					if not entitylib then break end
 					local newpos = entitylib.isAlive and entitylib.character.HumanoidRootPart.Position * Vector3.new(1, 0, 1) or Vector3.zero
 					label.Text = loaderStyle.unit(math.round(((lastpos - newpos) / dt).Magnitude), 'sps')
 				until not Speedmeter.Enabled
@@ -9919,6 +10138,10 @@ end)
 
 	run(function()
 		local AnimDisabler
+		--[[ The Animator found last step and the character and humanoid it was found under. Looking it
+		up again every step cost three clonerefs and two child searches; it is only looked up again
+		once the character is replaced or the humanoid or animator leaves it. ]]
+		local animChar, animHumanoid, animator
 
 		AnimDisabler = vape.Categories.Utility:CreateModule({
 			Name = 'AnimDisabler',
@@ -9929,16 +10152,17 @@ end)
 						AnimDisabler.Connection = runService.Heartbeat:Connect(function()
 							local character = lplr.Character
 							if not character then return end
-							character = cloneref(character)
-							local humanoid = character:FindFirstChildOfClass('Humanoid')
-							if not humanoid then return end
-							humanoid = cloneref(humanoid)
-							local animator = humanoid:FindFirstChildOfClass('Animator')
-							if animator then
-								animator = cloneref(animator)
-								for _, track in animator:GetPlayingAnimationTracks() do
-									track:Stop()
-								end
+							if character ~= animChar or not animator or animator.Parent ~= animHumanoid or animHumanoid.Parent ~= character then
+								animChar, animHumanoid, animator = character, nil, nil
+								local humanoid = cloneref(character):FindFirstChildOfClass('Humanoid')
+								if not humanoid then return end
+								animHumanoid = humanoid
+								local found = cloneref(humanoid):FindFirstChildOfClass('Animator')
+								if not found then return end
+								animator = cloneref(found)
+							end
+							for _, track in animator:GetPlayingAnimationTracks() do
+								track:Stop()
 							end
 						end)
 					end
@@ -9947,6 +10171,7 @@ end)
 						AnimDisabler.Connection:Disconnect()
 						AnimDisabler.Connection = nil
 					end
+					animChar, animHumanoid, animator = nil, nil, nil
 					local character = lplr.Character
 					if character then
 						character = cloneref(character)

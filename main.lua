@@ -257,6 +257,10 @@ if traceOn then
 	task.spawn(function()
 		while true do
 			task.wait(2)
+			--[[ Every boot puts a fresh table in shared.PistonwareTraceLines, so a different one there
+			means a reinject has replaced this boot. Its loop used to keep going and overwrite the
+			live trace with this boot's stale lines every two seconds, one more loop per reinject. ]]
+			if shared.PistonwareTraceLines ~= traceLines then return end
 			local mem = heapKB()
 			table.insert(trend, ('%d'):format(mem))
 			if #trend > 15 then table.remove(trend, 1) end
@@ -284,7 +288,10 @@ half-written file, and from then on every cache-first route skips it forever. Fo
 that means a chunk that never loads. Every route that could have fixed it asked isfile and was
 told the file was fine, which is why the only known remedy was reinstalling the whole script.
 
-Treating empty as missing makes it repair itself on the next run instead. ]]
+Treating empty as missing makes it repair itself on the next run instead.
+
+Returns the body it read (false when the file is missing, empty or does not compile), so callers
+use that text instead of reading the file a second time. ]]
 local function hasContent(path, chunkName)
 	if not isfile(path) then return false end
 	local ok, body = pcall(readfile, path)
@@ -298,18 +305,25 @@ local function hasContent(path, chunkName)
 		if valid and chunkName then
 			validatedChunks[path] = {body = body, name = name, chunk = chunk}
 		end
-		return valid
+		return valid and body
 	end
-	return true
+	return body
 end
 
 local function downloadFile(path, func, chunkName)
 	local devLoader = shared.PistonwareDevLoadSource
 	if type(devLoader) == 'function' then
-		local body = devLoader(path)
+		--[[ The loader compiles a cached .lua to prove it intact. Told the name the file runs under,
+		it compiles under that name and hands the chunk back, so runChunk does not compile the same
+		source again. A loader that predates this returns the body alone, which runs as before. ]]
+		local body, chunk = devLoader(path, chunkName)
+		if chunkName and type(body) == 'string' and type(chunk) == 'function' then
+			validatedChunks[path] = {body = body, name = chunkName, chunk = chunk}
+		end
 		return func and func(path) or body
 	end
-	if not (cacheAllowed() and hasContent(path, chunkName)) then
+	local body = cacheAllowed() and hasContent(path, chunkName)
+	if not body then
 		--[[ bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
 		repo's ROOT even though it caches locally under games/; everything else lives in the
 		GitHub repo. ]]
@@ -341,8 +355,11 @@ local function downloadFile(path, func, chunkName)
 			content = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..content
 		end
 		writefile(path, content)
+		body = content
 	end
-	return (func or readfile)(path)
+	--[[ The text hasContent read or the download just wrote, rather than reading the file back. ]]
+	if func then return func(path) end
+	return body
 end
 
 --[[ The repo-folder listing and concurrent prefetch are gone. Icons use uploaded IDs; remaining
@@ -1659,7 +1676,7 @@ if not shared.VapeIndependent then
 	not a failed boot: universal.lua is then the whole module set, so its profile still loads
 	and saves. A download that failed outright stays a failed boot. ]]
 	local adapterMissing = false
-		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) and readfile(gamePath) or nil
+		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
 		gameScriptStarted = runGameScript(cached, tostring(game.PlaceId))
 	end
