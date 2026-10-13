@@ -839,13 +839,11 @@ if matchPlaces[game.PlaceId] and not (type(previousHold) == 'table' and previous
 				AutoQueueDodge keeps KnitStart from running at all: the teams are judged before this
 				client does anything toward joining.
 
-				RegionLock cannot. The region only comes back once this client has started up, and
-				that start-up waits on the connect: other controllers (TeamController among them)
-				block in waitForConnected, and the game's own FetchServerRegion call comes after them.
-				So KnitStart runs and the client connects on its side, and only the two messages that
-				tell the SERVER -- PlayerConnect and PlayerReady -- are kept back, to go out in that
-				order once every gate is open. The server never hears from you, so you are no more in
-				the match than AutoQueueDodge leaves you. ]]
+				RegionLock cannot: KnitStart runs, and only the two messages that tell the SERVER --
+				PlayerConnect and PlayerReady -- are kept back, to go out in that order once every
+				gate is open. PlayerConnect on its own already loads you in, and the server names its
+				region only once you are in, so the region check judges the server by its ping while
+				both stay held. ]]
 				local original = controller.KnitStart
 				local client = require(replicated:WaitForChild('TS'):WaitForChild('remotes')).default.Client
 				local ownWaitFor = rawget(client, 'WaitFor')
@@ -1004,14 +1002,17 @@ if matchPlaces[game.PlaceId] and not (type(previousHold) == 'table' and previous
 				BedWars hosts NA, EU and SEA. The lobby files you under one by account country
 				(its Continents table: AU, NZ and the rest of Oceania go to SEA) and matches you
 				there, but a slow queue can still hand you another region's server. The game asks
-				the server's region itself at start-up -- RegionController calls FetchServerRegion
-				and keeps the answer as Game.serverRegion -- whether or not you have connected. ]]
+				the server's region once at start-up (RegionController, kept as Game.serverRegion),
+				but under this hold that is before PlayerConnect, and the answer is blank. ]]
 				if regionSettings then
 					local REGION_ALIASES = {
 						AU = 'SEA', AUS = 'SEA', AUSTRALIA = 'SEA', NZ = 'SEA', NEWZEALAND = 'SEA',
 						OCE = 'SEA', OCEANIA = 'SEA', AS = 'SEA', ASIA = 'SEA', SG = 'SEA', SGP = 'SEA',
 						US = 'NA', USA = 'NA', AMERICA = 'NA', NORTHAMERICA = 'NA',
 						EUROPE = 'EU', GB = 'EU', UK = 'EU',
+						-- The countries BedWars' own labels lead with ('DE-HE'), should Continents not load.
+						DE = 'EU', NL = 'EU', IE = 'EU', FR = 'EU', PL = 'EU', ZA = 'EU', BR = 'NA', CA = 'NA',
+						JP = 'SEA', HK = 'SEA', IN = 'SEA',
 						-- Datacenter cities and countries, in case a label names the place instead.
 						SINGAPORE = 'SEA', SYDNEY = 'SEA', TOKYO = 'SEA', JAPAN = 'SEA', HONGKONG = 'SEA',
 						MUMBAI = 'SEA', INDIA = 'SEA', AUCKLAND = 'SEA',
@@ -1065,33 +1066,101 @@ if matchPlaces[game.PlaceId] and not (type(previousHold) == 'table' and previous
 						return type(region) == 'string' and region ~= '' and region or nil
 					end
 
+					-- The game asked once, before the server knew you, and kept the blank: hand its
+					-- store and its REGION label the answer read here.
+					local function showRegion(label)
+						pcall(function()
+							require(scripts.TS.ui.store).ClientStore:dispatch({type = 'SetServerRegion', serverRegion = label})
+						end)
+						pcall(function()
+							lplr:FindFirstChildOfClass('PlayerGui').ServerRegionDisplay.ServerRegionText.Text = '<b>REGION: '..label..'</b>'
+						end)
+					end
+
 					-- Asked in its own thread, the same call RegionController makes: a reply that
-					-- takes its time must not stall the settings reads or the Timeout.
+					-- takes its time must not stall the settings reads or the Timeout. Each reply is
+					-- timed too; the fastest round trip is the fallback when no label ever comes.
 					-- askError keeps the last thing that went wrong, for the Timeout's message.
 					local asking, nextAsk, askError = false, 0, nil
+					local blanks, fastest, timed = 0, math.huge, 0
+					local fetch
 					local function askRegion()
 						if asking or os.clock() < nextAsk then return end
 						asking = true
 						task.spawn(function()
+							local sentAt
 							local ok, region = pcall(function()
-								return remotes.Client:Get('FetchServerRegion'):CallServer()
+								fetch = fetch or remotes.Client:Get('FetchServerRegion')
+								sentAt = os.clock()
+								return fetch:CallServer()
 							end)
 							if not ok then
 								askError = tostring(region)
 								-- The same RemoteFunction, invoked directly.
 								ok, region = pcall(function()
-									return replicated.rbxts_include.node_modules['@rbxts'].net.out._NetManaged.FetchServerRegion:InvokeServer()
+									local remote = replicated.rbxts_include.node_modules['@rbxts'].net.out._NetManaged.FetchServerRegion
+									sentAt = os.clock()
+									return remote:InvokeServer()
 								end)
 								if not ok then askError = tostring(region) end
 							end
+							if ok and sentAt then
+								fastest = math.min(fastest, os.clock() - sentAt)
+								timed += 1
+							end
 							asking = false
-							nextAsk = os.clock() + 2
+							nextAsk = os.clock() + 0.5
 							if ok and type(region) == 'string' and region ~= '' then
-								if not hold.serverRegion then hold.serverRegion = region end
+								if not hold.serverRegion then
+									hold.serverRegion = region
+									showRegion(region)
+								end
 							elseif ok then
-								askError = 'the server answered '..tostring(region)
+								blanks += 1
+								askError = region == '' and 'the server gave no region' or ('the server answered '..tostring(region))
 							end
 						end)
+					end
+
+					--[[ The server keeps its region to itself until you are in the match: it answers ''
+					to a player held out of it, and PlayerConnect on its own already loads you in, so the
+					label cannot be had in time. What can be measured while held is how far away the
+					server is. Every ask is timed, blank or not, and the fastest round trip, against the
+					region you queue from (your country through Continents, the lobby's own rule), says
+					where the server can be. A real label, should one ever come back, outranks it. ]]
+					local home
+					task.spawn(function()
+						pcall(function()
+							home = regionCode(game:GetService('LocalizationService'):GetCountryRegionForPlayerAsync(lplr))
+						end)
+					end)
+					--[[ Round trips as measured here, a network round trip plus up to a server and a
+					client frame: inside your own region well under 70 ms; NA to EU 80-180 ms; from NA or
+					EU over to SEA 110-300 ms. Below NEIGHBOUR_MS from NA or EU it cannot be SEA, and from
+					FAR_MS it can only be SEA. From SEA a far server could be either of the others. ]]
+					local NEAR_MS, NEIGHBOUR_MS, FAR_MS, SAMPLES = 70, 105, 250, 5
+					local function pingRegions()
+						if timed < SAMPLES or fastest == math.huge or not home then return nil end
+						local ms = math.floor(fastest * 1000 + 0.5)
+						if ms <= NEAR_MS then return {[home] = true}, ms end
+						if home ~= 'SEA' then
+							if ms < NEIGHBOUR_MS then return {NA = true, EU = true}, ms end
+							if ms >= FAR_MS then return {SEA = true}, ms end
+						end
+						return {NA = true, EU = true, SEA = true}, ms
+					end
+					-- 'allowed' when every region it can be in is listed, 'wrong' when none is, else 'unclear'.
+					local function pingVerdict(list)
+						local possible, ms = pingRegions()
+						if not possible then return nil end
+						local any, all, names = false, true, {}
+						for _, region in {'NA', 'EU', 'SEA'} do
+							if possible[region] then
+								table.insert(names, region)
+								if allowed(region, list) then any = true else all = false end
+							end
+						end
+						return all and 'allowed' or any and 'unclear' or 'wrong', table.concat(names, ' or ')..', judged by ping ('..ms..' ms)'
 					end
 
 					local function regionCheck()
@@ -1107,44 +1176,75 @@ if matchPlaces[game.PlaceId] and not (type(previousHold) == 'table' and previous
 								end
 								return
 							end
+							-- No region listed accepts any server: nothing to wait for.
+							if type(current.regions) ~= 'table' or #current.regions == 0 then
+								hold.region = 'allowed'
+								hold.release('region')
+								return
+							end
 							-- Nothing to ask until KnitStart runs (AutoQueueDodge may still be judging
 							-- the teams); the Timeout counts from then.
 							local started = hold.knitStarted
 							if started and not hold.serverRegion then
-								hold.serverRegion = storedRegion()
-								if not hold.serverRegion then askRegion() end
+								local stored = storedRegion()
+								if stored then
+									hold.serverRegion = stored
+								else
+									askRegion()
+								end
 							end
 							local label = hold.serverRegion
 							local code = label and regionCode(label)
+							local verdict, shown
 							if label and (code or allowed(label, current.regions)) then
-								local shown = (code and code ~= canonical(label)) and (label..' ('..code..')') or label
-								if allowed(label, current.regions) then
-									hold.region = 'allowed'
+								shown = (code and code ~= canonical(label)) and (label..' ('..code..')') or label
+								verdict = allowed(label, current.regions) and 'allowed' or 'wrong'
+							elseif started then
+								verdict, shown = pingVerdict(current.regions)
+							end
+							hold.regionText = shown
+							local party = type(teleportData) == 'table' and teleportData.party
+							local solo = (type(party) == 'table' and tonumber(party.partySize) or 1) <= 1
+							local timeout = tonumber(current.timeout) or 30
+							local timedOut = started and timeout > 0 and os.clock() - started >= timeout
+							if verdict == 'allowed' then
+								hold.region = 'allowed'
+								if hold.release('region') then
+									notify('Loading in: this server is in '..shown..'.', 6, nil, 'RegionLock')
+								elseif hold.state == 'held' then
+									notify('This server is in '..shown..'. Waiting on AutoQueueDodge.', 6, nil, 'RegionLock')
+								end
+								return
+							elseif verdict then
+								--[[ Wrong, or not clearly allowed: held, and with Requeue on (solo) queued
+								again, until a server that is clearly in a listed region comes up. A server
+								named by its label as wrong waits as it always has; one only judged by ping
+								waits for the Timeout, unless Requeue still has you queued. ]]
+								hold.region = verdict
+								local message = verdict == 'wrong' and ('Not loading: this server is in '..shown..'.')
+									or ('Not loading: this server could be in '..shown..'.')
+								if told ~= message then
+									told = message
+									notify(message..((current.requeue == true and solo) and '' or '\nLeave to requeue, or add the region in RegionLock.'), 15, 'warning', 'RegionLock')
+								end
+								if current.requeue == true then
+									requeue('RegionLock', verdict == 'wrong' and ('this server is in '..shown) or ('this server could be in '..shown))
+								end
+								if not label and timedOut and (queueState() or 0) == 0 then
+									hold.region = 'unknown'
 									if hold.release('region') then
-										notify('Loading in: this server is in '..shown..'.', 6, nil, 'RegionLock')
-									elseif hold.state == 'held' then
-										notify('This server is in '..shown..'. Waiting on AutoQueueDodge.', 6, nil, 'RegionLock')
+										notify('Not queued again within the Timeout, loading in.', 8, 'warning', 'RegionLock')
 									end
 									return
 								end
-								hold.region = 'wrong'
-								if told ~= shown then
-									told = shown
-									notify('Not loading: this server is in '..shown..'.\nLeave to requeue, or add the region in RegionLock.', 15, 'warning', 'RegionLock')
-								end
-								if current.requeue == true then
-									requeue('RegionLock', 'this server is in '..shown)
-								end
 							else
-								-- No answer yet, or a label that names no region we know: never a reason
-								-- to hold for good, so the Timeout loads it anyway.
+								-- No label, and not enough replies (or no home region) to judge by ping yet.
 								hold.region = 'finding'
-								local timeout = tonumber(current.timeout) or 20
-								if started and timeout > 0 and os.clock() - started >= timeout then
+								if timedOut then
 									hold.region = 'unknown'
 									if hold.release('region') then
 										notify(label and ('Did not recognise this server\'s region ('..label..'), loading anyway.')
-											or ('Could not read this server\'s region'..(askError and (' ('..askError..')') or '')..', loading anyway.'), 10, 'warning', 'RegionLock')
+											or ('Could not tell this server\'s region'..(askError and (' ('..askError..')') or '')..', loading anyway.'), 10, 'warning', 'RegionLock')
 									end
 									return
 								end

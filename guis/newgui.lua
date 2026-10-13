@@ -774,10 +774,16 @@ local theme = {
 	TrackOffHover = Color3.fromRGB(79, 79, 79),
 	Knob = Color3.fromRGB(20, 20, 20),
 	KnobOff = Color3.fromRGB(20, 20, 20),
-	Text = Color3.fromRGB(221, 221, 221),
-	Label = Color3.fromRGB(221, 221, 221),
-	SubText = Color3.fromRGB(153, 153, 153),
-	Header = Color3.fromRGB(153, 153, 153),
+	--[[ Measured off Slinky's own menu: the bold NONE badge reads 161 grey and the names reach about
+	240, which is its site's palette exactly -- #F1F0EA for text, #A2A19D for everything secondary. ]]
+	Text = Color3.fromRGB(241, 240, 234),
+	Label = Color3.fromRGB(241, 240, 234),
+	SubText = Color3.fromRGB(162, 161, 157),
+	Header = Color3.fromRGB(162, 161, 157),
+	-- Text under the pointer goes white (Slinky's hovered badge reads 255); a description lights to
+	-- about 203, as Slinky's does while its + is hovered.
+	Lit = Color3.fromRGB(255, 255, 255),
+	SubTextLit = Color3.fromRGB(204, 203, 198),
 	Muted = Color3.fromRGB(102, 102, 102),
 	Red = Color3.fromRGB(221, 70, 71),
 	Yellow = Color3.fromRGB(245, 190, 60),
@@ -786,7 +792,9 @@ local theme = {
 	CardWidth = 434,
 	Gap = 8,
 	RowHeight = 28,
-	Inset = 12
+	Inset = 12,
+	-- Hover changes and hints coming in: quick enough to read as a response, not an animation.
+	HoverTween = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 }
 
 -- The accent, from the GUI theme slider (orange by default).
@@ -1418,6 +1426,26 @@ function ui.text(parent, props)
 	return label
 end
 
+--[[ How every hover hint comes in: from clear to solid over theme.HoverTween, text and background
+together. Going away stays instant. ]]
+function ui.fadeIn(label)
+	tween:Cancel(label, 'fade')
+	label.TextTransparency = 1
+	label.BackgroundTransparency = 1
+	tween:Tween(label, theme.HoverTween, {TextTransparency = 0, BackgroundTransparency = 0}, 'fade')
+end
+
+--[[ What is lit under the pointer, each with how to set it back. Showing or hiding the menu under a
+hovered element sends it no leave, so the menu's Visible handler puts all of it back to rest. ]]
+ui.hovered = setmetatable({}, {__mode = 'k'})
+function ui.restHovered()
+	local resting = ui.hovered
+	ui.hovered = setmetatable({}, {__mode = 'k'})
+	for _, rest in resting do
+		pcall(rest)
+	end
+end
+
 -- An icon: a Lucide image in pistonware/assets/icons, tinted by the holder's TextColor3; where the
 -- image cannot be shown (no local files on this client), one fallback character instead.
 local ICON_DIR = 'pistonware/assets/icons'
@@ -1577,19 +1605,24 @@ function ui.switch(parent, position)
 			BackgroundColor3 = enabled and theme.Knob or theme.KnobOff
 		})
 	end
+	local function rest()
+		hovered = false
+		if not switch.Enabled then
+			tween:Cancel(track)
+			track.BackgroundColor3 = theme.TrackOff
+		end
+	end
 	track.MouseEnter:Connect(function()
 		hovered = true
+		ui.hovered[track] = rest
 		if not switch.Enabled then
 			tween:Cancel(track)
 			track.BackgroundColor3 = theme.TrackOffHover
 		end
 	end)
 	track.MouseLeave:Connect(function()
-		hovered = false
-		if not switch.Enabled then
-			tween:Cancel(track)
-			track.BackgroundColor3 = theme.TrackOff
-		end
+		ui.hovered[track] = nil
+		rest()
 	end)
 	function switch:Color(accent)
 		if self.Enabled then
@@ -1666,9 +1699,14 @@ function ui.knobBubble(knob)
 				end)
 			end)
 		end
+		local appearing = not (entry.Shown and bubble.Visible)
 		bubble.Text = text
 		entry.Shown = true
 		place()
+		-- In with the quick fade every hint uses; a bubble already up only changes its text.
+		if appearing and bubble.Visible then
+			ui.fadeIn(bubble)
+		end
 	end
 	function entry:SetText(text)
 		if bubble then
@@ -1722,11 +1760,16 @@ function ui.expander(parent, position)
 	function glyph:Set(open)
 		upright.Visible = not open
 	end
+	local function rest()
+		tween:Tween(square, theme.HoverTween, {BackgroundColor3 = theme.Pill})
+	end
 	button.MouseEnter:Connect(function()
-		square.BackgroundColor3 = theme.PillHover
+		ui.hovered[square] = rest
+		tween:Tween(square, theme.HoverTween, {BackgroundColor3 = theme.PillHover})
 	end)
 	button.MouseLeave:Connect(function()
-		square.BackgroundColor3 = theme.Pill
+		ui.hovered[square] = nil
+		rest()
 	end)
 	return button, glyph
 end
@@ -1775,8 +1818,8 @@ function ui.pill(parent, props)
 		pill.AutoButtonColor = false
 		pill.Text = ''
 	end
-	ui.corner(pill, UDim.new(1, 0))
-	ui.stroke(pill, theme.Outline, 2, 0)
+	ui.corner(pill, props.Radius or UDim.new(1, 0))
+	ui.stroke(pill, theme.Outline, props.Thickness or 2, 0)
 	if parent then pill.Parent = parent end
 	return pill
 end
@@ -1824,6 +1867,10 @@ function ui.confirm(body, onContinue, continueText)
 		Text = '',
 		ZIndex = 21
 	}, blocker)
+	-- The pill draws over the dialog, and the rows under it still get their hover: put it away.
+	if ui.refreshTooltip then
+		ui.refreshTooltip()
+	end
 	ui.corner(card, 20)
 	-- The same zoom as the menu window, so the modal stays readable on a phone.
 	ui.new('UIScale', {Scale = layout and layout.Zoom or 1}, card)
@@ -2019,7 +2066,8 @@ vape.Libraries = {
 }
 
 --[[
-	Where the mobile button sits.
+	Where the mobile button sits when it is docked beside the game's top bar. Its default place is
+	the corner instead: see vapeButtonCorner.
 
 	It used to be a hardcoded (1, -90) from the right edge, measured against a top bar that no
 	longer looks like that. The current client draws its buttons out of TopBarAppGui.TopBarApp,
@@ -2044,14 +2092,41 @@ local topbarClusterSlack = 20
 local vapeButtonSize = 32
 local vapeButtonFallback = UDim2.new(1, -90, 0, 4)
 
-local function vapeButtonPosition()
+--[[
+	The corner: where the button goes unless the game docks it beside its top bar (UI Cleanup's
+	Button Next To Topbar sets that, through SetVapeButtonDocked).
+
+	The right end of the strip Roblox leaves free along the top of the screen, TopbarInset. That
+	strip already stops at the device's safe area, so a notch or a rounded screen corner is never
+	under it. 12px in from its end, as the game keeps its own row of buttons -- the game file moves
+	that row over to give the button the room. Vertically, on that row: 44px buttons 2px up from
+	the bottom of the strip, which vapeButtonPosition replaces with the measured row when there is
+	one. A client without TopbarInset gets nothing here, and the button docks as it always has.
+]]
+local function vapeButtonCorner()
+	local ok, inset = pcall(function()
+		return guiService.TopbarInset
+	end)
+	if not (ok and typeof(inset) == 'Rect' and inset.Width > 0) then
+		return nil
+	end
+	return math.floor(inset.Max.X - 12 - vapeButtonSize),
+		math.max(math.floor(inset.Max.Y - 2 - (44 + vapeButtonSize) / 2), 4)
+end
+
+local function vapeButtonPosition(docked)
+	local cornerX, cornerTop
+	if not docked then
+		cornerX, cornerTop = vapeButtonCorner()
+	end
+	local corner = cornerX and UDim2.fromOffset(cornerX, cornerTop) or nil
 	local players = cloneref(game:GetService('Players'))
 	local localPlayer = players.LocalPlayer
 	local playerGui = localPlayer and localPlayer:FindFirstChildOfClass('PlayerGui')
 	local topbarGui = playerGui and playerGui:FindFirstChild('TopBarAppGui')
 	local topbar = topbarGui and topbarGui:FindFirstChild('TopBarApp')
 	if not (topbar and topbar:IsA('GuiObject')) or topbar.AbsoluteSize.X <= 0 then
-		return nil
+		return corner
 	end
 
 	--[[
@@ -2092,7 +2167,7 @@ local function vapeButtonPosition()
 		end
 	end
 
-	if #boxes <= 0 then return nil end
+	if #boxes <= 0 then return corner end
 
 	--[[
 		Walk the run of buttons leftwards from the right edge of the bar.
@@ -2140,6 +2215,14 @@ local function vapeButtonPosition()
 		inset = guiService:GetGuiInset().Y
 	end
 
+	--[[ The corner, on the game's row, once that row stops short of it. Until the game has made the
+	room -- and in a game that never does -- the button stays beside the buttons instead of landing
+	on the last of them. The 2px are for fractional pixels. ]]
+	if cornerX and run.Right + topbarGap <= cornerX + 2 then
+		local top = run.Top + inset + ((run.Height - vapeButtonSize) / 2)
+		return UDim2.fromOffset(cornerX, top >= 0 and math.floor(top) or cornerTop)
+	end
+
 	-- The bar reports negative Y while the client has it slid off screen (in its own menu, or
 	-- mid-transition). Following it there would park our button off screen too, so only the
 	-- horizontal placement is taken from it and the row falls back to the default height.
@@ -2167,11 +2250,21 @@ local function anchorVapeButton(button)
 	local current
 
 	local function apply()
-		local position = vapeButtonPosition() or vapeButtonFallback
+		local position = vapeButtonPosition(vape.VapeButtonDocked) or vapeButtonFallback
 		if current ~= position then
+			local moved = current ~= nil
 			current = position
 			button.Position = position
+			-- The Mod Overlay keeps under the button, so it is placed again after a move.
+			if moved then
+				task.defer(pcall, ui.applyHudZoom)
+			end
 		end
+	end
+
+	-- For what should not wait for the next check: the dock setting, or the game moving its bar.
+	vape.PlaceVapeButton = function()
+		pcall(apply)
 	end
 
 	--[[ Guarded like the loop below. This first call runs at the end of LoadGUI, and it reads
@@ -2188,6 +2281,19 @@ local function anchorVapeButton(button)
 
 	if vape.Clean then
 		vape:Clean(thread)
+	end
+end
+
+--[[ Beside the game's top bar (true) or in the corner (false, the default). The game's UI Cleanup
+sets it, docked only while it is on with Button Next To Topbar, and the button moves now rather
+than on its next check. ]]
+vape.VapeButtonDocked = false
+function vape:SetVapeButtonDocked(docked)
+	docked = docked == true
+	if self.VapeButtonDocked == docked then return end
+	self.VapeButtonDocked = docked
+	if self.PlaceVapeButton then
+		self.PlaceVapeButton()
 	end
 end
 
@@ -2380,10 +2486,24 @@ function ui.lastInputTouch()
 	return ok and last == Enum.UserInputType.Touch
 end
 
+--[[ While a hint is up, the title it belongs to -- a toggle's name, a module's -- is lit white, and
+set back when the hint goes. Its own colour is kept from the first time, taken at rest. ]]
+function ui.lightTitle(entry, lit)
+	local title = entry and entry.Title
+	if not (title and title.Parent and (title:IsA('TextLabel') or title:IsA('TextButton'))) then return end
+	if lit then
+		entry.TitleColor = entry.TitleColor or title.TextColor3
+		tween:Tween(title, theme.HoverTween, {TextColor3 = theme.Lit})
+	elseif entry.TitleColor then
+		tween:Tween(title, theme.HoverTween, {TextColor3 = entry.TitleColor})
+	end
+end
+
 -- Puts the pill on the switch of the title the pointer is on, or away when it is on none.
 function ui.refreshTooltip()
 	local current, entry
-	if tooltipsEnabled and clickgui and clickgui.Visible and not (layout and layout.ListOpen) and not ui.lastInputTouch() then
+	if tooltipsEnabled and clickgui and clickgui.Visible and not (layout and layout.ListOpen)
+		and not clickgui:FindFirstChild('Confirm') and not ui.lastInputTouch() then
 		--[[ The pointer is measured from the top of the screen, but the positions the rows report
 		are measured from the GUI's own origin, under Roblox's top bar; the menu's own position in
 		that space is the difference. ]]
@@ -2410,12 +2530,22 @@ function ui.refreshTooltip()
 		end
 	end
 	if not current then
+		if ui.tooltipEntry then
+			ui.lightTitle(ui.tooltipEntry, false)
+			ui.tooltipEntry = nil
+		end
 		ui.tooltipShown = nil
 		tooltip.Visible = false
 		return
 	end
 
+	-- A new hint, or one coming back after something else put the pill away (an open list).
+	local appearing = ui.tooltipShown ~= current or not tooltip.Visible
+	if ui.tooltipEntry and ui.tooltipEntry ~= entry then
+		ui.lightTitle(ui.tooltipEntry, false)
+	end
 	ui.tooltipShown = current
+	ui.tooltipEntry = entry
 	tooltip.Text = entry.Text
 	tooltip.TextWrapped = entry.Wrapped
 	tooltip.Size = UDim2.fromOffset(entry.Size.X, entry.Size.Y)
@@ -2441,7 +2571,23 @@ function ui.refreshTooltip()
 		top = switchTop + anchor.AbsoluteSize.Y / s + 4
 	end
 	left = math.clamp(left, 4, math.max(viewportWidth() / s - width - 4, 4))
-	tooltip.Position = UDim2.fromOffset(left, top)
+	-- Whole pixels, so the same place from one refresh to the next reads as unchanged.
+	local target = UDim2.fromOffset(math.floor(left + 0.5), math.floor(top + 0.5))
+	if appearing then
+		-- In quickly: faded up from clear while rising the last few px into place.
+		ui.lightTitle(entry, true)
+		tween:Cancel(tooltip)
+		tooltip.Position = target + UDim2.fromOffset(0, 4)
+		tooltip.Visible = true
+		ui.fadeIn(tooltip)
+		tween:Tween(tooltip, theme.HoverTween, {Position = target})
+		ui.tooltipTarget = target
+	elseif ui.tooltipTarget ~= target then
+		-- Moved under a pill already up (the page scrolled): straight there.
+		tween:Cancel(tooltip)
+		tooltip.Position = target
+		ui.tooltipTarget = target
+	end
 	tooltip.Visible = true
 end
 
@@ -3235,6 +3381,7 @@ function build.root()
 	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
 		table.clear(ui.tooltipHovered)
 		ui.refreshTooltip()
+		ui.restHovered()
 	end))
 	--[[ The pointer moving or the page scrolling re-decides which row the pill is on; while one is
 	showing it is also re-checked a few times a second, for a row hidden or collapsed under a still
@@ -3661,7 +3808,8 @@ function build.lists()
 			ui.corner(button, UDim.new(1, 0))
 			ui.padding(button, 16, 16, 0, 0)
 			local stroke = ui.stroke(button, theme.Outline, 1, 0.1)
-			if tip then addTooltip(button, tip) end
+			-- Centred on the button, kept inside the strip rather than the button itself.
+			if tip then addRowTooltip(button, tip, button, nil, row) end
 			button.MouseEnter:Connect(function()
 				button.BackgroundColor3 = theme.Raised
 			end)
@@ -6945,6 +7093,15 @@ function build.targetInfo()
 
 		-- Eased in and out (see paint); nothing is written once it has settled.
 		local clock = os.clock()
+		--[[ Back after being switched off (this runs every frame while it is on): start from rest,
+		not fading out of wherever it was when it went. ]]
+		if clock - anim.Clock > 1 then
+			anim.Away = false
+			anim.Show = 0
+			-- Damage taken while it was off is not a hit to wash the card red for.
+			anim.MyHealth = nil
+			anim.Hurt = 0
+		end
 		local dt = math.min(clock - anim.Clock, 0.1)
 		anim.Clock = clock
 		local moved = false
@@ -7015,10 +7172,12 @@ function build.targetInfo()
 		local position = ORIGIN
 		local parent = Holder.Parent
 		local size = Holder.AbsoluteSize
-		if follow == false then
-			-- Off screen or dead: it fades out where it last was, not back in its window.
+		if follow == false or (follow == nil and wanted == 0 and anim.Away and anim.Show > 0) then
+			--[[ Off screen, dead, or let go of: it fades out where it last was, and goes back to its
+			window only once it has faded -- not back there first and fading out in the window. ]]
 			position = Holder.Position
 		elseif follow and parent and size.X > 0 then
+			anim.Away = true
 			local s = size.X / WIDTH
 			local screen = vape.gui and vape.gui.AbsoluteSize or Vector2.new(1920, 1080)
 			local x = math.clamp(follow.X + 10 * s, 0, math.max(screen.X - size.X, 0))
@@ -7034,6 +7193,9 @@ function build.targetInfo()
 			-- bar and the projected point from the true top, and the menu's root frame sits at the latter.
 			local base = parent.AbsolutePosition - (scaledgui and scaledgui.AbsolutePosition or Vector2.zero)
 			position = UDim2.fromOffset(math.floor((x - base.X) / s + 0.5), math.floor((y - base.Y) / s + 0.5))
+		end
+		if position == ORIGIN then
+			anim.Away = false
 		end
 		if Holder.Position ~= position then
 			Holder.Position = position
@@ -7951,7 +8113,8 @@ function layout.place(tab)
 	page.Right.Visible = columns > 1
 	page.Left.Size = columns > 1 and UDim2.new(0.5, -theme.Gap / 2, 0, 0) or UDim2.new(1, 0, 0, 0)
 	if page.Empty then
-		page.Empty.Visible = #list == 0
+		-- 'No modules match.' only once something has been typed.
+		page.Empty.Visible = #list == 0 and (tab ~= 'Search' or searching)
 	end
 end
 
@@ -8100,16 +8263,25 @@ function ui.card(props)
 		Size = UDim2.new(1, -(theme.Inset * 2 + 28), 0, 20),
 		TextTruncate = Enum.TextTruncate.AtEnd
 	}})
-	-- The description line, and the + beside it, light the description up a little while hovered.
-	local function lightDescription(lit)
-		tween:Tween(description, uipallet.Tween, {TextColor3 = lit and Color3.fromRGB(196, 196, 196) or theme.SubText})
+	--[[ The description line, and the + beside it, light the description up a little while hovered.
+	The + button spans the line, so both are entered at once and their events can come in either
+	order: a leave only puts it out when the pointer is really off both. ]]
+	local function restDescription()
+		tween:Tween(description, theme.HoverTween, {TextColor3 = theme.SubText})
 	end
 	for _, part in {description, expand} do
 		part.MouseEnter:Connect(function()
-			lightDescription(true)
+			ui.hovered[description] = restDescription
+			tween:Tween(description, theme.HoverTween, {TextColor3 = theme.SubTextLit})
 		end)
 		part.MouseLeave:Connect(function()
-			lightDescription(false)
+			-- Measured as the hint pill measures it: the pointer in the GUI's own space.
+			local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
+			for _, other in {description, expand} do
+				if other.Visible and ui.within(point, other.AbsolutePosition, other.AbsoluteSize) then return end
+			end
+			ui.hovered[description] = nil
+			restDescription()
 		end)
 	end
 
@@ -8211,22 +8383,50 @@ components.Bind = function(props, children, api)
 		return 'Click to bind, click again to clear\nShift-click to switch toggle/hold\n'..holdText
 	end)
 
-	local function paint()
+	--[[ Under the pointer the badge's text lights up, as Slinky's does: NONE and PRESS A KEY... go
+	white, a bound key's accent goes most of the way there. animate is for those hover changes; a
+	state change paints at once. ]]
+	local hovered = false
+	local function paint(animate)
+		local text
 		if component.Binding then
 			bind.Text = 'PRESS A KEY...'
-			bind.TextColor3 = theme.Text
+			text = hovered and theme.Lit or theme.Text
 			bind.BackgroundColor3 = theme.Badge
 		elseif #component.Keys > 0 then
 			bind.Text = ui.keyText(component.Keys)..(component.Hold and '  HOLD' or '')
 			local accent = theme.Accent()
-			bind.TextColor3 = accent
+			text = hovered and accent:Lerp(theme.Lit, 0.45) or accent
 			bind.BackgroundColor3 = theme.Tint(accent, 0.15)
 		else
 			bind.Text = component.Hold and 'NONE  HOLD' or 'NONE'
-			bind.TextColor3 = theme.SubText
+			text = hovered and theme.Lit or theme.SubText
 			bind.BackgroundColor3 = theme.Badge
 		end
+		if animate then
+			tween:Tween(bind, theme.HoverTween, {TextColor3 = text})
+		else
+			tween:Cancel(bind)
+			bind.TextColor3 = text
+		end
 	end
+	local function restBadge()
+		if hovered then
+			hovered = false
+			paint(true)
+		end
+	end
+	-- A tap enters the badge and never leaves it, so a phone gets no hover light.
+	bind.MouseEnter:Connect(function()
+		if ui.lastInputTouch() then return end
+		hovered = true
+		ui.hovered[bind] = restBadge
+		paint(true)
+	end)
+	bind.MouseLeave:Connect(function()
+		ui.hovered[bind] = nil
+		restBadge()
+	end)
 
 	if props.Module then
 		local parent = api.BindParent or api.Object
@@ -8396,6 +8596,9 @@ components.Bind = function(props, children, api)
 	function component:SetColor(newColor) end
 
 	function component:SetParent(parent)
+		-- Moved out from under a still pointer (a profile card rebuilt): no leave comes.
+		ui.hovered[bind] = nil
+		restBadge()
 		bind.Parent = parent
 		bind.LayoutOrder = 2
 	end
@@ -8858,12 +9061,22 @@ components.CategoryList = function(props, children, api)
 		local actions = component.CardActions or {}
 		local function action(iconName, tip, order2, colour, callback)
 			local button = ui.icon(icons, iconName, 20, {Class = 'TextButton', Color = colour or theme.SubText, Props = {LayoutOrder = order2, Size = UDim2.fromOffset(26, 24)}})
-			addTooltip(button, tip)
+			-- Its hint over it, in the pill every hint uses, kept inside the card.
+			addRowTooltip(button, tip, button, nil, obj)
+			local function rest()
+				tween:Tween(button, theme.HoverTween, {TextColor3 = theme.SubText})
+			end
 			button.MouseEnter:Connect(function()
-				if not colour then button.TextColor3 = theme.Text end
+				if not colour and not ui.lastInputTouch() then
+					ui.hovered[button] = rest
+					tween:Tween(button, theme.HoverTween, {TextColor3 = theme.Lit})
+				end
 			end)
 			button.MouseLeave:Connect(function()
-				if not colour then button.TextColor3 = theme.SubText end
+				if not colour then
+					ui.hovered[button] = nil
+					rest()
+				end
 			end)
 			if callback then
 				button.MouseButton1Click:Connect(callback)
@@ -8876,10 +9089,15 @@ components.CategoryList = function(props, children, api)
 		(Exporting is the Share profiles strip's Export profile.) The ring is two
 		halves, each a clipped window onto a round stroke whose gradient is opaque on one side: turning
 		the gradient sweeps the edge round, the right half for the first half of the hold and the left
-		half for the second. ]]
+		half for the second.
+
+		Both circles sit RING_STROKE inside the ring's square. A stroke is drawn outside its frame and
+		each half clips to that square, so circles filling it lost the outer edge of their stroke: the
+		accent arc was cut away at the top, bottom and sides and showed only near the diagonals. ]]
 		local loadButton = action('share', 'Hold to load', 0, nil, nil)
 		do
 			local HOLD_TIME = 0.6
+			local RING_STROKE = 2
 			local ring = ui.new('Frame', {
 				Name = 'LoadRing',
 				AnchorPoint = Vector2.new(0.5, 0.5),
@@ -8888,9 +9106,13 @@ components.CategoryList = function(props, children, api)
 				Size = UDim2.fromOffset(30, 30),
 				Visible = false
 			}, loadButton)
-			local track = ui.new('Frame', {BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1)}, ring)
+			local track = ui.new('Frame', {
+				BackgroundTransparency = 1,
+				Position = UDim2.fromOffset(RING_STROKE, RING_STROKE),
+				Size = UDim2.new(1, -RING_STROKE * 2, 1, -RING_STROKE * 2)
+			}, ring)
 			ui.corner(track, UDim.new(1, 0))
-			ui.stroke(track, theme.Outline, 2, 0.3)
+			ui.stroke(track, theme.Outline, RING_STROKE, 0.3)
 			local function half(isRight)
 				local window = ui.new('Frame', {
 					BackgroundTransparency = 1,
@@ -8900,11 +9122,11 @@ components.CategoryList = function(props, children, api)
 				}, ring)
 				local circle = ui.new('Frame', {
 					BackgroundTransparency = 1,
-					Position = UDim2.fromScale(isRight and -1 or 0, 0),
-					Size = UDim2.fromScale(2, 1)
+					Position = UDim2.new(isRight and -1 or 0, RING_STROKE, 0, RING_STROKE),
+					Size = UDim2.new(2, -RING_STROKE * 2, 1, -RING_STROKE * 2)
 				}, window)
 				ui.corner(circle, UDim.new(1, 0))
-				local stroke = ui.stroke(circle, theme.Accent(), 2, 0)
+				local stroke = ui.stroke(circle, theme.Accent(), RING_STROKE, 0)
 				return ui.new('UIGradient', {
 					Transparency = NumberSequence.new({
 						NumberSequenceKeypoint.new(0, 0),
@@ -8922,6 +9144,11 @@ components.CategoryList = function(props, children, api)
 			end
 
 			local holding, progress, stepper = false, 0, nil
+			-- Whether the pointer is on the icon, for the colour it goes back to after a hold.
+			local over = false
+			local function restIcon()
+				tween:Tween(loadButton, theme.HoverTween, {TextColor3 = over and theme.Lit or theme.SubText})
+			end
 			local function stop()
 				if stepper then
 					stepper:Disconnect()
@@ -8932,6 +9159,8 @@ components.CategoryList = function(props, children, api)
 				stop()
 				ring.Visible = true
 				rightStroke.Color, leftStroke.Color = theme.Accent(), theme.Accent()
+				-- The icon takes the accent while it is held, the ring's colour.
+				tween:Tween(loadButton, theme.HoverTween, {TextColor3 = theme.Accent()})
 				stepper = runService.RenderStepped:Connect(function(dt)
 					-- The list rebuilt its rows mid-hold: this card is gone, and so is its profile's row.
 					if not loadButton.Parent then
@@ -8947,12 +9176,14 @@ components.CategoryList = function(props, children, api)
 							ring.Visible = false
 							progress = 0
 							paint(0)
+							restIcon()
 						end)
 						selectEntry(name.Name)
 						component:ChangeValue()
 					elseif progress <= 0 and not holding then
 						stop()
 						ring.Visible = false
+						restIcon()
 					end
 				end)
 			end
@@ -8967,11 +9198,13 @@ components.CategoryList = function(props, children, api)
 					holding = false
 				end
 			end)
+			loadButton.MouseEnter:Connect(function()
+				over = not ui.lastInputTouch()
+			end)
 			loadButton.MouseLeave:Connect(function()
+				over = false
 				holding = false
 			end)
-			-- The name and the hint over it, as the toggles' help shows.
-			addRowTooltip(loadButton, 'Hold to load', loadButton, nil, obj)
 		end
 		action('import', 'Import into this profile', 2, nil, function()
 			if actions.Import then actions.Import(name.Name) end
@@ -9912,6 +10145,8 @@ components.Divider = function(props, children, api)
 end
 
 components.Dropdown = function(props, children, api)
+	-- The border of a dropdown's box, closed and open; Slinky's is a hair over a pixel.
+	local DROPDOWN_STROKE = 1.5
 	local component = {
 		Index = 0,
 		Type = 'Dropdown',
@@ -9930,8 +10165,10 @@ components.Dropdown = function(props, children, api)
 	local line = ui.row(dropdown, {LayoutOrder = 1})
 	ui.rowLabel(line, props)
 	addTooltip(line, props.Tooltip or props.Name)
-	-- The pill carries its own text, so nothing here is shaped like a button to autoexec/mcp.lua.
-	local button = ui.pill(line, {})
+	--[[ The pill carries its own text, so nothing here is shaped like a button to autoexec/mcp.lua.
+	Drawn as Slinky's dropdown box -- 8 px corners and a thin border -- 22 px tall over its border
+	like the pill it replaces, so the row keeps its height. ]]
+	local button = ui.pill(line, {Radius = UDim.new(0, 8), Thickness = DROPDOWN_STROKE, Size = UDim2.new(0.5, -14, 0, 22 - DROPDOWN_STROKE * 2)})
 	button.Name = 'Value'
 	local title = ui.text(button, {Text = component.Value, Size = 15, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
 		Position = UDim2.fromOffset(12, 0),
@@ -9940,11 +10177,11 @@ components.Dropdown = function(props, children, api)
 	}})
 	props.Function = props.Function or function() end
 
-	--[[ The list opens over the rows below it rather than pushing them down: an outlined box laid on
-	the menu itself, its top on the pill so the first choice sits where the pill's text was, the
-	choices stacked inside and the one in use in the accent, as Slinky draws it. Picking one, a click
-	anywhere else or closing the menu closes it. ]]
-	local ENTRY_HEIGHT = 26
+	--[[ The list opens over the rows below it rather than pushing them down: Slinky's box laid on the
+	menu itself, its top on the closed box's top and as wide, the choices 30 px apart with a rule
+	between each and the one in use in the accent. Picking one, a click anywhere else or closing the
+	menu closes it. ]]
+	local ENTRY_HEIGHT = 30
 	local blocker, hideConnection
 	local function closeList()
 		if hideConnection then
@@ -9986,19 +10223,19 @@ components.Dropdown = function(props, children, api)
 		blocker.MouseButton2Click:Connect(closeList)
 		hideConnection = clickgui:GetPropertyChangedSignal('Visible'):Connect(closeList)
 
-		local height = math.min(#props.List, 8) * ENTRY_HEIGHT + 4
+		local height = math.min(#props.List, 8) * ENTRY_HEIGHT
 		local box = ui.new('Frame', {
 			BackgroundColor3 = theme.Card,
 			BorderSizePixel = 0,
 			Size = UDim2.fromOffset(button.AbsoluteSize.X / (s * zoom), height),
 			ZIndex = 18
 		}, blocker)
-		ui.corner(box, 10)
-		ui.stroke(box, theme.Outline, 2, 0)
+		ui.corner(box, 8)
+		ui.stroke(box, theme.Outline, DROPDOWN_STROKE, 0)
 		ui.new('UIScale', {Scale = zoom}, box)
-		-- 4 units above the pill's top centres the first choice on it; kept on screen near the bottom.
+		-- On the closed box's top, as Slinky opens it; kept on screen near the bottom.
 		local origin = blocker.AbsolutePosition
-		local top = button.AbsolutePosition.Y - 4 * s * zoom
+		local top = button.AbsolutePosition.Y
 		local limit = origin.Y + blocker.AbsoluteSize.Y - 8
 		if top + height * s * zoom > limit then
 			top = math.max(origin.Y + 8, limit - height * s * zoom)
@@ -10009,10 +10246,9 @@ components.Dropdown = function(props, children, api)
 			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
 			CanvasSize = UDim2.fromOffset(0, #props.List * ENTRY_HEIGHT),
-			Position = UDim2.fromOffset(8, 2),
 			ScrollBarThickness = 0,
 			ScrollingDirection = Enum.ScrollingDirection.Y,
-			Size = UDim2.new(1, -16, 1, -4),
+			Size = UDim2.fromScale(1, 1),
 			ZIndex = 18
 		}, box)
 		ui.list(list, 0)
@@ -10024,12 +10260,26 @@ components.Dropdown = function(props, children, api)
 				TextTruncate = Enum.TextTruncate.AtEnd,
 				ZIndex = 19
 			}})
+			ui.padding(entry, 8, 8, 0, 0)
+			--[[ The rule over every choice but the first, in the border's colour: edge to edge, unless
+			the list scrolls -- a rule scrolled to the top would cross the box's rounded corners, so
+			there it keeps to the text's width. ]]
+			if index > 1 then
+				local edge = #props.List <= 8
+				ui.new('Frame', {
+					BackgroundColor3 = theme.Outline,
+					BorderSizePixel = 0,
+					Position = UDim2.fromOffset(edge and -8 or 0, 0),
+					Size = UDim2.new(1, edge and 16 or 0, 0, 1),
+					ZIndex = 19
+				}, entry)
+			end
 			if not selected then
 				entry.MouseEnter:Connect(function()
-					entry.TextColor3 = Color3.new(1, 1, 1)
+					tween:Tween(entry, theme.HoverTween, {TextColor3 = theme.Lit})
 				end)
 				entry.MouseLeave:Connect(function()
-					entry.TextColor3 = theme.Text
+					tween:Tween(entry, theme.HoverTween, {TextColor3 = theme.Text})
 				end)
 			end
 			entry.MouseButton1Click:Connect(function()
@@ -10076,12 +10326,19 @@ components.Dropdown = function(props, children, api)
 		end
 	end)
 
+	-- Only the text lights up under the pointer; the box itself stays as it is.
+	local function restTitle()
+		tween:Tween(title, theme.HoverTween, {TextColor3 = theme.Text})
+	end
 	button.MouseEnter:Connect(function()
-		tween:Tween(button, uipallet.Tween, {BackgroundColor3 = theme.Raised})
+		if ui.lastInputTouch() then return end
+		ui.hovered[title] = restTitle
+		tween:Tween(title, theme.HoverTween, {TextColor3 = theme.Lit})
 	end)
 
 	button.MouseLeave:Connect(function()
-		tween:Tween(button, uipallet.Tween, {BackgroundColor3 = theme.Card})
+		ui.hovered[title] = nil
+		restTitle()
 	end)
 
 	api.Options[props.Name] = component
@@ -10225,11 +10482,11 @@ components.GUI = function(props, children, api)
 		Size = UDim2.new(1, 0, 0, 42)
 	}, window)
 	ui.corner(bar, UDim.new(1, 0))
-	-- Equal slots across the whole bar.
+	-- Equal slots from the bar's left edge; the last 42 px hold the search button.
 	local tabsFrame = ui.new('Frame', {
 		Name = 'Tabs',
 		BackgroundTransparency = 1,
-		Size = UDim2.fromScale(1, 1)
+		Size = UDim2.new(1, -42, 1, 0)
 	}, bar)
 	local activePill = ui.new('Frame', {
 		Name = 'Active',
@@ -10325,7 +10582,8 @@ components.GUI = function(props, children, api)
 		return list
 	end
 	local function showPages()
-		local searching = layout.Search ~= ''
+		-- An open search shows its own page even before anything is typed: blank until then.
+		local searching = layout.Search ~= '' or layout.SearchOpen == true
 		for tab, info in layout.Pages do
 			info.Frame.Visible = (searching and tab == 'Search') or (not searching and tab == currentTab)
 		end
@@ -10384,6 +10642,228 @@ components.GUI = function(props, children, api)
 		end)
 	end
 
+	--[[ Search: the magnifier at the right of the bar swaps the tabs for a field;
+	what is typed shows every card whose name or shown name contains it, across all the tabs, on a page
+	of its own. The cross in the button's place closes it and brings the tabs back. ]]
+	do
+		--[[ The magnifier is the image uploaded for it once SEARCH_IMAGE holds its id. Until then, and
+		for the cross, the shape is built from frames on Lucide's 24-unit grid: a phone has no icon
+		files, and these must never fall back to a text character. ]]
+		local SEARCH_IMAGE = 'rbxassetid://70621958076101'
+		local function glyph(parent, size, cross)
+			local k = size / 24
+			local holder = ui.new('Frame', {
+				Name = cross and 'Cross' or 'Magnifier',
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				BackgroundTransparency = 1,
+				Position = UDim2.fromScale(0.5, 0.5),
+				Size = UDim2.fromOffset(size, size)
+			}, parent)
+			local function stroke(cx, cy, length, rotation)
+				local piece = ui.new('Frame', {
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					BackgroundColor3 = theme.Text,
+					BorderSizePixel = 0,
+					Position = UDim2.fromOffset(cx * k, cy * k),
+					Rotation = rotation,
+					Size = UDim2.fromOffset(length * k, 2 * k)
+				}, holder)
+				ui.corner(piece, UDim.new(1, 0))
+			end
+			if cross then
+				-- Two strokes corner to corner, from (6, 6) to (18, 18), with their round caps.
+				stroke(12, 12, 18.97, 45)
+				stroke(12, 12, 18.97, -45)
+			elseif SEARCH_IMAGE ~= '' then
+				ui.new('ImageLabel', {
+					Name = 'Glyph',
+					BackgroundTransparency = 1,
+					Image = SEARCH_IMAGE,
+					ImageColor3 = theme.Text,
+					Size = UDim2.fromScale(1, 1)
+				}, holder)
+			else
+				-- The lens: a ring of radius 8 about (11, 11), 2 thick. A stroke draws outside its frame,
+				-- so the frame is the ring's inside.
+				local ring = ui.new('Frame', {
+					BackgroundTransparency = 1,
+					Position = UDim2.fromOffset(4 * k, 4 * k),
+					Size = UDim2.fromOffset(14 * k, 14 * k)
+				}, holder)
+				ui.corner(ring, UDim.new(1, 0))
+				ui.new('UIStroke', {
+					ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+					Color = theme.Text,
+					Thickness = 2 * k
+				}, ring)
+				-- The handle, from (16.7, 16.7) to (21, 21).
+				stroke(18.85, 18.85, 8.08, 45)
+			end
+			return holder
+		end
+
+		local searchButton = ui.new('TextButton', {
+			Name = 'Search',
+			AnchorPoint = Vector2.new(1, 0.5),
+			AutoButtonColor = false,
+			BackgroundColor3 = theme.Pill,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Position = UDim2.new(1, -6, 0.5, 0),
+			Size = UDim2.fromOffset(30, 30),
+			Text = ''
+		}, bar)
+		ui.corner(searchButton, UDim.new(1, 0))
+		-- Both drawn 16 across, dead centre in the button.
+		local magnifier = glyph(searchButton, 16)
+		local cross = glyph(searchButton, 16, true)
+		cross.Visible = false
+		searchButton.MouseEnter:Connect(function()
+			searchButton.BackgroundTransparency = 0
+		end)
+		searchButton.MouseLeave:Connect(function()
+			searchButton.BackgroundTransparency = 1
+		end)
+		layout.SearchButton = searchButton
+
+		local searchField = ui.new('Frame', {
+			Name = 'SearchField',
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, -42, 1, 0),
+			Visible = false
+		}, bar)
+		-- Its centre as far in from the left as the button's is from the right: 21, the bar's half height.
+		local fieldIcon = glyph(searchField, 16)
+		fieldIcon.Position = UDim2.new(0, 21, 0.5, 0)
+		local searchBox = ui.text(searchField, {Class = 'TextBox', Size = 16, Color = theme.Text, Props = {
+			ClearTextOnFocus = false,
+			PlaceholderColor3 = theme.Muted,
+			PlaceholderText = 'Search modules',
+			Position = UDim2.fromOffset(40, 0),
+			Size = UDim2.new(1, -48, 1, 0)
+		}})
+
+		makePage('Search')
+
+		local function setSearch(text)
+			layout.Search = text:lower():gsub('^%s+', ''):gsub('%s+$', '')
+			-- Cleared: the search page goes blank, without the no-match line the last query may have left.
+			local page = layout.Pages.Search
+			if layout.Search == '' and page and page.Empty then
+				page.Empty.Visible = false
+			end
+			showPages()
+			-- The tabs' own pages are not placed while a search is showing: all of them again afterwards.
+			layout.request('*')
+		end
+		-- Bumped by every open and close: a focus run from an older one stops.
+		local focusToken = 0
+		-- Until when (os.clock) the open's focus run takes back a focus the box lost on its own.
+		local focusUntil = 0
+		local function closeSearch()
+			focusToken += 1
+			focusUntil = 0
+			searchBox.Text = ''
+			setSearch('')
+			searchField.Visible = false
+			layout.SearchOpen = false
+			showPages()
+			tabsFrame.Visible = true
+			magnifier.Visible, cross.Visible = true, false
+		end
+		local function boxFocused()
+			local ok, focused = pcall(function()
+				return searchBox:IsFocused()
+			end)
+			if ok and focused == true then return true end
+			local found, box = pcall(function()
+				return inputService:GetFocusedTextBox()
+			end)
+			return found and box == searchBox
+		end
+		--[[ The cursor goes in the box once the box will hold it, timed in seconds rather than frames:
+		with the frame rate unlocked, a count of frames was over in a few hundredths of a second, and a
+		box that has only just become visible can turn CaptureFocus down for longer than that. For two
+		seconds after the open, a focus the box loses with no click, tap, Enter, Tab or Escape behind
+		it is taken back the next frame, up to eight times; one the user took away ends the run
+		(FocusLost below). A newer open or a close ends an older run. ]]
+		local function openSearch()
+			searchField.Visible = true
+			layout.SearchOpen = true
+			showPages()
+			tabsFrame.Visible = false
+			magnifier.Visible, cross.Visible = false, true
+			focusToken += 1
+			local token = focusToken
+			focusUntil = os.clock() + 2
+			task.spawn(function()
+				local focusedPasses, retakes, lastTry = 0, 0, -1
+				while true do
+					task.wait()
+					if token ~= focusToken or os.clock() > focusUntil then return end
+					if not (searchField.Visible and clickgui.Visible and window.Visible) then return end
+					if boxFocused() then
+						focusedPasses += 1
+					else
+						if focusedPasses > 0 then
+							retakes += 1
+							if retakes > 8 then return end
+						end
+						focusedPasses = 0
+						-- About sixty tries a second whatever the frame rate.
+						if os.clock() - lastTry >= 0.015 then
+							lastTry = os.clock()
+							pcall(function()
+								searchBox:CaptureFocus()
+							end)
+						end
+					end
+				end
+			end)
+		end
+		searchButton.MouseButton1Click:Connect(function()
+			if searchField.Visible then
+				closeSearch()
+			else
+				openSearch()
+			end
+		end)
+		searchBox:GetPropertyChangedSignal('Text'):Connect(function()
+			setSearch(searchBox.Text)
+		end)
+
+		--[[ Escape closes the search, as the cross does. Typing in the box, Escape takes the box's focus
+		away first, so it is caught as the reason the focus went; with the box not focused, as the key
+		press itself. Not while a bind is waiting for a key: there Escape clears the bind. ]]
+		local function escapeSearch()
+			if searchField.Visible and clickgui.Visible and not vape.Binding then
+				closeSearch()
+			end
+		end
+		searchBox.FocusLost:Connect(function(enterPressed, input)
+			local key, kind
+			pcall(function()
+				key, kind = input.KeyCode, input.UserInputType
+			end)
+			if key == Enum.KeyCode.Escape then
+				focusUntil = 0
+				escapeSearch()
+				return
+			end
+			-- Enter, Tab, a click or a tap is the user leaving the box: the focus run lets it be.
+			if enterPressed or key == Enum.KeyCode.Return or key == Enum.KeyCode.KeypadEnter or key == Enum.KeyCode.Tab
+				or kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.MouseButton2
+				or kind == Enum.UserInputType.MouseButton3 or kind == Enum.UserInputType.Touch then
+				focusUntil = 0
+			end
+		end)
+		vape:Clean(inputService.InputBegan:Connect(function(input)
+			if input.KeyCode == Enum.KeyCode.Escape then
+				escapeSearch()
+			end
+		end))
+	end
+
 	--[[ Two columns when they fit, one on a narrow screen. The window is in GUI units, which the
 	UIScale shrinks with the screen. With Auto rescale on, the window also gets a zoom of its own:
 	the rescale that keeps the HUD in proportion would leave the menu under half a phone wide with
@@ -10430,8 +10910,8 @@ components.GUI = function(props, children, api)
 		else
 			window.Size = UDim2.new(0, width, 1, -24)
 		end
-		-- Seven tabs have to share a single-column bar.
-		local tabSize = math.clamp(math.floor((width / #visibleTabs() - 6) / 4.6), 10, 16)
+		-- Seven tabs have to share a single-column bar, less the search button's 42.
+		local tabSize = math.clamp(math.floor(((width - 42) / #visibleTabs() - 6) / 4.6), 10, 16)
 		for _, button in tabButtons do
 			button.TextSize = tabSize
 		end

@@ -133,6 +133,17 @@ local function notif(...)
 	return vape:CreateNotification(...)
 end
 
+-- Is Pistonware's own menu open; the plain field reads safely from any thread
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
+
 run(function()
 	entitylib.getUpdateConnections = function(ent)
 		local hum = ent.Humanoid
@@ -418,6 +429,9 @@ run(function()
 	
 	SilentAim = vape.Categories.Combat:CreateModule({
 		Name = 'SilentAim',
+		ExtraText = function()
+			return Mode and Mode.Value or nil
+		end,
 		Function = function(callback)
 			if CircleObject then
 				CircleObject.Visible = callback and Mode.Value == 'Mouse'
@@ -452,7 +466,15 @@ run(function()
 	
 				repeat
 					if CircleObject then 
-						CircleObject.Position = inputService:GetMouseLocation() 
+						-- hidden while the menu is open; the first frame after it closes shows it again
+						local hidden = clickGuiOpen()
+						local show = not hidden and Mode.Value == 'Mouse'
+						if CircleObject.Visible ~= show then
+							CircleObject.Visible = show
+						end
+						if not hidden then
+							CircleObject.Position = inputService:GetMouseLocation()
+						end
 					end
 	
 					if Instant.Enabled then 
@@ -467,7 +489,7 @@ run(function()
 				jb.GunController.TransformLocalMousePosition = Hooked
 			end
 		end,
-		Tooltip = 'Silently adjusts your aim towards the enemy'
+		Tooltip = 'Makes your shots hit enemies without you aiming.\nSet the range, show a range circle and make bullets hit instantly.'
 	})
 	Target = SilentAim:CreateTargets({Players = true})
 	Mode = SilentAim:CreateDropdown({
@@ -475,7 +497,7 @@ run(function()
 		List = {'Mouse', 'Position'},
 		Function = function(val)
 			if CircleObject then
-				CircleObject.Visible = SilentAim.Enabled and val == 'Mouse'
+				CircleObject.Visible = SilentAim.Enabled and val == 'Mouse' and not clickGuiOpen()
 			end
 		end,
 		Tooltip = 'Mouse - Checks for entities near the mouses position\nPosition - Checks for entities near the local character'
@@ -505,12 +527,14 @@ run(function()
 				CircleObject.Radius = Range.Value
 				CircleObject.NumSides = 100
 				CircleObject.Transparency = 1 - CircleTransparency.Value
-				CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse'
+				CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse' and not clickGuiOpen()
 			else
 				pcall(function()
 					CircleObject.Visible = false
 					CircleObject:Remove()
 				end)
+				-- the loop reads Visible back, so it must not see the removed circle
+				CircleObject = nil
 			end
 			CircleColor.Object.Visible = callback
 			CircleTransparency.Object.Visible = callback
@@ -580,7 +604,7 @@ run(function()
 				restorefunction(jb.GunController.BulletEmitterOnLocalHitPlayer)
 			end
 		end,
-		Tooltip = 'Modifies bullets to always do headshot damage & shooting through most walls.'
+		Tooltip = 'Lets your shots go through walls as headshots.'
 	})
 end)
 
@@ -618,7 +642,7 @@ run(function()
 				until not AutoArrest.Enabled
 			end
 		end,
-		Tooltip = 'Automatically uses handcuffs on nearby entities'
+		Tooltip = 'Arrests nearby wanted players while you hold cuffs.\nAlso pulls them out of their vehicles.'
 	})
 end)
 	
@@ -694,7 +718,7 @@ run(function()
 				end)
 			end
 		end,
-		Tooltip = 'Automatically pops vehicles tires around you'
+		Tooltip = 'Pops the tires of occupied cars near you.\nCan require a gun in hand and skip teammates.'
 	})
 	Range = AutoPop:CreateSlider({
 		Name = 'Range',
@@ -721,7 +745,7 @@ run(function()
 				until not Punch.Enabled
 			end
 		end,
-		Tooltip = 'Always punches people infront of you'
+		Tooltip = 'Keeps punching in front of you automatically.'
 	})
 end)
 	
@@ -755,13 +779,13 @@ run(function()
 				until not AutoTaze.Enabled
 			end
 		end,
-		Tooltip = 'Immobilizes entities around you'
+		Tooltip = 'Tases nearby wanted players automatically.\nCan require the taser in hand.'
 	})
 	AutoTazeHandCheck = AutoTaze:CreateToggle({Name = 'Hand Check'})
 end)
 	
 run(function()
-	LazerGodmode = vape.Categories.Blatant:CreateModule({Name = 'LazerGodmode'})
+	LazerGodmode = vape.Categories.Blatant:CreateModule({Name = 'LazerGodmode', Tooltip = 'Stops security lasers from hurting you.'})
 end)
 	
 run(function()
@@ -770,7 +794,7 @@ run(function()
 		Function = function(callback)
 			debug.setconstant(debug.getupvalue(jb.FallingController.Init, 19), 9, callback and 'Archivable' or 'Sit')
 		end,
-		Tooltip = 'Disables ragdoll handling & fall damage'
+		Tooltip = 'Stops you from ragdolling or taking fall damage.'
 	})
 end)
 	
@@ -793,7 +817,7 @@ run(function()
 				jb.VehicleController.updateSpdBarRatio(oldnitro / 250)
 			end
 		end,
-		Tooltip = 'Infinite boost for the local car'
+		Tooltip = 'Gives your car unlimited nitro.'
 	})
 end)
 	
@@ -803,7 +827,7 @@ run(function()
 		Function = function(callback)
 			debug.setconstant(jb.CircleAction.Press, 3, callback and 'Timeda' or 'Timed')
 		end,
-		Tooltip = 'Allows you to instantly complete ProximityPrompt actions'
+		Tooltip = 'Completes hold-to-interact actions instantly.'
 	})
 end)
 	
@@ -819,6 +843,6 @@ run(function()
 				restorefunction(jb.PlayerUtils.hasKey)
 			end
 		end,
-		Tooltip = 'Enables most doors to be walked through'
+		Tooltip = 'Lets you open keycard doors without a keycard.'
 	})
 end)

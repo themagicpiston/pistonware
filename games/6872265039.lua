@@ -401,7 +401,6 @@ end)
 
 run(function()
 	local RegionLock
-	local Regions
 	local Timeout
 	local Requeue
 	local httpService = cloneref(game:GetService('HttpService'))
@@ -409,23 +408,36 @@ run(function()
 	--[[ RegionLock's settings live in their own file, not the per-place profiles: the lobby and
 	the match are different places, and this is one switch you set before queueing. main.lua's
 	teleport script reads it on the match server, holds the connect, and loads you in once the
-	server's region is one listed here. The match copy of the module reads and writes the same
+	server's region is one switched on here. The match copy of the module reads and writes the same
 	file, so turning it on or off in either place is the same switch. ]]
 	local FILE = 'pistonware/regionlock.txt'
 	local synced, written = false, nil
 
-	-- Upper case, no spaces, no repeats. In place: the TextList keeps drawing from these tables.
-	local function normalise(list)
-		local seen, out = {}, {}
-		for _, value in list do
-			value = tostring(value):gsub('%s+', ''):upper()
-			if value ~= '' and not seen[value] then
-				seen[value] = true
-				table.insert(out, value)
+	--[[ The regions BedWars hosts, one toggle each, in this order. Code is what goes in the file and
+	what main.lua matches the server against; Label is what the toggle shows. Australia and New
+	Zealand play on SEA servers, so that one says OCE as well (main.lua already counts OCE, AU and
+	NZ as SEA). A region added here gets its toggle and its place in the file with nothing else. ]]
+	local REGIONS = {
+		{Code = 'NA', Label = 'NA', Tooltip = 'North America'},
+		{Code = 'EU', Label = 'EU', Tooltip = 'Europe'},
+		{Code = 'SEA', Label = 'SEA / OCE', Tooltip = 'Asia and Oceania (Australia and New Zealand play here)'}
+	}
+	-- Other names an older file can hold for one of the codes above.
+	local ALIASES = {
+		OCE = 'SEA', OCEANIA = 'SEA', AU = 'SEA', AUS = 'SEA', NZ = 'SEA', ASIA = 'SEA', SG = 'SEA',
+		US = 'NA', USA = 'NA', CA = 'NA', UK = 'EU', GB = 'EU', EUROPE = 'EU'
+	}
+	local RegionToggles = {}
+
+	local function regionCodes(onlyEnabled)
+		local codes = {}
+		for _, region in REGIONS do
+			local toggle = RegionToggles[region.Code]
+			if not onlyEnabled or (toggle and toggle.Enabled) then
+				table.insert(codes, region.Code)
 			end
 		end
-		table.clear(list)
-		table.move(out, 1, #out, 1, list)
+		return codes
 	end
 
 	-- Only once the file has been read back: the profile applying first must not overwrite it.
@@ -435,8 +447,9 @@ run(function()
 		local ok, encoded = pcall(function()
 			return httpService:JSONEncode({
 				enabled = RegionLock.Enabled,
-				list = Regions.List,
-				regions = Regions.ListEnabled,
+				-- Every region there is, as the old Regions list kept it: an older match copy loads both.
+				list = regionCodes(false),
+				regions = regionCodes(true),
 				timeout = Timeout.Value,
 				requeue = Requeue.Enabled
 			})
@@ -453,28 +466,16 @@ run(function()
 			writeSettings()
 		end,
 		ExtraText = function()
-			return Regions and #Regions.ListEnabled > 0 and table.concat(Regions.ListEnabled, ' ') or 'Any'
+			local codes = regionCodes(true)
+			return #codes > 0 and table.concat(codes, ' ') or 'Any'
 		end,
-		Tooltip = 'Only plays on servers in the regions you pick.'
-	})
-	Regions = RegionLock:CreateTextList({
-		Name = 'Regions',
-		Placeholder = 'NA / EU / SEA',
-		Default = {'NA', 'EU', 'SEA'},
-		Function = function()
-			if not Regions then return end
-			normalise(Regions.List)
-			normalise(Regions.ListEnabled)
-			writeSettings()
-			vape:UpdateTextGUI()
-		end,
-		Tooltip = 'The regions to allow. With none on, any region is allowed.'
+		Tooltip = 'Only plays on servers in the regions you switch on. With none on, any region is allowed.'
 	})
 	Timeout = RegionLock:CreateSlider({
 		Name = 'Timeout',
 		Min = 0,
 		Max = 120,
-		Default = 20,
+		Default = 30,
 		Function = function()
 			writeSettings()
 		end,
@@ -490,6 +491,19 @@ run(function()
 		end,
 		Tooltip = 'Queues again when the server is in the wrong region. Not in a party.'
 	})
+	RegionLock:CreateDivider({Text = 'Regions'})
+	for _, region in REGIONS do
+		RegionToggles[region.Code] = RegionLock:CreateToggle({
+			Name = 'Allow '..region.Code,
+			DisplayName = region.Label,
+			Default = true,
+			Function = function()
+				writeSettings()
+				vape:UpdateTextGUI()
+			end,
+			Tooltip = 'Plays on '..region.Tooltip..' servers.'
+		})
+	end
 
 	-- Once the profile is applied, the file wins: it is the last thing set anywhere.
 	task.spawn(function()
@@ -502,8 +516,18 @@ run(function()
 			end
 		end)
 		if type(data) == 'table' then
-			if type(data.list) == 'table' and type(data.regions) == 'table' then
-				Regions:Load({List = data.list, ListEnabled = data.regions})
+			-- The switched-on regions, by code or by an older name for one; anything else is passed over.
+			if type(data.regions) == 'table' then
+				local wanted = {}
+				for _, entry in data.regions do
+					local code = tostring(entry):gsub('%s+', ''):upper()
+					wanted[ALIASES[code] or code] = true
+				end
+				for code, toggle in RegionToggles do
+					if (wanted[code] == true) ~= toggle.Enabled then
+						toggle:Toggle()
+					end
+				end
 			end
 			if tonumber(data.timeout) then
 				Timeout:SetValue(tonumber(data.timeout))
@@ -878,8 +902,13 @@ run(function()
 	Roblox leaves free along the top of the screen. Middle centres that whole row on the screen
 	instead. The game's own app draws it and moves it again whenever its size changes, so each
 	move of the game's is kept (it is where Default puts it back) and the row is centred again
-	straight after. ]]
+	straight after.
+
+	On a phone the row also keeps room for the Pistonware button wherever that is: beside the
+	buttons (Button Next To Topbar) or, by default, in the corner at the right end of the strip.
+	The corner's room is kept with UI Cleanup off too, as that is where the button goes then. ]]
 	local TopbarPosition
+	local NextToTopbar
 	local topbar = {
 		Original = setmetatable({}, {__mode = 'k'}),
 		Placed = setmetatable({}, {__mode = 'k'}),
@@ -891,13 +920,52 @@ run(function()
 		return UICleanup ~= nil and UICleanup.Enabled and TopbarPosition ~= nil and TopbarPosition.Value == 'Middle'
 	end
 
+	-- Docked beside the buttons only while UI Cleanup is on with Button Next To Topbar.
+	function topbar.docked()
+		return UICleanup ~= nil and UICleanup.Enabled and NextToTopbar ~= nil and NextToTopbar.Enabled
+	end
+
+	-- The strip Roblox leaves free along the top of the screen, as screen x, where the client has one.
+	function topbar.strip()
+		local ok, low, high = pcall(function()
+			local inset = guiService.TopbarInset
+			if inset.Width > 0 then
+				return inset.Min.X, inset.Max.X
+			end
+			return nil
+		end)
+		if ok and low then
+			return low, high
+		end
+		return nil
+	end
+
+	--[[ The room the mobile button takes in the row -- its width and the 7 px the GUI keeps from the
+	game's buttons -- or 0 where there is no button (a PC), and whether the GUI wants it in the
+	corner. A GUI without the corner always docks it. ]]
+	function topbar.vapeButton()
+		local button = vape.VapeButton
+		if topbar.Unloaded or not (button and button.Parent) then
+			return 0, false
+		end
+		return math.max(button.AbsoluteSize.X, 32) + 7, vape.SetVapeButtonDocked ~= nil and not vape.VapeButtonDocked
+	end
+
+	-- Whether there is anything to lay out: Middle, or room to keep for the button where it is.
+	function topbar.active()
+		if topbar.Unloaded then return false end
+		if topbar.middle() then return true end
+		local room, corner = topbar.vapeButton()
+		return room > 0 and (corner or (UICleanup ~= nil and UICleanup.Enabled))
+	end
+
 	-- Several changes in one frame (a resize moves and resizes everything) place it once.
 	function topbar.queue()
 		if topbar.Queued then return end
 		topbar.Queued = true
 		task.defer(function()
 			topbar.Queued = false
-			if topbar.middle() then
+			if topbar.active() then
 				topbar.place()
 			end
 		end)
@@ -942,6 +1010,63 @@ run(function()
 		topbar.watch(object)
 	end
 
+	--[[ The button's room, made inside the row of buttons: padding on its right for the corner, on
+	its left beside them. The game lays the row out round it as it would round one more button of
+	its own -- the scores and timer move over, and on a full bar everything shrinks to fit -- so
+	nothing is moved over the scores, in Default or in Middle. The row is drawn under a UIScale, so
+	the padding is set in its units. Returns the room on the right, on screen. ]]
+	function topbar.pad(buttons, side, room)
+		local padding = topbar.Padding
+		if not buttons or room <= 0 then
+			if padding then
+				topbar.Padding = nil
+				padding:Destroy()
+			end
+			return 0
+		end
+		if not padding or padding.Parent ~= buttons then
+			if padding then
+				padding:Destroy()
+			end
+			padding = Instance.new('UIPadding')
+			topbar.Padding = padding
+		end
+		local uiScale = buttons:FindFirstChildOfClass('UIScale')
+		local factor = uiScale and uiScale.Scale > 0 and uiScale.Scale or 1
+		local width = math.ceil(room / factor)
+		local left = UDim.new(0, side == 'Left' and width or 0)
+		local right = UDim.new(0, side == 'Right' and width or 0)
+		if padding.PaddingLeft ~= left then
+			padding.PaddingLeft = left
+		end
+		if padding.PaddingRight ~= right then
+			padding.PaddingRight = right
+		end
+		if padding.Parent ~= buttons then
+			padding.Parent = buttons
+		end
+		return side == 'Right' and width * factor or 0
+	end
+
+	-- The GUI places its button again now, not on its next once-a-second check.
+	function topbar.nudge()
+		if not vape.PlaceVapeButton then return end
+		vape.PlaceVapeButton()
+		--[[ And once more after this frame's layout pass. The call above reads the row as it was
+		before the change that asked for it (padding moved from one side to the other, a Middle
+		move), and moving the padding leaves the row's AbsoluteSize as it was, so no signal comes
+		after the reflow to correct it -- the button would wait for the GUI's once-a-second check,
+		sitting on the scores or a button until then. Coalesced: one follow-up however many calls. ]]
+		if topbar.Renudge then return end
+		topbar.Renudge = true
+		task.delay(0, function()
+			topbar.Renudge = false
+			if not topbar.Unloaded and vape.PlaceVapeButton then
+				vape.PlaceVapeButton()
+			end
+		end)
+	end
+
 	function topbar.place()
 		local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
 		local appGui = playerGui and playerGui:FindFirstChild('TopBarAppGui')
@@ -950,6 +1075,22 @@ run(function()
 		if not (buttons and buttons:IsA('GuiObject') and camera) then return end
 		topbar.watch(appGui)
 		topbar.watch(buttons)
+		--[[ The mobile button's room, on the side of the row the button is on. The GUI measures the
+		corner from the strip, so without one the button docks and its room goes beside the buttons.
+		The corner keeps its room with UI Cleanup off too. ]]
+		local strip, stripEnd = topbar.strip()
+		local room, corner = topbar.vapeButton()
+		corner = corner and strip ~= nil
+		if not (corner or (UICleanup ~= nil and UICleanup.Enabled)) then
+			room = 0
+		end
+		local cornerRoom = topbar.pad(buttons, corner and 'Right' or 'Left', room)
+		if not topbar.middle() then
+			-- Default: everything where the game puts it, with the button's room in the row.
+			topbar.unplace()
+			topbar.nudge()
+			return
+		end
 		local statsGui = playerGui:FindFirstChild('TopBarStatsGui')
 		local stats = statsGui and statsGui:FindFirstChild('TopBarStatsScroller')
 		if statsGui then
@@ -961,24 +1102,29 @@ run(function()
 			stats = nil
 		end
 		local statsWidth = stats and stats.Visible and stats.AbsoluteSize.X or 0
-		--[[ The mobile Pistonware button follows the buttons, 7 px to their left, so its place in the
-		row is kept clear: the scores and timer stop short of it rather than running under it. ]]
-		local vapeButton = vape.VapeButton
-		local reserve = (vapeButton and vapeButton.Parent) and math.max(vapeButton.AbsoluteSize.X, 32) + 7 or 0
-		local width = buttons.AbsoluteSize.X + reserve + (statsWidth > 0 and statsWidth + 8 or 0)
+		--[[ The mobile Pistonware button's room is part of the row's own width (see pad), so the
+		scores and timer stop short of it rather than running under it: beside the buttons the
+		button follows them, 7 px to their left, and in the corner the row stops short of it. ]]
+		local width = buttons.AbsoluteSize.X + (statsWidth > 0 and statsWidth + 8 or 0)
 		local left, area = appGui.AbsolutePosition.X, appGui.AbsoluteSize.X
 		if area <= 0 then return end
 		--[[ Centred on the screen, but kept inside the strip Roblox leaves free so it never runs under
 		Roblox's buttons. That strip is TopbarInset where the client reports one; TopBarAppGui itself
 		covers the whole screen. ]]
 		local low, high = left, left + area
-		pcall(function()
-			local inset = guiService.TopbarInset
-			if inset.Width > 0 then
-				low, high = inset.Min.X, inset.Max.X
-			end
-		end)
-		local start = math.clamp(camera.ViewportSize.X / 2 - width / 2, low, math.max(high - width, low))
+		if strip then
+			low, high = strip, stripEnd
+		end
+		--[[ For the corner the row ends 12 px in from the end of the strip, as the game keeps it, so
+		the room at its right end is under the corner button and the buttons stop 7 px short of it.
+		The room is empty, so what is centred is the rest. The game sizes the row and the scores to
+		the strip less 24 px, so this always fits. ]]
+		local shown = width
+		if corner then
+			high -= 12
+			shown -= cornerRoom
+		end
+		local start = math.clamp(camera.ViewportSize.X / 2 - shown / 2, low, math.max(high - width, low))
 		local right = start + width
 		topbar.move(buttons, appGui, right)
 		if statsWidth > 0 then
@@ -987,19 +1133,14 @@ run(function()
 		-- The Settings menu hangs from the right end of the buttons, as it does by default.
 		for _, child in appGui:GetChildren() do
 			if child ~= buttons and child:IsA('GuiObject') and topbar.origin(child).X == UDim.new(1, -12) then
-				topbar.move(child, appGui, right)
+				topbar.move(child, appGui, right - cornerRoom)
 			end
 		end
+		topbar.nudge()
 	end
 
 	-- Back where the game last put each piece, unless the game has moved it itself since.
-	function topbar.restore()
-		for _, connection in topbar.Connections do
-			connection:Disconnect()
-		end
-		table.clear(topbar.Connections)
-		table.clear(topbar.Watched)
-		topbar.Hooked = false
+	function topbar.unplace()
 		for object, original in topbar.Original do
 			if object.Parent and object.Position == topbar.Placed[object] then
 				object.Position = original
@@ -1009,8 +1150,23 @@ run(function()
 		table.clear(topbar.Placed)
 	end
 
+	-- All of it undone: nothing watched, nothing moved, no room kept.
+	function topbar.restore()
+		for _, connection in topbar.Connections do
+			connection:Disconnect()
+		end
+		table.clear(topbar.Connections)
+		table.clear(topbar.Watched)
+		topbar.Hooked = false
+		topbar.unplace()
+		topbar.pad(nil, nil, 0)
+	end
+
 	function topbar.refresh()
-		if not topbar.middle() then
+		if vape.SetVapeButtonDocked and not topbar.Unloaded then
+			vape:SetVapeButtonDocked(topbar.docked())
+		end
+		if not topbar.active() then
 			topbar.restore()
 			return
 		end
@@ -1048,4 +1204,17 @@ run(function()
 		end,
 		Tooltip = 'Where the BedWars top bar sits: on the right (Default) or centred at the top of the screen (Middle).'
 	})
+	NextToTopbar = UICleanup:CreateToggle({
+		Name = 'Button Next To Topbar',
+		Function = function()
+			topbar.refresh()
+		end,
+		Tooltip = 'Puts the mobile menu button next to the top bar instead of in the top-right corner.'
+	})
+	-- The corner's room is kept without UI Cleanup too; on unload everything goes back.
+	topbar.refresh()
+	vape:Clean(function()
+		topbar.Unloaded = true
+		topbar.restore()
+	end)
 end)

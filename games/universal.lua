@@ -4636,10 +4636,15 @@ run(function()
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
 	
+	local function passes(ent)
+		if not Targets.Players.Enabled and ent.Player then return false end
+		if not Targets.NPCs.Enabled and ent.NPC then return false end
+		if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return false end
+		return true
+	end
+	
 	local function Added(ent)
-		if not Targets.Players.Enabled and ent.Player then return end
-		if not Targets.NPCs.Enabled and ent.NPC then return end
-		if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
+		if not passes(ent) then return end
 		if vape.ThreadFix then
 			setthreadidentity(8)
 		end
@@ -4694,11 +4699,29 @@ run(function()
 		end
 	end
 	
+	--[[ Targetable and Friend can change after a cham was made. In BedWars your own team is an
+	attribute that can land after everyone else is built (RegionLock and AutoQueueDodge hold the
+	load-in, so it happens every time with them), and every entity is then re-checked and announced
+	through EntityUpdated. Added only filters when a cham is first made, so the filter is asked
+	again here: anyone who no longer passes loses their cham, anyone who newly passes gets one.
+	EntityUpdated also fires for health and equipment; then this is three field checks. ]]
+	local function Updated(ent)
+		if passes(ent) then
+			-- only for an entity still in the list, so a late update after removal makes nothing
+			if not Reference[ent] and table.find(entitylib.List, ent) then
+				Added(ent)
+			end
+		elseif Reference[ent] then
+			Removed(ent)
+		end
+	end
+	
 	Chams = vape.Categories.Render:CreateModule({
 		Name = 'Chams',
 		Function = function(callback)
 			if callback then
 				Chams:Clean(entitylib.Events.EntityRemoved:Connect(Removed))
+				Chams:Clean(entitylib.Events.EntityUpdated:Connect(Updated))
 				Chams:Clean(entitylib.Events.EntityAdded:Connect(function(ent)
 					if Reference[ent] then
 						Removed(ent)
@@ -5088,6 +5111,20 @@ run(function()
 	end
 
 	local function ESPUpdated(ent)
+		--[[ Targetable and Friend can change after the drawing was made: a team that lands after the
+		entity was built (late whenever the load-in is held), a friend added or removed. The update
+		that corrects them comes through here, and Added was the only place the filter was asked, so
+		teammates built as enemies stayed drawn with Hide friendlies on. Ask it again: drop a drawing
+		that no longer passes, and draw one that now does, but only for an entity still in the list,
+		since an update can arrive after its EntityRemoved. ]]
+		local shown = Reference[ent] ~= nil
+		if passes(ent) ~= shown then
+			if shown then
+				ESPRemoved(ent)
+			elseif table.find(entitylib.List, ent) then
+				ESPAdded[methodused](ent)
+			end
+		end
 		local health = ent.Health
 		local last = LastHealth[ent]
 		if type(health) == 'number' then
@@ -5823,6 +5860,10 @@ run(function()
 	local Strings, Sizes, Reference = {}, {}, {}
 	-- What each tag's Visible and Position were last set to: the frame loop only writes a change.
 	local Shown, Placed = {}, {}
+	--[[ Tags part way through Added, keyed by entity to a token owned by that one build. getfontsize
+	yields, so an update or a removal can arrive before a build is done: a second Added must not make
+	a second tag, and a removal or a disable must stop the build from parenting its tag. ]]
+	local Building = {}
 	local Folder = Instance.new('Folder')
 	Folder.Parent = vape.gui
 	local methodused
@@ -5915,16 +5956,26 @@ run(function()
 			if not Targets.Players.Enabled and ent.Player then return end
 			if not Targets.NPCs.Enabled and ent.NPC then return end
 			if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
+			if Reference[ent] or Building[ent] then return end
 			if vape.ThreadFix then
 				setthreadidentity(8)
 			end
 	
-			Strings[ent] = tagText(ent)
+			local text = tagText(ent)
 	
 			local nametag = Instance.new('TextLabel')
 			nametag.TextSize = 14 * Scale.Value
 			nametag.FontFace = FontOption.Value
-			local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+			-- getfontsize yields: while it does, a removal or a disable takes this token and so cancels the build
+			local token = {}
+			Building[ent] = token
+			local size = getfontsize(removeTags(text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+			if Building[ent] ~= token then
+				nametag:Destroy()
+				return
+			end
+			Building[ent] = nil
+			Strings[ent] = text
 			nametag.Name = ent.Player and ent.Player.Name or ent.Character.Name
 			nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 			nametag.AnchorPoint = Vector2.new(0.5, 1)
@@ -5944,6 +5995,8 @@ run(function()
 	
 	local Removed = {
 		Normal = function(ent)
+			-- cancels a build that is still yielding in getfontsize
+			Building[ent] = nil
 			local v = Reference[ent]
 			if v then
 				if vape.ThreadFix then
@@ -5961,6 +6014,17 @@ run(function()
 	
 	local Updated = {
 		Normal = function(ent)
+			--[[ Targetable and Friend can change after the tag was made (a held load-in builds everyone
+			before your own team lands), so Priority Only is checked again: a tag that no longer passes
+			goes, and Added makes one, with its own checks, for an entity that now does. ]]
+			if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then
+				Removed.Normal(ent)
+				return
+			end
+			if not Reference[ent] then
+				Added.Normal(ent)
+				return
+			end
 			local nametag = Reference[ent]
 			if nametag then
 				if vape.ThreadFix then
@@ -5970,6 +6034,8 @@ run(function()
 				Strings[ent] = tagText(ent)
 	
 				local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+				-- getfontsize yielded: a removal or a rebuild in the meantime owns the tag now
+				if Reference[ent] ~= nametag then return end
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
 				nametag.Text = Strings[ent]
 			end
@@ -6069,6 +6135,8 @@ run(function()
 						Removed[methodused](i)
 					end
 				end
+				-- a build still yielding in getfontsize is not in Reference yet; this cancels it
+				table.clear(Building)
 			end
 		end,
 		Tooltip = 'Shows clear name tags above other players.\nCan add health and distance, with your own font, size and colors.'
@@ -7145,10 +7213,15 @@ run(function()
 	local Behind
 	local Reference = {}
 	
+	local function Passes(ent)
+		if not Targets.Players.Enabled and ent.Player then return false end
+		if not Targets.NPCs.Enabled and ent.NPC then return false end
+		if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return false end
+		return true
+	end
+	
 	local function Added(ent)
-		if not Targets.Players.Enabled and ent.Player then return end
-		if not Targets.NPCs.Enabled and ent.NPC then return end
-		if Teammates.Enabled and (not ent.Targetable) and (not ent.Friend) then return end
+		if not Passes(ent) then return end
 		if vape.ThreadFix then
 			setthreadidentity(8)
 		end
@@ -7171,6 +7244,22 @@ run(function()
 				v.Visible = false
 				v:Remove()
 			end)
+		end
+	end
+	
+	--[[ Targetable and Friend can change after a line was made. When the team lands late (a
+	held load-in builds everybody before your own team is given out) or the friends/targets
+	lists change, updateEntity corrects them and fires EntityUpdated, so the filter is asked
+	again here: a line that no longer passes goes, and an entity that now passes gets one.
+	Only a line about to be made pays for the list check, which stops an update that lands
+	after the entity has gone from leaving a line that nothing would take down. ]]
+	local function Updated(ent)
+		if Reference[ent] then
+			if not Passes(ent) then
+				Removed(ent)
+			end
+		elseif Passes(ent) and table.find(entitylib.List, ent) then
+			Added(ent)
 		end
 	end
 	
@@ -7238,6 +7327,7 @@ run(function()
 					end
 					Added(ent)
 				end))
+				Tracers:Clean(entitylib.Events.EntityUpdated:Connect(Updated))
 				Tracers:Clean(vape.Categories.Friends.ColorUpdate.Event:Connect(function()
 					ColorFunc(Color.Hue, Color.Sat, Color.Value)
 				end))

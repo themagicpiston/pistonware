@@ -15,6 +15,16 @@ local vape = shared.vape
 local entitylib = vape.Libraries.entity
 local targetinfo = vape.Libraries.targetinfo
 local prediction = vape.Libraries.prediction
+-- Is Pistonware's own menu open; the plain field reads safely from any thread
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
 
 local ad = {}
 
@@ -319,6 +329,9 @@ run(function()
 	
 		SilentAim = vape.Categories.Combat:CreateModule({
 			Name = 'SilentAim',
+			ExtraText = function()
+				return Mode and Mode.Value or nil
+			end,
 			Function = function(callback)
 				if CircleObject then
 					CircleObject.Visible = callback and Mode.Value == 'Mouse'
@@ -330,7 +343,15 @@ run(function()
 	
 					repeat
 						if CircleObject then
-							CircleObject.Position = inputService:GetMouseLocation()
+							-- hidden while the menu is open; the first frame after it closes shows it again
+							local hidden = clickGuiOpen()
+							local show = not hidden and Mode.Value == 'Mouse'
+							if CircleObject.Visible ~= show then
+								CircleObject.Visible = show
+							end
+							if not hidden then
+								CircleObject.Position = inputService:GetMouseLocation()
+							end
 						end
 						if AutoFire.Enabled then
 							local origin = gameCamera.CFrame
@@ -375,7 +396,7 @@ run(function()
 					old = nil
 				end
 			end,
-			Tooltip = 'Silently adjusts your aim towards the enemy'
+			Tooltip = 'Makes your shots hit enemies without you aiming.\nSet hit and headshot chance, auto fire and wallbang.'
 		})
 		Target = SilentAim:CreateTargets({Players = true})
 		Mode = SilentAim:CreateDropdown({
@@ -383,7 +404,7 @@ run(function()
 			List = {'Mouse', 'Position'},
 			Function = function(val)
 				if CircleObject then
-					CircleObject.Visible = SilentAim.Enabled and val == 'Mouse'
+					CircleObject.Visible = SilentAim.Enabled and val == 'Mouse' and not clickGuiOpen()
 				end
 			end,
 			Tooltip = 'Mouse - Checks for entities near the mouses position\nPosition - Checks for entities near the local character'
@@ -431,12 +452,14 @@ run(function()
 					CircleObject.Radius = Range.Value
 					CircleObject.NumSides = 100
 					CircleObject.Transparency = 1 - CircleTransparency.Value
-					CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse'
+					CircleObject.Visible = SilentAim.Enabled and Mode.Value == 'Mouse' and not clickGuiOpen()
 				else
 					pcall(function()
 						CircleObject.Visible = false
 						CircleObject:Remove()
 					end)
+					-- the loop reads Visible back, so it must not see the removed circle
+					CircleObject = nil
 				end
 				CircleColor.Object.Visible = callback
 				CircleTransparency.Object.Visible = callback
@@ -515,6 +538,9 @@ run(function()
 	
 	Killaura = vape.Categories.Blatant:CreateModule({
 		Name = 'Killaura',
+		ExtraText = function()
+			return SwingRange and tostring(SwingRange.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -557,7 +583,13 @@ run(function()
 						end
 					end
 	
+					-- hidden while the menu is open; the first frame after it closes draws them again
+					local hidden = clickGuiOpen()
 					for i, v in Boxes do
+						if hidden then
+							if v.Adornee then v.Adornee = nil end
+							continue
+						end
 						v.Adornee = attacked[i] and attacked[i].Entity.RootPart or nil
 						if v.Adornee then
 							v.Color3 = Color3.fromHSV(attacked[i].Check.Hue, attacked[i].Check.Sat, attacked[i].Check.Value)
@@ -566,6 +598,10 @@ run(function()
 					end
 	
 					for i, v in Particles do
+						if hidden then
+							if v.Parent then v.Parent = nil end
+							continue
+						end
 						v.Position = attacked[i] and attacked[i].Entity.RootPart.Position or Vector3.new(9e9, 9e9, 9e9)
 						v.Parent = attacked[i] and gameCamera or nil
 					end
@@ -586,7 +622,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Attack players around you\nwithout aiming at them.'
+		Tooltip = 'Attacks enemies around you without you aiming.\nUses your melee weapon, and can face your target and show effects.'
 	})
 	Targets = Killaura:CreateTargets({Players = true})
 	SwingRange = Killaura:CreateSlider({
@@ -673,7 +709,8 @@ run(function()
 					part.CanCollide = false
 					part.Transparency = 1
 					part.CanQuery = false
-					part.Parent = Killaura.Enabled and gameCamera or nil
+					-- a part made while the menu is open starts hidden
+					part.Parent = Killaura.Enabled and not clickGuiOpen() and gameCamera or nil
 					local particles = Instance.new('ParticleEmitter')
 					particles.Brightness = 1.5
 					particles.Size = NumberSequence.new(ParticleSize.Value)
@@ -780,6 +817,6 @@ run(function()
 	            old = nil
 	        end
 	    end,
-	    Tooltip = 'Prevents taking fall damage.'
+	    Tooltip = 'Prevents you from taking fall damage.'
 	})
 end)

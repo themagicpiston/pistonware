@@ -29,6 +29,17 @@ local function notif(...)
 	return vape:CreateNotification(...)
 end
 
+-- Is Pistonware's own menu open; the plain field reads safely from any thread
+local function clickGuiOpen()
+	local open = vape.ClickGuiOpen
+	if open ~= nil then return open == true end
+	if vape.ThreadFix then pcall(setthreadidentity, 8) end
+	local ok, visible = pcall(function()
+		return vape.gui.ScaledGui.ClickGui.Visible
+	end)
+	return ok and visible == true
+end
+
 local function parsePositions(v, func)
 	if v:IsA('Part') then
 		local start = -(v.Size / 2) + Vector3.new(1.5, 1.5, 1.5)
@@ -109,6 +120,11 @@ run(function()
 	
 	AutoClicker = vape.Categories.Combat:CreateModule({
 		Name = 'AutoClicker',
+		ExtraText = function()
+			if not CPS then return nil end
+			local low, high = CPS.ValueMin, CPS.ValueMax
+			return (low == high and tostring(low) or low..'-'..high)..' cps'
+		end,
 		Function = function(callback)
 			if callback then
 				repeat
@@ -120,7 +136,7 @@ run(function()
 				until not AutoClicker.Enabled
 			end
 		end,
-		Tooltip = 'Automatically clicks for you'
+		Tooltip = 'Clicks for you while you hold the attack button.\nSet a random clicks-per-second range.'
 	})
 	CPS = AutoClicker:CreateTwoSlider({
 		Name = 'CPS',
@@ -147,7 +163,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Extends attack reach'
+		Tooltip = 'Lets you hit enemies from further away.'
 	})
 end)
 	
@@ -177,6 +193,10 @@ run(function()
 	
 	Velocity = vape.Categories.Combat:CreateModule({
 		Name = 'Velocity',
+		ExtraText = function()
+			if not (VelocityHorizontal and VelocityVertical) then return nil end
+			return VelocityHorizontal.Value..'% '..VelocityVertical.Value..'%'
+		end,
 		Function = function(callback)
 			if callback then
 				connection = getconnections(bd.CombatService.KnockBackApplied._re.OnClientEvent)[1]
@@ -189,7 +209,7 @@ run(function()
 				connection = nil
 			end
 		end,
-		Tooltip = 'Reduces knockback taken'
+		Tooltip = 'Reduces the amount of knockback you take.\nSet horizontal, vertical and chance amounts.'
 	})
 	VelocityHorizontal = Velocity:CreateSlider({
 		Name = 'Horizontal',
@@ -234,7 +254,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Always hit criticals'
+		Tooltip = 'Makes every hit you land a critical hit.'
 	})
 end)
 	
@@ -257,7 +277,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Prevents slowing down when using items.'
+		Tooltip = 'Lets you keep moving while a menu is open.'
 	})
 end)
 	
@@ -296,6 +316,9 @@ run(function()
 	
 	Killaura = vape.Categories.Blatant:CreateModule({
 		Name = 'Killaura',
+		ExtraText = function()
+			return AttackRange and tostring(AttackRange.Value) or nil
+		end,
 		Function = function(callback)
 			if callback then
 				if LegitAura.Enabled then
@@ -379,7 +402,13 @@ run(function()
 						end
 					end
 	
+					-- hidden while the menu is open; the first frame after it closes draws them again
+					local hidden = clickGuiOpen()
 					for i, v in Boxes do
+						if hidden then
+							if v.Adornee then v.Adornee = nil end
+							continue
+						end
 						v.Adornee = attacked[i] and attacked[i].Entity.RootPart or nil
 						if v.Adornee then
 							v.Color3 = Color3.fromHSV(attacked[i].Check.Hue, attacked[i].Check.Sat, attacked[i].Check.Value)
@@ -388,6 +417,10 @@ run(function()
 					end
 	
 					for i, v in Particles do
+						if hidden then
+							if v.Parent then v.Parent = nil end
+							continue
+						end
 						v.Position = attacked[i] and attacked[i].Entity.RootPart.Position or Vector3.new(9e9, 9e9, 9e9)
 						v.Parent = attacked[i] and gameCamera or nil
 					end
@@ -406,7 +439,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Attack players around you\nwithout aiming at them.'
+		Tooltip = 'Attacks enemies around you without you aiming.\nSet range, swing, blocking and visuals.'
 	})
 	Targets = Killaura:CreateTargets({Players = true})
 	CPS = Killaura:CreateTwoSlider({
@@ -502,7 +535,8 @@ run(function()
 					part.CanCollide = false
 					part.Transparency = 1
 					part.CanQuery = false
-					part.Parent = Killaura.Enabled and gameCamera or nil
+					-- a part made while the menu is open starts hidden
+					part.Parent = Killaura.Enabled and not clickGuiOpen() and gameCamera or nil
 					local particles = Instance.new('ParticleEmitter')
 					particles.Brightness = 1.5
 					particles.Size = NumberSequence.new(ParticleSize.Value)
@@ -605,7 +639,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Prevents taking fall damage.'
+		Tooltip = 'Prevents you from taking fall damage.'
 	})
 end)
 	
@@ -663,6 +697,9 @@ run(function()
 	
 	local ProjectileAimbot = vape.Categories.Blatant:CreateModule({
 		Name = 'ProjectileAimbot',
+		ExtraText = function()
+			return TargetPart and TargetPart.Value or nil
+		end,
 		Function = function(callback)
 			if callback then
 				old = hookfunction(debug.getupvalue(bd.BowClient.Start, 11), function(...)
@@ -673,7 +710,7 @@ run(function()
 				old = nil
 			end
 		end,
-		Tooltip = 'Silently adjusts your aim towards the enemy'
+		Tooltip = 'Aims your projectiles at enemies for you.\nPick the body part and how wide to search.'
 	})
 	TargetPart = ProjectileAimbot:CreateDropdown({
 		Name = 'Part',
@@ -702,7 +739,7 @@ run(function()
 				end))
 			end
 		end,
-		Tooltip = 'Automatically queues after the match ends.'
+		Tooltip = 'Queues you up again once the match ends.'
 	})
 end)
 	
@@ -859,7 +896,7 @@ run(function()
 				until not Scaffold.Enabled
 			end
 		end,
-		Tooltip = 'Helps you make bridges/scaffold walk.'
+		Tooltip = 'Places blocks under you so you can bridge.\nCan also tower up, go down, widen the path and bridge diagonally.'
 	})
 	Expand = Scaffold:CreateSlider({
 		Name = 'Expand',
@@ -992,7 +1029,7 @@ run(function()
 				table.clear(NPCs)
 			end
 		end,
-		Tooltip = 'Automatically buys items when you go near the shop'
+		Tooltip = 'Buys gear and upgrades when you are near a shop.\nCovers swords, armor, pickaxes and team upgrades.'
 	})
 	Sword = AutoBuy:CreateToggle({
 		Name = 'Buy Sword',
@@ -1147,7 +1184,7 @@ run(function()
 				until not Breaker.Enabled
 			end
 		end,
-		Tooltip = 'Breaks enemy blocks around you'
+		Tooltip = 'Breaks enemy beds near you automatically.'
 	})
 	Range = Breaker:CreateSlider({
 		Name = 'Break range',
