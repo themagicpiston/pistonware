@@ -1634,6 +1634,34 @@ vape:Clean(function()
     end
 end)
 
+--[[ Off the moment a teleport starts, and back on if it fails. Only Uninject used to take it
+off, so leaving a match left this Lua closure in the game's metatable while the place was torn
+down, with every call any script made going through it -- the one engine-level change a match
+leaves behind and the lobby never makes, and leaving a match is when Delta closes. The next
+place installs its own on a fresh metatable. ]]
+run(function()
+    local offForTeleport = false
+    vape:Clean(lplr.OnTeleport:Connect(function(state)
+        if state == Enum.TeleportState.Failed then
+            if offForTeleport and mt.__namecall == oldNamecall then
+                pcall(function()
+                    setreadonly(mt, false)
+                    mt.__namecall = namecallHook
+                    setreadonly(mt, true)
+                end)
+            end
+            offForTeleport = false
+        elseif mt.__namecall == namecallHook then
+            pcall(function()
+                setreadonly(mt, false)
+                mt.__namecall = oldNamecall
+                setreadonly(mt, true)
+            end)
+            offForTeleport = true
+        end
+    end))
+end)
+
 local blankFunction = function(...) return ... end
 
 local fpsHooks = {}
@@ -6754,6 +6782,8 @@ run(function()
 	local DistanceLimit
 	local Reference = {}
 	local menuHidden = false
+	-- Set from the moment a teleport starts until it is done or has failed: nothing is drawn.
+	local teleporting = false
 
 	--[[ Drawn with the Drawing library, like ESP, rather than adornments in Pistonware's GUI:
 	nothing is parented anywhere, so there is no GUI permission for an executor to refuse, and
@@ -6858,7 +6888,7 @@ run(function()
 	end
 
 	local function addBed(bed)
-		if Reference[bed] or not bed.Parent then return end
+		if teleporting or Reference[bed] or not bed.Parent then return end
 		local teamId = bedTeam(bed)
 		-- Priority Only: your own team's bed is the one you already know about.
 		if Teammates.Enabled and teamId and tostring(teamId) == tostring(lplr:GetAttribute('Team')) then return end
@@ -6982,6 +7012,7 @@ run(function()
 	end
 
 	local function render()
+		if teleporting then return end
 		-- Hidden once while the menu is open; the first frame after it closes draws them again.
 		if clickGuiOpen() then
 			if not menuHidden then
@@ -7256,6 +7287,19 @@ run(function()
 			removeBed(bed)
 		end
 	end)
+
+	--[[ And the moment a teleport starts: Drawings still alive, and written every frame, while a
+	match is torn down are one of the things that close Delta as the match is left. None is drawn
+	again until the teleport is over; one that fails has the rescan above add every bed back
+	within a second. ]]
+	vape:Clean(lplr.OnTeleport:Connect(function(state)
+		teleporting = state ~= Enum.TeleportState.Failed
+		if teleporting then
+			for bed in Reference do
+				removeBed(bed)
+			end
+		end
+	end))
 end)
 	
 run(function()
@@ -10912,6 +10956,53 @@ run(function()
 			if not observed then return end
 		end
 
+		--[[ No pacing asked for: every item this chest gives up is requested at once, as fast as
+		clicking through the chest screen sends them -- it takes each with its own ChestGetItem
+		and never waits on the one before. They are picked first, in the same priority order
+		and against the same stack limits as below, and the chest is only closed once they are
+		all answered: closing it under a take turns the take away. One the server refuses is
+		simply still there for the next pass, a frame later at this Delay. ]]
+		if Delay.Value <= 0 then
+			local picks = {}
+			while #accessories > 0 do
+				local bestIndex = getBestChestItem(accessories, chest, profile)
+				if not bestIndex then break end
+				local item = table.remove(accessories, bestIndex)
+				if item.Parent == chest then
+					-- Counted as it is picked, so a stack limit ends the plan where the takes would.
+					addProfileItem(profile, item.Name, getChestAmount(item))
+					table.insert(picks, item)
+				end
+			end
+
+			local pending, took = #picks, 0
+			for _, item in picks do
+				task.spawn(function()
+					local success, result = pcall(function()
+						return chestGetItem:CallServer(chest, item)
+					end)
+					if success and result ~= false then
+						took += 1
+						if taken then
+							table.insert(taken, {Type = item.Name, Time = tick()})
+						end
+					end
+					pending -= 1
+				end)
+			end
+			local deadline = os.clock() + 3
+			while pending > 0 and os.clock() < deadline do
+				task.wait()
+			end
+			--[[ Nothing went through -- a full inventory, an item the server will not hand over --
+			so the same picks would only go out again next frame, and every frame after: this
+			chest waits a moment instead. ]]
+			if #picks > 0 and took == 0 then
+				Delays[chest] = tick() + 0.5
+			end
+			accessories = {}
+		end
+
 		local firstItem = true
 		while #accessories > 0 do
 			-- The module can be switched off mid-chest, and a chest can be broken or
@@ -11008,6 +11099,49 @@ run(function()
 		depositing = true
 		task.spawn(function()
 			local chestGiveItem = inventoryRemote('ChestGiveItem')
+
+			--[[ No pacing asked for: one ChestGiveItem per item type in the stash, all at once.
+			An item the server turns away stays stashed for the next pass to try again, which
+			at this Delay is the next frame; the window still ages it out. ]]
+			if Delay.Value <= 0 then
+				local batch, seenTypes = {}, {}
+				for _, entry in Stash do
+					if tick() - entry.Time <= StolenWithin.Value and not seenTypes[entry.Type] then
+						seenTypes[entry.Type] = true
+						table.insert(batch, entry.Type)
+					end
+				end
+
+				local pending = #batch
+				for _, itemType in batch do
+					task.spawn(function()
+						local item = getItem(itemType)
+						local given = false
+						if item and item.tool and ChestSteal.Enabled and Deposit.Enabled then
+							local success, result = pcall(function()
+								return chestGiveItem:CallServer(inventory, item.tool)
+							end)
+							given = success and result ~= false
+						end
+						if given then
+							-- The whole stack went in, so every entry for it is settled.
+							for index = #Stash, 1, -1 do
+								if Stash[index].Type == itemType then
+									table.remove(Stash, index)
+								end
+							end
+						end
+						pending -= 1
+					end)
+				end
+				local deadline = os.clock() + 3
+				while pending > 0 and os.clock() < deadline do
+					task.wait()
+				end
+				depositing = false
+				return
+			end
+
 			local index = 1
 
 			while index <= #Stash do
@@ -12786,13 +12920,22 @@ run(function()
 		end
 	end
 	
+	--[[ The old path, for a game without the server-side inventory below. Bounded: an action the
+	store turns down changes nothing, so the event it waited on never came and the sort parked
+	here for good, holding Active with it. ]]
 	local function dispatch(...)
 		bedwars.Store:dispatch(...)
-		vapeEvents.InventoryChanged.Event:Wait()
+		local done = false
+		local connection = vapeEvents.InventoryChanged.Event:Once(function()
+			done = true
+		end)
+		local deadline = os.clock() + 1
+		repeat task.wait() until done or os.clock() > deadline
+		connection:Disconnect()
 		table.clear(resolvedSlots)
 	end
 	
-	local function sortHotbar()
+	local function sortHotbarLegacy()
 		local items = (List.Hotbars[List.Selected] and List.Hotbars[List.Selected].Hotbar or {})
 		table.clear(resolvedSlots)
 	
@@ -12840,14 +12983,188 @@ run(function()
 		end
 	end
 
+	--[[ The hotbar is the server's now.
+
+	BedWars moved the inventory to the server: every slot lives in a snapshot it sends
+	(Inventory.slotSnapshot, numbered by revision), and an edit is a TransactSlots request -- what
+	the inventory screen sends when you drag an item. The store actions the old path dispatches
+	are turned away by the reducer once a snapshot exists, so they changed nothing.
+
+	So the hotbar is laid out the way the game's own saved hotbar lays one out
+	(hotbar-save-controller): one swap_hotbar per slot, through the inventory dragging
+	controller's transact, which queues them, sends the revisions the server checks and retries
+	one that went stale. Clear Hotbar is quick_move, the shift-click that sends a hotbar item back
+	into the inventory. ]]
+	local flamework
+	local function dragController()
+		local ok, controller = pcall(function()
+			flamework = flamework or require(replicatedStorage.rbxts_include.node_modules['@flamework'].core.out).Flamework
+			return flamework.resolveDependency('client/controllers/global/inventory/inventory-dragging-controller@InventoryDraggingController')
+		end)
+		return ok and type(controller) == 'table' and type(controller.transact) == 'function' and controller or nil
+	end
+
+	local function slotSnapshot()
+		local ok, snapshot = pcall(function()
+			return bedwars.Store:getState().Inventory.slotSnapshot
+		end)
+		return ok and type(snapshot) == 'table' and snapshot.player and snapshot or nil
+	end
+
+	local function chestOpen(controller)
+		local ok, folder = pcall(controller.getObservedChestFolder, controller)
+		return ok and folder ~= nil
+	end
+
+	--[[ Nothing is sent while a chest is open. transact sends the open chest along with every
+	request, and a quick_move with one is the shift-click INTO it: Clear Hotbar was putting your
+	hotbar into whatever chest was open -- a crate ChestSteal was raiding, the team crate the shop
+	opens, your own chest. So a sort waits for the chest to close: for as long as it stays open
+	while the module is on (ChestSteal holds one for a moment, and one you opened yourself closes
+	when you walk away), and half a minute at most for a single On Key sort. ]]
+	local function waitChestClosed(controller)
+		local deadline = os.clock() + 30
+		while chestOpen(controller) do
+			if not AutoHotbar.Enabled and (Mode.Value ~= 'On Key' or os.clock() > deadline) then
+				return false
+			end
+			task.wait(0.25)
+		end
+		return true
+	end
+
+	-- One transaction, waited for. True when the server took it.
+	local function transact(controller, request)
+		if chestOpen(controller) then return false end
+		local ok, result = pcall(function()
+			return controller:transact(request):expect()
+		end)
+		return ok and result == true
+	end
+
+	local function hotbarSlotAt(slots, index)
+		for _, slot in slots do
+			if slot.container == 'hotbar' and slot.index == index then
+				return slot
+			end
+		end
+		return nil
+	end
+
+	-- One pass over the layout. False when a chest opened part way and stopped it.
+	local function sortPass(controller)
+		local snapshot = slotSnapshot()
+		if not snapshot then
+			pcall(function()
+				controller:refresh():expect()
+			end)
+			snapshot = slotSnapshot()
+		end
+		if not snapshot then return true end
+
+		local layout = (List.Hotbars[List.Selected] and List.Hotbars[List.Selected].Hotbar or {})
+		table.clear(resolvedSlots)
+		-- hotbar index (from 0) -> the item type the layout puts there
+		local wanted, wantedTypes = {}, {}
+		for slot, itemType in layout do
+			local number = tonumber(slot)
+			if number and number >= 1 and number <= 9 then
+				local resolved = getCustomItem(itemType)
+				wanted[number - 1] = resolved
+				wantedTypes[resolved] = true
+			end
+		end
+
+		-- A slot already holding what it should is left alone, and is never taken from.
+		local settled = {}
+		for index, itemType in wanted do
+			local current = hotbarSlotAt(snapshot.player.slots, index)
+			if current and current.itemType == itemType then
+				settled[index] = true
+			end
+		end
+
+		for index = 0, 8 do
+			local itemType = wanted[index]
+			if itemType and not settled[index] then
+				if chestOpen(controller) then return false end
+				-- The last transaction put its own snapshot in the store, and a swap made for an
+				-- earlier slot can have dropped exactly this one's item in here already.
+				snapshot = slotSnapshot() or snapshot
+				local current = hotbarSlotAt(snapshot.player.slots, index)
+				if current and current.itemType == itemType then
+					settled[index] = true
+					continue
+				end
+				local source
+				for _, slot in snapshot.player.slots do
+					if slot.itemType == itemType and (slot.container == 'inventory'
+						or (slot.container == 'hotbar' and slot.index ~= index and not settled[slot.index])) then
+						-- The inventory first: taking it off another hotbar slot only moves the gap.
+						if not source or (slot.container == 'inventory' and source.container ~= 'inventory') then
+							source = slot
+						end
+					end
+				end
+				if source and transact(controller, {
+					operation = 'swap_hotbar',
+					slot = {container = source.container, index = source.index},
+					target = {container = 'hotbar', index = index}
+				}) then
+					settled[index] = true
+				end
+			end
+		end
+
+		if Clear.Enabled then
+			snapshot = slotSnapshot() or snapshot
+			for _, slot in table.clone(snapshot.player.slots) do
+				if slot.container == 'hotbar' and not settled[slot.index] and not wantedTypes[slot.itemType] then
+					if chestOpen(controller) then return false end
+					transact(controller, {
+						operation = 'quick_move',
+						slot = {container = 'hotbar', index = slot.index}
+					})
+				end
+			end
+		end
+		return true
+	end
+
+	-- A pass a chest stopped starts over, from a fresh snapshot, once the chest has closed.
+	local function sortSlots(controller)
+		for _ = 1, 5 do
+			if not waitChestClosed(controller) or sortPass(controller) then return end
+		end
+	end
+
+	local function sortHotbar()
+		local controller = dragController()
+		if controller then
+			sortSlots(controller)
+		else
+			sortHotbarLegacy()
+		end
+	end
+
 	--[[ Active is cleared whatever the sort does. It used to be reset on the sort's last line,
 	so anything that threw part way -- an item with no meta, a hotbar slot that is not there --
 	left it set, and every later sort returned on the first line: AutoHotbar stayed on and
-	never sorted again until a reinject. ]]
+	never sorted again until a reinject.
+
+	A change that lands while a sort is running (a pickup between two transactions) runs it
+	once more when it finishes, instead of being dropped. ]]
+	local Again = false
 	local function sortCallback()
-		if Active then return end
+		if Active then
+			Again = true
+			return
+		end
 		Active = true
-		pcall(sortHotbar)
+		repeat
+			Again = false
+			pcall(sortHotbar)
+		until not (Again and AutoHotbar.Enabled)
 		Active = false
 	end
 	

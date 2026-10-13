@@ -558,6 +558,18 @@ local function finishLoading()
 	-- Read by the queued hold's Requeue: sending you to the lobby before this hook exists would
 	-- leave pistonware behind, with nothing there to queue you again.
 	vape.TeleportHooked = true
+	--[[ From here this session queues its own teleports, and its handler goes with it when it is
+	unloaded. The developer loader's fallback handler is only for a boot that never got this far,
+	so it is dropped now and told to stand down: left connected, it outlived an Unload and queued
+	the boot on the next teleport anyway. ]]
+	pcall(function()
+		rawset(shared, 'PistonwareTeleportOwned', true)
+		local fallback = rawget(shared, 'PistonwareDevTeleportConnection')
+		if fallback then
+			rawset(shared, 'PistonwareDevTeleportConnection', nil)
+			fallback:Disconnect()
+		end
+	end)
 	vape:Clean(playersService.LocalPlayer.OnTeleport:Connect(function(teleportState)
 		--[[ A failed teleport is ignored rather than consumed. OnTeleport fires for EVERY state
 		and the one-shot guard below does not look at which -- so an attempt that failed used
@@ -1581,7 +1593,12 @@ end
 			save rather than corrupt the config -- what is on disk is already correct, there is
 			simply nothing new worth recording yet. ]]
 			if profileApplied then
-				pcall(function() vape:Save() end)
+				local ok, saved = pcall(function() return vape:Save() end)
+				--[[ That wrote everything, so a write RequestSave still has waiting (it gathers
+				changes for up to 2s) is dropped, not made a second time while the client leaves. ]]
+				if ok and saved then
+					vape.SaveQueued, vape.SaveDeadline, vape.SaveNeeded = nil, nil, nil
+				end
 			end
 		end
 	end))
