@@ -10121,27 +10121,34 @@ run(function()
 end)
 	
 run(function()
+	--[[ Idled's connections are switched off, not cut, and switched back on with the module, as
+	universal.lua's version does: they belong to Roblox's own scripts, and cut ones stayed cut for
+	the rest of the session, Uninject included. The game's own AFK check (AfkController) is a
+	one-shot that sends AfkInfo {afk = false} and disconnects itself, so this sends that itself
+	rather than combing every Heartbeat handler in the game to find it. ]]
+	local disabled = {}
 	vape.Categories.World:CreateModule({
 		Name = 'Anti-AFK',
 		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
-				for _, v in getconnections(lplr.Idled) do
-					v:Disconnect()
-				end
-
-				for _, v in getconnections(runService.Heartbeat) do
-					if type(v.Function) == 'function' and islclosure(v.Function) then
-						local ok, constants = pcall(debug.getconstants, v.Function)
-						if ok and table.find(constants, remotes.AfkStatus) then
-							v:Disconnect()
-						end
+				local ok, connections = pcall(getconnections, lplr.Idled)
+				for _, connection in (ok and connections or {}) do
+					if pcall(function() connection:Disable() end) then
+						table.insert(disabled, connection)
 					end
 				end
 
-				bedwars.Client:Get(remotes.AfkStatus):SendToServer({
-					afk = false
-				})
+				pcall(function()
+					bedwars.Client:Get(remotes.AfkStatus):SendToServer({
+						afk = false
+					})
+				end)
+			else
+				for _, connection in disabled do
+					pcall(function() connection:Enable() end)
+				end
+				table.clear(disabled)
 			end
 		end,
 		Tooltip = 'Prevents you from getting kicked for being idle.'
@@ -13690,12 +13697,52 @@ run(function()
 end)
 	
 run(function()
+	--[[ The swing's 'Raycast' method name and its workspace upvalue, found by what they hold.
+	They were written at fixed slots (constant 23, upvalue 4) without looking: once a BedWars update
+	moved them, that overwrote whatever sat there -- or wrote past the end of the constants, which
+	corrupts the game's memory on executors that do not check (Delta closed on the next teleport,
+	even after Uninject, since switching off wrote the same slot). Nothing is written now unless
+	both are where they belong. ]]
+	local function hitFixSlots(fn)
+		local okK, constants = pcall(debug.getconstants, fn)
+		local okU, upvalues = pcall(debug.getupvalues, fn)
+		if not (okK and okU and type(constants) == 'table' and type(upvalues) == 'table') then return nil end
+		local constantIndex, upvalueIndex
+		for index, value in constants do
+			if value == 'Raycast' or value == 'raycast' then
+				constantIndex = index
+				break
+			end
+		end
+		for index, value in upvalues do
+			if value == bedwars.QueryUtil or (typeof(value) == 'Instance' and value.ClassName == 'Workspace') then
+				upvalueIndex = index
+				break
+			end
+		end
+		if constantIndex and upvalueIndex then
+			return constantIndex, upvalueIndex
+		end
+		return nil
+	end
+
 	vape.Legit:CreateModule({
 		Name = 'HitFix',
 		Tab = 'Combat',
 		Function = function(callback)
-			debug.setconstant(bedwars.SwordController.swingSwordAtMouse, 23, callback and 'raycast' or 'Raycast')
-			debug.setupvalue(bedwars.SwordController.swingSwordAtMouse, 4, callback and bedwars.QueryUtil or workspace)
+			local fn = bedwars.SwordController and bedwars.SwordController.swingSwordAtMouse
+			if type(fn) ~= 'function' then return end
+			local constantIndex, upvalueIndex = hitFixSlots(fn)
+			if not constantIndex then return end
+			if callback then
+				pcall(debug.setconstant, fn, constantIndex, 'raycast')
+				pcall(debug.setupvalue, fn, upvalueIndex, bedwars.QueryUtil)
+			else
+				pcall(debug.setconstant, fn, constantIndex, 'Raycast')
+				if debug.getupvalue(fn, upvalueIndex) == bedwars.QueryUtil then
+					pcall(debug.setupvalue, fn, upvalueIndex, workspace)
+				end
+			end
 		end,
 		Tooltip = 'Makes your sword hits land more reliably.'
 	})
