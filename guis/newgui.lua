@@ -6880,9 +6880,11 @@ function build.targetInfo()
 		Size = UDim2.fromScale(1, 1)
 	}, Bar)
 	ui.corner(Fill, UDim.new(1, 0))
-	Fill:GetPropertyChangedSignal('Size'):Connect(function()
-		Fill.Visible = Fill.Size.X.Scale > 0.01
-	end)
+	--[[ Hidden while it has next to no width -- set by Update every frame, not from Fill's own Size
+	signal. A handler that writes properties from inside the property write that fired it nests
+	one write inside another, every frame of a health tween; on Delta that nesting was part of what
+	corrupted memory and closed the app on the next teleport. Nothing on this card runs from a
+	property-changed signal. ]]
 
 	-- The menu's own green above half, its yellow down to a fifth, its red below.
 	local function healthColor(percent)
@@ -7164,6 +7166,10 @@ function build.targetInfo()
 		end
 		if moved then
 			paint()
+		end
+		local fillShown = Fill.Size.X.Scale > 0.01
+		if Fill.Visible ~= fillShown then
+			Fill.Visible = fillShown
 		end
 		--[[ Beside the target: a little right of their shoulder and centred on their head, kept inside
 		the screen. The card lives in its overlay window, so the screen point is turned back into an
