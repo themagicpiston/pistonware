@@ -1614,8 +1614,17 @@ local namecallHook = function(self, ...)
     end
     return oldNamecall(self, ...)
 end
-mt.__namecall = namecallHook
-shared.PistonwareNamecallHook = namecallHook
+--[[ Test switch for the Delta teleport crash: while pistonware/nonamecall.txt exists, the game's
+__namecall is left as it is for the whole session -- nothing above is installed, the watch tables
+just go unread. A file rather than a shared flag, so it holds across teleports and restarts;
+delete it to put the guard back. ]]
+do
+    local ok, off = pcall(isfile, 'pistonware/nonamecall.txt')
+    if not (ok and off == true) then
+        mt.__namecall = namecallHook
+        shared.PistonwareNamecallHook = namecallHook
+    end
+end
 setreadonly(mt, true)
 
 vape:Clean(function()
