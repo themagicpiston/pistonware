@@ -515,7 +515,9 @@ local function finishLoading()
 		end
 		local started = os.clock()
 		repeat
-			task.wait(0.1)
+			-- Every frame: the checks are a few table reads, and the profile follows the payload
+			-- on the next frame instead of up to 0.1s later.
+			task.wait()
 		until gameScriptFinished
 			or payloadDone()
 			or not isCurrentBoot()
@@ -1810,7 +1812,8 @@ if not shared.VapeIndependent then
 	and saves. A download that failed outright stays a failed boot. ]]
 	local adapterMissing = false
 		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) or nil
-	if cached and cached:gsub('%s', '') ~= '' then
+	-- Any non-whitespace character; find stops at the first one instead of copying the whole file.
+	if cached and cached:find('%S') then
 		gameScriptStarted = runGameScript(cached, tostring(game.PlaceId))
 	end
 	if not gameScriptStarted and not shared.PistonwareDeveloper then

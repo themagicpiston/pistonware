@@ -293,11 +293,14 @@ end
 
 	Ten milliseconds brings the multiplier to about four while keeping any single uninterrupted
 	block to under a third of a mobile frame, so the responsiveness this was added for is intact.
+	The boot apply with the menu shut gets 16ms, half a 30fps frame, as nothing on screen waits
+	on it. SaveBlocked marks the boot: set from the start, cleared by main.lua after that apply.
 ]]
 local buildclock = os.clock()
 local yieldBudget = 0.01
 local function yieldBuild(budget)
-	if os.clock() - buildclock > (budget or yieldBudget) then
+	-- The mirrored field, not clickgui.Visible: the apply thread may not be allowed to read the gui.
+	if os.clock() - buildclock > (budget or ((vape.ClickGuiOpen or not vape.SaveBlocked) and yieldBudget or 0.016)) then
 		task.wait()
 		buildclock = os.clock()
 	end
@@ -315,7 +318,8 @@ end
 	work, moved rather than broken up.
 
 	So they go through a queue that yields between them, and modules come online over a second
-	or two instead of all in one instant.
+	or two instead of all in one instant. During boot it starts a few milliseconds' worth a frame
+	rather than one.
 
 	One drain thread at a time, and it exits when the queue empties, so nothing is left running
 	between applies.
@@ -335,20 +339,27 @@ local function queueStart(name, callback)
 	end
 
 	startThread = task.spawn(function()
+		-- Batched only for the boot apply, as in yieldBuild. Later applies start one a frame.
+		local batch = vape.SaveBlocked
 		while startHead <= startTail do
 			-- Yield BEFORE the first job, not after it. task.spawn resumes this thread inline on
 			-- the caller, so taking a job first would run one module synchronously inside the
 			-- apply loop -- the exact thing being fixed, just once instead of sixty times.
 			task.wait()
-			local nextJob = startQueue[startHead]
-			startQueue[startHead] = nil
-			startHead += 1
-			-- spawn, not a direct call: a module that errors on startup must not take the drain
-			-- thread down with it and strand every module still queued behind it.
-			local start = nextJob.Start
-			nextJob.Start, nextJob.Name = nil, nil
-			table.insert(recycledStartJobs, nextJob)
-			task.spawn(start, true)
+			-- During boot, as many as fit in about 5ms of this frame, and always at least one. One a
+			-- frame took a 77-module profile 77 frames: two and a half seconds at 30fps.
+			local frameStart = os.clock()
+			repeat
+				local nextJob = startQueue[startHead]
+				startQueue[startHead] = nil
+				startHead += 1
+				-- spawn, not a direct call: a module that errors on startup must not take the drain
+				-- thread down with it and strand every module still queued behind it.
+				local start = nextJob.Start
+				nextJob.Start, nextJob.Name = nil, nil
+				table.insert(recycledStartJobs, nextJob)
+				task.spawn(start, true)
+			until not batch or startHead > startTail or os.clock() - frameStart > 0.005
 		end
 
 		startHead, startTail = 1, 0
@@ -2991,6 +3002,9 @@ function vape:Load(skipgui, profile)
 	]]
 	self.LoadGeneration += 1
 	local generation = self.LoadGeneration
+	-- The budget counts from here. The clock still held the last yield, seconds ago, so the
+	-- first check yielded at once and the first frame applied a single category.
+	buildclock = os.clock()
 	-- Nothing may write to disk while a load is in progress: it would serialise a config that is
 	-- half the old profile and half the new one. Restored at the end.
 	self.Loaded = false
@@ -7827,10 +7841,8 @@ local function sortCategoriesNow(self)
 			end
 		end
 	end
-
-	if layout then
-		layout.request('*')
-	end
+	-- Nothing to lay out: cards are placed by name, and layout.add and layout.remove ask for their
+	-- own tabs. Asking for every tab here re-placed all six after each registration burst.
 end
 
 --[[
@@ -8127,18 +8139,23 @@ function layout.place(tab)
 end
 
 function layout.flush()
-	local dirty = layout.Dirty
-	layout.Dirty = {}
 	if vape.ThreadFix then
 		setthreadidentity(8)
 	end
-	if layout.Search ~= '' then
-		layout.place('Search')
-		return
-	end
-	for _, tab in TABS do
-		if dirty['*'] or dirty[tab] then
-			layout.place(tab)
+	--[[ With the menu shut no page is on screen: the marks are kept, and the menu's Visible watcher
+	(components.GUI) asks for this again as it opens. A load used to place every tab it touched on
+	each frame of registration. The Kits check below still runs. ]]
+	if not (clickgui and not clickgui.Visible) then
+		local dirty = layout.Dirty
+		layout.Dirty = {}
+		if layout.Search ~= '' then
+			layout.place('Search')
+			return
+		end
+		for _, tab in TABS do
+			if dirty['*'] or dirty[tab] then
+				layout.place(tab)
+			end
 		end
 	end
 	if layout.SetTabHidden then
@@ -10468,6 +10485,14 @@ components.GUI = function(props, children, api)
 	}, scaledgui)
 	clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
 		dim.Visible = clickgui.Visible
+	end)
+	-- Tabs the layout left marked while the menu was shut are placed as it opens. Only a request:
+	-- nothing is written inside the property change.
+	clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
+		local pending = next(layout.Dirty)
+		if pending ~= nil and clickgui.Visible then
+			layout.request(pending)
+		end
 	end)
 
 	local window = ui.new('Frame', {

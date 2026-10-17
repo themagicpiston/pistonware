@@ -27,8 +27,8 @@ local function errorTrace(err)
 	return traceback or tostring(err)
 end
 
---[[ Every module in this file and in bedwars.lua is registered inside one of these -- 60 blocks
-here, 59 there, all at top level, and bedwars.lua takes this same function through bw.run.
+--[[ Every module in this file and in bedwars.lua is registered inside one of these blocks, all
+at top level, and bedwars.lua takes this same function through bw.run.
 Unprotected, an error anywhere in any of them aborted the rest of the file: every module
 below the failure never registered, and in bedwars.lua the completion signal on the last
 line never ran either, so main.lua sat in waitForModules for the full 120s before loading a
@@ -59,16 +59,17 @@ end
 --[[ Registration yields a frame once it has held the game thread for FRAME_BUDGET. Every
 module here and in bedwars.lua used to be built back to back -- the modules, their options
 and the GUI objects behind all of it -- in one uninterrupted stretch, which is one long
-freeze on every inject and reinject. VapeSmoothBoot already yields between every block and
-the whole file is written to survive that, so this is the same yield, taken only when the
-frame is actually spent: a boot that fits in a frame is exactly as fast as before. ]]
-local FRAME_BUDGET = 0.012
+freeze on every inject and reinject. The whole file is written to survive a yield between
+any two blocks, so this yields only when the frame is actually spent: a boot that fits in a
+frame is exactly as fast as before. VapeSmoothBoot used to yield before every block, a full
+frame each even for small blocks; it now gets a smaller budget instead. ]]
+local FRAME_BUDGET = shared.VapeSmoothBoot and 0.008 or 0.012
 local lastBootYield = os.clock()
 -- A reinject replaces shared.vape; the blocks of the boot it superseded then stop building.
 local bootVape = shared.vape
 local run = function(func)
 	if shared.vape ~= bootVape then return end
-	if shared.VapeSmoothBoot or os.clock() - lastBootYield > FRAME_BUDGET then
+	if os.clock() - lastBootYield > FRAME_BUDGET then
 		task.wait()
 		lastBootYield = os.clock()
 	end
@@ -197,6 +198,21 @@ local store = {
 	queueType = 'bedwars_test',
 	tools = {}
 }
+
+--[[ downloadBedwars' request, started here and collected there, so its network wait overlaps
+match setup instead of following it. Kept in memory only; developer mode skips it. ]]
+if not shared.PistonwareDeveloper then
+	local fetch = {done = false}
+	store.payloadFetch = fetch
+	task.spawn(function()
+		fetch.ok, fetch.body = pcall(function()
+			local protectedUrl = shared.PistonwareProtectedRawUrl
+			return type(protectedUrl) == 'function' and game:HttpGet(protectedUrl(), true)
+				or game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
+		end)
+		fetch.done = true
+	end)
+end
 
 --[[ Every kit you are playing, not just the first.
 
@@ -2733,7 +2749,10 @@ end
 --[[ pistonware funcs ]]
 
 do
-if shared.VapeSmoothBoot then task.wait() end
+if shared.VapeSmoothBoot and os.clock() - lastBootYield > FRAME_BUDGET then
+	task.wait()
+	lastBootYield = os.clock()
+end
 local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	local Knit = require(
 		replicatedStorage.rbxts_include.node_modules['@easy-games'].knit.src.Knit.KnitClient
@@ -15786,13 +15805,27 @@ local function downloadBedwars()
         return res, nil, localFunc
     end
 
+    --[[ Attempt 1 is the request started after the store was built, so its network wait overlaps
+    match setup. It is waited on as attempt 1 always was, with no cut-off: HttpGet ends a hung
+    request itself, and the pcall around it always sets done. ]]
+    local early = store.payloadFetch
+    store.payloadFetch = nil
+
     local lastFailure
     for attempt = 1, 4 do
-        local suc, res = pcall(function()
-            local protectedUrl = shared.PistonwareProtectedRawUrl
-            return type(protectedUrl) == 'function' and game:HttpGet(protectedUrl(), true)
-                or game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
-        end)
+        local suc, res
+        if attempt == 1 and early then
+            while not early.done do
+                task.wait()
+            end
+            suc, res = early.ok, early.body
+        else
+            suc, res = pcall(function()
+                local protectedUrl = shared.PistonwareProtectedRawUrl
+                return type(protectedUrl) == 'function' and game:HttpGet(protectedUrl(), true)
+                    or game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
+            end)
+        end
         --[[ compile check: during an outage HttpGet can hand back the 503/error page as the body,
         which the ~=''/'404' tests would accept ]]
         if suc and type(res) == 'string' and res ~= '' and res ~= '404: Not Found' then

@@ -43,11 +43,15 @@ local function errorTrace(err)
 	return traceback or tostring(err)
 end
 
-local function downloadFile(path, func)
+local function downloadFile(path, func, chunkName)
 	local devLoader = shared.PistonwareDevLoadSource
 	if type(devLoader) == 'function' then
-		local body = devLoader(path)
-		return func and func(path) or body
+		--[[ Told the name the file runs under, the loader compiles it under that name while checking
+		it and hands the chunk back, so loadModule does not compile the same source again. A loader
+		that predates this returns the body alone, which is compiled as before. ]]
+		local body, chunk = devLoader(path, chunkName)
+		if func then return func(path) or body end
+		return body, chunkName and type(chunk) == 'function' and chunk or nil
 	end
 	if not isfile(path) then
 		local suc, res = pcall(function()
@@ -529,7 +533,8 @@ local function motorMove(target, cf)
 end
 
 local function loadModule(path, name)
-	local chunk = loadstring(downloadFile(path), name)
+	local source, chunk = downloadFile(path, nil, name)
+	chunk = chunk or loadstring(source, name)
 	return chunk and chunk()
 end
 
