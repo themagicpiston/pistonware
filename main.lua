@@ -454,9 +454,13 @@ local function finishLoading()
 		end
 		-- Crash test switch on (pistonware/crashtest.txt): no profile is loaded or saved, so a
 		-- session with parts left out can never write a config missing them. 'keepprofile' loads it
-		-- as normal, but only while no word that leaves part of the script out is set.
+		-- as normal: on its own, or with words that leave parts out when 'nosave' is set too, since
+		-- then nothing is written and nothing can be lost.
 		local crashTest = shared.PistonwareCrashTest
-		if crashTest and not (crashTest:find('keepprofile', 1, true) and not crashTest:find('nogame', 1, true)) then
+		local function crashWord(word)
+			return crashTest ~= nil and crashTest:find(word, 1, true) ~= nil
+		end
+		if crashTest and not (crashWord('keepprofile') and (crashWord('nosave') or not crashWord('nogame'))) then
 			bufferWarn('profile.crashtest', 'crash test switch is on -- profiles are not loaded or saved this session')
 			return
 		end
@@ -469,7 +473,11 @@ local function finishLoading()
 		debugWarn(('[pistonware] applying profile %s (teleported=%s)'):format(
 			tostring(customProfile or '<saved>'), tostring(shared.vapereload and true or false)))
 		local loadOk, _, canSave = xpcall(function()
-			return vape:Load(nil, customProfile)
+			--[[ Crash test, with 'nosave' only: 'noguiload' skips the GUI settings, and 'emptyprofile'
+			names a profile with no file, so nothing in it is applied but the profile still counts as
+			loaded. ]]
+			local quiet = crashWord('nosave')
+			return vape:Load((quiet and crashWord('noguiload')) or nil, (quiet and crashWord('emptyprofile')) and 'crashtestempty' or customProfile)
 		end, errorTrace)
 		if not loadOk or canSave == false then
 			failBoot('profile.apply', loadOk and 'profile data could not be loaded safely' or _)
