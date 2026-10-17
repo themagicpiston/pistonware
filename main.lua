@@ -570,17 +570,6 @@ local function finishLoading()
 			fallback:Disconnect()
 		end
 	end)
-	--[[ One queued boot per arrival. Delta keeps every queued script until the game is closed and
-	runs them all again on every join, so the boot queued at each earlier teleport ran as well: after
-	a few teleports several whole boots started at once, raced each other while the place loaded,
-	and the ones queued before an Uninject still ran after it. Each queue below writes a fresh token
-	here and puts the same token on the script's first line; a copy whose token is not the file's
-	stops there, the one that matches empties the file and boots. Uninject empties it too, so no
-	queued copy comes back after it. ]]
-	local teleportTokenPath = 'pistonware/teleport_token_'..tostring(playersService.LocalPlayer.UserId)..'.txt'
-	vape:Clean(function()
-		pcall(writefile, teleportTokenPath, '')
-	end)
 	vape:Clean(playersService.LocalPlayer.OnTeleport:Connect(function(teleportState)
 		--[[ A failed teleport is ignored rather than consumed. OnTeleport fires for EVERY state
 		and the one-shot guard below does not look at which -- so an attempt that failed used
@@ -1585,16 +1574,6 @@ end
 
 				Queueing first ensures that later save failures do not prevent re-injection.
 			]]
-			do
-				local token = tostring(game.JobId)..'-'..tostring(os.clock())..'-'..tostring(math.random(1, 2147483647))
-				-- No file access, no check: the script queues as it always has.
-				if pcall(writefile, teleportTokenPath, token) then
-					local path = string.format('%q', teleportTokenPath)
-					teleportScript = 'do local tokenOk, tokenNow = pcall(readfile, '..path..')\n'
-						..'if tokenOk and tokenNow ~= '..string.format('%q', token)..' then return end\n'
-						..'pcall(writefile, '..path..', "") end\n'..teleportScript
-				end
-			end
 			local queued = pcall(queue_on_teleport, teleportScript)
 			--[[ Tells loaderdev.lua's fallback handler this teleport is already taken care of, so
 			a developer session never queues two boots. ]]
@@ -1614,12 +1593,7 @@ end
 			save rather than corrupt the config -- what is on disk is already correct, there is
 			simply nothing new worth recording yet. ]]
 			if profileApplied then
-				local ok, saved = pcall(function() return vape:Save() end)
-				--[[ That wrote everything, so a write RequestSave still has waiting (it gathers
-				changes for up to 2s) is dropped, not made a second time while the client leaves. ]]
-				if ok and saved then
-					vape.SaveQueued, vape.SaveDeadline, vape.SaveNeeded = nil, nil, nil
-				end
+				pcall(function() vape:Save() end)
 			end
 		end
 	end))

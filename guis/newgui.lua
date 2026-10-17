@@ -5738,9 +5738,10 @@ function build.keyFooter()
 		end)
 	end)
 
+	-- Deferred: task.spawn ran refresh, and its identity switch, inside the write that opened the menu.
 	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
 		if clickgui.Visible then
-			task.spawn(pcall, refresh)
+			task.defer(pcall, refresh)
 		end
 	end))
 	-- A rotation or a rescale changes the window's width, and with it which line fits.
@@ -6250,17 +6251,12 @@ function build.modOverlay()
 		LabelCustomShadow.Size = LabelCustom.Size
 	end)
 
-	local oldRight = TextGUI.Children.AbsolutePosition.X > (gui.AbsoluteSize.X / 2)
+	--[[ A move can take the list to the other half of the screen, which flips its side. Layout runs
+	this inside the move, so it only asks for a redraw: that works the side out again at the end of
+	the frame, with the identity raised (on a phone the GUI sits under CoreGui), and redraws only
+	what changed. ]]
 	vape:Clean(TextGUI.Children:GetPropertyChangedSignal('AbsolutePosition'):Connect(function()
-		if vape.ThreadFix then
-			setthreadidentity(8)
-		end
-
-		local isRight = TextGUI.Children.AbsolutePosition.X > (gui.AbsoluteSize.X / 2)
-		if oldRight ~= isRight then
-			vape:UpdateTextGUI()
-			oldRight = isRight
-		end
+		vape:UpdateTextGUI()
 	end))
 
 	local function escape(text)
@@ -7416,10 +7412,11 @@ function build.loops()
 			viewportConnection = nil
 		end
 	end)
+	-- This runs inside whatever swapped the camera: the rescale is asked for, like a resize.
 	vape:Clean(workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(function()
 		gameCamera = workspace.CurrentCamera
 		watchCamera()
-		applyAutoScale()
+		queueAutoScale()
 	end))
 	vape:Clean(gui:GetPropertyChangedSignal('AbsoluteSize'):Connect(queueAutoScale))
 
@@ -7427,26 +7424,31 @@ function build.loops()
 		ui.restackNotifications()
 	end))
 
+	--[[ This runs inside the write to the scale, on the writer's thread, so it only sizes the scaled
+	layer to match. The window, the HUD's zoom and the overlay's lines follow once at the end of the
+	frame, however many writes asked. Every object's Visible is no longer flipped off and on here:
+	that ran every Visible handler in the menu and in the game scripts inside the write. ]]
+	local scaleFollowQueued = false
 	vape:Clean(scale:GetPropertyChangedSignal('Scale'):Connect(function()
 		scaledgui.Size = UDim2.fromScale(1 / scale.Scale, 1 / scale.Scale)
-		local main = vape.Categories.Main
-		if main and main.Resize then
-			main.Resize()
-		end
-		ui.applyHudZoom()
-		-- The mod overlay's lines are sized in whole pixels at the old scale.
-		if vape.Loaded and vape.UpdateTextGUI then
-			task.defer(pcall, vape.UpdateTextGUI, vape)
-		end
-
-		--[[ GetDescendants, not QueryDescendants. The selector-query API is recent and
-		unavailable on the mobile clients used by these executors. ]]
-		for _, obj in scaledgui:GetDescendants() do
-			if obj:IsA('GuiObject') and obj.Visible then
-				obj.Visible = false
-				obj.Visible = true
+		if scaleFollowQueued then return end
+		scaleFollowQueued = true
+		task.defer(function()
+			scaleFollowQueued = false
+			if vape.Loaded == nil then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
 			end
-		end
+			local main = vape.Categories.Main
+			if main and main.Resize then
+				main.Resize()
+			end
+			ui.applyHudZoom()
+			-- The mod overlay's lines are sized in whole pixels at the old scale.
+			if vape.Loaded and vape.UpdateTextGUI then
+				pcall(vape.UpdateTextGUI, vape)
+			end
+		end)
 	end))
 
 	vape:Clean(vape.GUIBind.Triggered:Connect(function()

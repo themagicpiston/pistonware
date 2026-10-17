@@ -10321,15 +10321,6 @@ run(function()
 		end,
 		Tooltip = 'Framerate cap applied while the module is on'
 	})
-
-	--[[ The cap is the whole app's, not this place's, so it outlived every teleport: the next
-	place loaded uncapped and read 999 as the cap to put back, and switching this off then did
-	nothing until the app was restarted. It goes back the moment a teleport starts; the next
-	place's profile raises it again, and a teleport that fails puts it straight back. ]]
-	vape:Clean(lplr.OnTeleport:Connect(function(state)
-		if not (FPSUnlocker.Enabled and setfpscap) then return end
-		pcall(setfpscap, state == Enum.TeleportState.Failed and Cap.Value or (previousCap or 60))
-	end))
 end)
 
 run(function()

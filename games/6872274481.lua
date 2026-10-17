@@ -1070,6 +1070,30 @@ run(function()
 		end
 	end
 
+	--[[ EntityUpdated from the handlers below, a frame late and once per entity per frame.
+	Every one of them is a signal that runs its handler inside the write that fired it -- the
+	Health, MaxHealth and Shield attributes, the kit attributes, an NPC's Humanoid, the Team
+	attribute -- and what EntityUpdated reaches, NameTags most of all, raises the thread identity
+	and rewrites GUI. Fired from a deferred thread none of that runs inside someone else's write,
+	and the Health and Shield changes of one hit draw once. The entity's own fields are still
+	updated at once, so anything reading Health or Targetable this frame reads the new value. ]]
+	local pendingUpdates = {}
+	local function queueEntityUpdate(entity)
+		if pendingUpdates[entity] then return end
+		pendingUpdates[entity] = true
+		task.defer(function()
+			pendingUpdates[entity] = nil
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			-- out of the list since (removed, or its character rebuilt into a new table): nothing is
+			-- tracking this one any more
+			local list = entitylib.List
+			if not (list and table.find(list, entity)) then return end
+			entitylib.Events.EntityUpdated:Fire(entity)
+		end)
+	end
+
 	entitylib.addPlayer = function(plr)
 		if plr.Character then
 			entitylib.refreshEntity(plr.Character, plr)
@@ -1110,15 +1134,18 @@ run(function()
 			everywhere else in the library. It also keeps Friend/Target and the raycast filter
 			in step, which the hand-rolled version above did not. ]]
 			plr:GetAttributeChangedSignal('Team'):Connect(function()
-				-- your own team flips everybody's standing; anyone else's flips only theirs
+				-- your own team flips everybody's standing; anyone else's flips only theirs. The standing
+				-- is corrected here; the EntityUpdated announcing it goes out a frame later.
 				if plr == lplr then
 					for _, v in entitylib.List do
-						entitylib.updateEntity(v, true)
+						if entitylib.updateEntity(v) then
+							queueEntityUpdate(v)
+						end
 					end
 				else
 					local ent = entitylib.getEntity(plr)
-					if ent then
-						entitylib.updateEntity(ent, true)
+					if ent and entitylib.updateEntity(ent) then
+						queueEntityUpdate(ent)
 					end
 				end
 			end)
@@ -1210,9 +1237,10 @@ run(function()
 				else
 					entity.Targetable = entitylib.targetCheck(entity)
 
+					-- the fields at once, the event a frame later (queueEntityUpdate)
 					local function refreshHealth()
 						entity.Health, entity.MaxHealth = entitylib.readHealth(char)
-						entitylib.Events.EntityUpdated:Fire(entity)
+						queueEntityUpdate(entity)
 					end
 
 					for _, v in entitylib.getUpdateConnections(entity) do
@@ -1614,17 +1642,8 @@ local namecallHook = function(self, ...)
     end
     return oldNamecall(self, ...)
 end
---[[ Test switch for the Delta teleport crash: while pistonware/nonamecall.txt exists, the game's
-__namecall is left as it is for the whole session -- nothing above is installed, the watch tables
-just go unread. A file rather than a shared flag, so it holds across teleports and restarts;
-delete it to put the guard back. ]]
-do
-    local ok, off = pcall(isfile, 'pistonware/nonamecall.txt')
-    if not (ok and off == true) then
-        mt.__namecall = namecallHook
-        shared.PistonwareNamecallHook = namecallHook
-    end
-end
+mt.__namecall = namecallHook
+shared.PistonwareNamecallHook = namecallHook
 setreadonly(mt, true)
 
 vape:Clean(function()
@@ -1641,34 +1660,6 @@ vape:Clean(function()
     if shared.PistonwareOldNamecall == oldNamecall then
         shared.PistonwareOldNamecall = nil
     end
-end)
-
---[[ Off the moment a teleport starts, and back on if it fails. Only Uninject used to take it
-off, so leaving a match left this Lua closure in the game's metatable while the place was torn
-down, with every call any script made going through it -- the one engine-level change a match
-leaves behind and the lobby never makes, and leaving a match is when Delta closes. The next
-place installs its own on a fresh metatable. ]]
-run(function()
-    local offForTeleport = false
-    vape:Clean(lplr.OnTeleport:Connect(function(state)
-        if state == Enum.TeleportState.Failed then
-            if offForTeleport and mt.__namecall == oldNamecall then
-                pcall(function()
-                    setreadonly(mt, false)
-                    mt.__namecall = namecallHook
-                    setreadonly(mt, true)
-                end)
-            end
-            offForTeleport = false
-        elseif mt.__namecall == namecallHook then
-            pcall(function()
-                setreadonly(mt, false)
-                mt.__namecall = oldNamecall
-                setreadonly(mt, true)
-            end)
-            offForTeleport = true
-        end
-    end))
 end)
 
 local blankFunction = function(...) return ... end
@@ -6791,8 +6782,6 @@ run(function()
 	local DistanceLimit
 	local Reference = {}
 	local menuHidden = false
-	-- Set from the moment a teleport starts until it is done or has failed: nothing is drawn.
-	local teleporting = false
 
 	--[[ Drawn with the Drawing library, like ESP, rather than adornments in Pistonware's GUI:
 	nothing is parented anywhere, so there is no GUI permission for an executor to refuse, and
@@ -6897,7 +6886,7 @@ run(function()
 	end
 
 	local function addBed(bed)
-		if teleporting or Reference[bed] or not bed.Parent then return end
+		if Reference[bed] or not bed.Parent then return end
 		local teamId = bedTeam(bed)
 		-- Priority Only: your own team's bed is the one you already know about.
 		if Teammates.Enabled and teamId and tostring(teamId) == tostring(lplr:GetAttribute('Team')) then return end
@@ -7021,7 +7010,6 @@ run(function()
 	end
 
 	local function render()
-		if teleporting then return end
 		-- Hidden once while the menu is open; the first frame after it closes draws them again.
 		if clickGuiOpen() then
 			if not menuHidden then
@@ -7167,7 +7155,11 @@ run(function()
 					-- A placed bed replicates a moment before its team attribute does.
 					task.delay(0.2, addBed, bed)
 				end))
-				BedESP:Clean(collectionService:GetInstanceRemovedSignal('bed'):Connect(removeBed))
+				-- A frame later: the removal runs this inside the write that fired it, and removeBed raises
+				-- the thread identity and frees Drawing objects. It does nothing for a bed it no longer holds.
+				BedESP:Clean(collectionService:GetInstanceRemovedSignal('bed'):Connect(function(bed)
+					task.defer(removeBed, bed)
+				end))
 				for _, bed in collectionService:GetTagged('bed') do
 					addBed(bed)
 				end
@@ -7296,19 +7288,6 @@ run(function()
 			removeBed(bed)
 		end
 	end)
-
-	--[[ And the moment a teleport starts: Drawings still alive, and written every frame, while a
-	match is torn down are one of the things that close Delta as the match is left. None is drawn
-	again until the teleport is over; one that fails has the rescan above add every bed back
-	within a second. ]]
-	vape:Clean(lplr.OnTeleport:Connect(function(state)
-		teleporting = state ~= Enum.TeleportState.Failed
-		if teleporting then
-			for bed in Reference do
-				removeBed(bed)
-			end
-		end
-	end))
 end)
 	
 run(function()
@@ -7762,6 +7741,42 @@ run(function()
 	the division finally lands ]]
 	local refreshTag
 
+	--[[ refreshTag for the attribute handlers below (Show Enchant, Show Device): a frame later,
+	once per tag however many arrive in that frame. Those signals run their handler inside the
+	write that fired them, and a refresh raises the thread identity and rewrites the whole tag. ]]
+	local pendingRefresh = {}
+	local function queueTagRefresh(ent)
+		if pendingRefresh[ent] then return end
+		pendingRefresh[ent] = true
+		task.defer(function()
+			pendingRefresh[ent] = nil
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			-- refreshTag redraws only a tag that is still up
+			if refreshTag then
+				refreshTag(ent)
+			end
+		end)
+	end
+
+	-- Each shaded tag's two layers, for setTagText and setTagColor. Weak, as TagIcons is below:
+	-- Reference holds every live tag.
+	local TagLayers = setmetatable({}, {__mode = 'k'})
+
+	-- The layers copy the label's text as it stands after the write, read back rather than passed in.
+	local function syncTagText(nametag, layers)
+		local text = nametag.Text
+		layers.Front.Text = text
+		local plain = removeTags(text):gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
+		layers.Shadow.Text = plain:gsub('[\128-\255]+', function(run)
+			if run == '\u{2665}' then
+				return run
+			end
+			return '<font transparency="1">'..run..'</font>'
+		end)
+	end
+
 	--[[ Drawn like the mod overlay's lines: the tag's own text is hidden and two layers carry it, a
 	dark copy one pixel down and right with the coloured text over it -- layers, because a child
 	always draws over its parent's own text. Both follow the tag's text, colour and size. ]]
@@ -7787,22 +7802,49 @@ run(function()
 		--[[ Colour emoji (the device icons) draw in colour whatever TextColor3 says, so in the shadow
 		they are kept for their width but not drawn. ]]
 		shadow.RichText = true
-		local function sync()
-			front.Text = nametag.Text
-			local plain = removeTags(nametag.Text):gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
-			shadow.Text = plain:gsub('[\128-\255]+', function(run)
-				if run == '\u{2665}' then
-					return run
-				end
-				return '<font transparency="1">'..run..'</font>'
-			end)
-		end
-		sync()
+		--[[ Nothing is rewritten from the tag's own Text and TextColor3 signals: those run their
+		handler inside the write that fired them, which with Distance on is every frame for every
+		moving player. setTagText and setTagColor bring the layers along with each of our writes.
+		Text written by anyone else -- NameHider's pass when it is switched on, its rewrite after an
+		option edit, its restore when it is switched off -- lands on the hidden label only, so the
+		Text signal just queues a catch-up: a frame later at most, from a thread of its own, once
+		however many writes land. Our own writes queue one too and find the layers already in step. ]]
+		local layers = {Front = front, Shadow = shadow}
+		TagLayers[nametag] = layers
+		syncTagText(nametag, layers)
 		nametag.TextTransparency = 1
-		nametag:GetPropertyChangedSignal('Text'):Connect(sync)
-		nametag:GetPropertyChangedSignal('TextColor3'):Connect(function()
-			front.TextColor3 = nametag.TextColor3
+		local function catchUp()
+			layers.Queued = false
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			-- taken down since, or already in step
+			if not nametag.Parent or layers.Front.Text == nametag.Text then return end
+			syncTagText(nametag, layers)
+		end
+		nametag:GetPropertyChangedSignal('Text'):Connect(function()
+			if layers.Queued then return end
+			layers.Queued = true
+			task.defer(catchUp)
 		end)
+	end
+
+	--[[ Every write this module makes to a tag's text or colour once shadeTag has run goes through
+	these: the label, then its layers, in the same step. ]]
+	local function setTagText(nametag, text)
+		nametag.Text = text
+		local layers = TagLayers[nametag]
+		if layers then
+			syncTagText(nametag, layers)
+		end
+	end
+
+	local function setTagColor(nametag, colour)
+		nametag.TextColor3 = colour
+		local layers = TagLayers[nametag]
+		if layers then
+			layers.Front.TextColor3 = colour
+		end
 	end
 
 	local RankMeta = (function()
@@ -7957,8 +7999,8 @@ run(function()
 		if not char then return end
 		pcall(function()
 			enchantConns[ent] = char.AttributeChanged:Connect(function(attribute)
-				if attribute:find('StatusEffect_') and refreshTag then
-					refreshTag(ent)
+				if attribute:find('StatusEffect_') then
+					queueTagRefresh(ent)
 				end
 			end)
 		end)
@@ -8409,17 +8451,17 @@ run(function()
 				-- Teams are given out after the tag is built, and the override can change: the colour follows.
 				local nameColor = tagColor(ent)
 				if nametag.TextColor3 ~= nameColor then
-					nametag.TextColor3 = nameColor
+					setTagColor(nametag, nameColor)
 				end
 
 				if Distance.Enabled then
 					local selfRoot = entitylib.isAlive and entitylib.character.RootPart
 					local root = ent.RootPart
 					local mag = (selfRoot and root) and math.floor((selfRoot.Position - root.Position).Magnitude) or 0
-					nametag.Text = string.format(Strings[ent], distanceText(mag))
+					setTagText(nametag, string.format(Strings[ent], distanceText(mag)))
 					Sizes[ent] = mag
 				else
-					nametag.Text = Strings[ent]
+					setTagText(nametag, Strings[ent])
 					Sizes[ent] = nil
 				end
 
@@ -8484,7 +8526,7 @@ run(function()
 			pcall(function()
 				for i, v in Reference do
 					if v and v.Parent then
-						v.TextColor3 = tagColor(i)
+						setTagColor(v, tagColor(i))
 					end
 				end
 			end)
@@ -8571,7 +8613,7 @@ run(function()
 		if Distance.Enabled then
 			local mag = selfPos and math.floor((selfPos - rootPos).Magnitude) or 0
 			if Sizes[ent] ~= mag then
-				nametag.Text = string.format(Strings[ent], distanceText(mag))
+				setTagText(nametag, string.format(Strings[ent], distanceText(mag)))
 				Sizes[ent] = mag
 				task.spawn(pcall, measureTag, nametag)
 			end
@@ -8677,7 +8719,21 @@ run(function()
 
 				methodused = 'Normal'
 				if Removed[methodused] then
-					NameTags:Clean(entitylib.Events.EntityRemoved:Connect(Removed[methodused]))
+					--[[ A frame later: entitylib reports a removal from inside the ChildRemoved, tag removal or
+					CharacterRemoving that caused it, and Removed raises the thread identity and destroys the
+					tag. Removed is harmless for an entity whose tag is already gone. ]]
+					local remove = Removed[methodused]
+					NameTags:Clean(entitylib.Events.EntityRemoved:Connect(function(ent)
+						task.defer(function()
+							if vape.ThreadFix then
+								setthreadidentity(8)
+							end
+							-- back in the list by now: the tag is its own again
+							local list = entitylib.List
+							if list and table.find(list, ent) then return end
+							remove(ent)
+						end)
+					end))
 				end
 				if Added[methodused] then
 					for _, v in entitylib.List do
@@ -8773,7 +8829,7 @@ run(function()
 						if not Device.Enabled then return end
 						local ent = entitylib.getEntity(plr)
 						if ent then
-							refreshTag(ent)
+							queueTagRefresh(ent)
 						end
 					end))
 				end
@@ -8995,6 +9051,8 @@ run(function()
 	when the module turned off, so a chest that left and came back (streaming, a re-tag) kept
 	the old pair as well, still refreshing a billboard that had been destroyed. ]]
 	local ChestWatch = {}
+	-- assigned below refreshAdornee, whose Amount watchers call it
+	local queueRefresh
 
 	--[[ Every billboard here lives in Pistonware's GUI -- under CoreGui or gethui wherever the
 	identity can be raised -- and every way into this module (its own thread, the chest tag,
@@ -9065,12 +9123,27 @@ run(function()
 			for _, item in chestitems do
 				if alreadygot[item.Name] then
 					table.insert(AmountWatch[v], item:GetAttributeChangedSignal('Amount'):Connect(function()
-						refreshAdornee(v)
+						queueRefresh(v)
 					end))
 				end
 			end
 		end
 		table.clear(chestitems)
+	end
+
+	--[[ A refresh asked for from a signal -- a chest's contents, a stack's Amount -- runs a frame
+	later, once per billboard however many arrive in that frame. Those signals run their handler
+	inside the write that fired them, and refreshAdornee raises the thread identity and rebuilds
+	the icons; it also used to disconnect the very Amount watcher that was calling it. ]]
+	local RefreshQueued = {}
+	queueRefresh = function(bb)
+		if RefreshQueued[bb] then return end
+		RefreshQueued[bb] = true
+		task.defer(function()
+			RefreshQueued[bb] = nil
+			-- refreshAdornee raises the identity first, then skips a billboard that has been taken down
+			refreshAdornee(bb)
+		end)
 	end
 	
 	-- Built whole and only then parented; a build that fails takes this one billboard with it
@@ -9109,12 +9182,20 @@ run(function()
 			layout.Padding = UDim.new(0, 4)
 			layout.VerticalAlignment = Enum.VerticalAlignment.Center
 			layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+			-- Resized a frame later, once per frame: this fires from inside the layout pass.
+			local resizeQueued = false
 			layout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
-				if vape.ThreadFix then
-					setthreadidentity(8)
-				end
-				pcall(function()
-					billboard.Size = UDim2.fromOffset(math.max(layout.AbsoluteContentSize.X + 4, 36), 36)
+				if resizeQueued then return end
+				resizeQueued = true
+				task.defer(function()
+					resizeQueued = false
+					if vape.ThreadFix then
+						setthreadidentity(8)
+					end
+					if not billboard.Parent then return end
+					pcall(function()
+						billboard.Size = UDim2.fromOffset(math.max(layout.AbsoluteContentSize.X + 4, 36), 36)
+					end)
 				end)
 			end)
 			layout.Parent = frame
@@ -9131,12 +9212,12 @@ run(function()
 		ChestWatch[v] = {
 			chest.ChildAdded:Connect(function(item)
 				if table.find(List.ListEnabled, item.Name) or nearStorageItem(item.Name) then
-					refreshAdornee(billboard)
+					queueRefresh(billboard)
 				end
 			end),
 			chest.ChildRemoved:Connect(function(item)
 				if table.find(List.ListEnabled, item.Name) or nearStorageItem(item.Name) then
-					refreshAdornee(billboard)
+					queueRefresh(billboard)
 				end
 			end)
 		}
@@ -9157,21 +9238,40 @@ run(function()
 				local clickGui = scaledGui and scaledGui:FindFirstChild('ClickGui')
 				if clickGui then
 					Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+					--[[ Moved a frame later, once per frame: this runs inside the menu's own Visible write,
+					and moving the folder fires the GUI's descendant signals for every billboard in it. ]]
+					local parentQueued = false
 					StorageESP:Clean(clickGui:GetPropertyChangedSignal('Visible'):Connect(function()
-						if vape.ThreadFix then
-							setthreadidentity(8)
-						end
-						Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+						if parentQueued then return end
+						parentQueued = true
+						task.defer(function()
+							parentQueued = false
+							if vape.ThreadFix then
+								setthreadidentity(8)
+							end
+							-- switched off since: the off path has already put the folder back
+							if not StorageESP.Enabled then return end
+							Folder.Parent = (not clickGui.Visible) and vape.gui or nil
+						end)
 					end))
 				end
-				StorageESP:Clean(collectionService:GetInstanceAddedSignal('chest'):Connect(Added))
+				-- Built a frame later: the tag signal runs this inside the write that added the chest.
+				StorageESP:Clean(collectionService:GetInstanceAddedSignal('chest'):Connect(function(v)
+					task.defer(Added, v)
+				end))
 				-- A broken chest used to leave its icons hanging in the air where it stood.
 				StorageESP:Clean(collectionService:GetInstanceRemovedSignal('chest'):Connect(function(v)
+					--[[ Taken down a frame later: the tag signal runs this inside the write that removed the
+					chest. The billboard is taken now, so the deferred step can tell whether it is still the
+					chest's. ]]
 					local billboard = Reference[v]
-					if billboard then
+					if not billboard then return end
+					task.defer(function()
 						if vape.ThreadFix then
 							setthreadidentity(8)
 						end
+						-- switched off (or already taken down) in the meantime: nothing left to do
+						if Reference[v] ~= billboard then return end
 						for _, connection in AmountWatch[billboard] or {} do
 							connection:Disconnect()
 						end
@@ -9182,7 +9282,7 @@ run(function()
 						ChestWatch[v] = nil
 						pcall(function() billboard:Destroy() end)
 						Reference[v] = nil
-					end
+					end)
 				end))
 				for _, v in collectionService:GetTagged('chest') do
 					task.spawn(Added, v)
@@ -10130,34 +10230,27 @@ run(function()
 end)
 	
 run(function()
-	--[[ Idled's connections are switched off, not cut, and switched back on with the module, as
-	universal.lua's version does: they belong to Roblox's own scripts, and cut ones stayed cut for
-	the rest of the session, Uninject included. The game's own AFK check (AfkController) is a
-	one-shot that sends AfkInfo {afk = false} and disconnects itself, so this sends that itself
-	rather than combing every Heartbeat handler in the game to find it. ]]
-	local disabled = {}
 	vape.Categories.World:CreateModule({
 		Name = 'Anti-AFK',
 		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
-				local ok, connections = pcall(getconnections, lplr.Idled)
-				for _, connection in (ok and connections or {}) do
-					if pcall(function() connection:Disable() end) then
-						table.insert(disabled, connection)
+				for _, v in getconnections(lplr.Idled) do
+					v:Disconnect()
+				end
+
+				for _, v in getconnections(runService.Heartbeat) do
+					if type(v.Function) == 'function' and islclosure(v.Function) then
+						local ok, constants = pcall(debug.getconstants, v.Function)
+						if ok and table.find(constants, remotes.AfkStatus) then
+							v:Disconnect()
+						end
 					end
 				end
 
-				pcall(function()
-					bedwars.Client:Get(remotes.AfkStatus):SendToServer({
-						afk = false
-					})
-				end)
-			else
-				for _, connection in disabled do
-					pcall(function() connection:Enable() end)
-				end
-				table.clear(disabled)
+				bedwars.Client:Get(remotes.AfkStatus):SendToServer({
+					afk = false
+				})
 			end
 		end,
 		Tooltip = 'Prevents you from getting kicked for being idle.'
@@ -12547,9 +12640,6 @@ run(function()
 		the menu window instead: to fit the screen under the top bar, up to 0.85 of full size and never
 		below the HUD's scale, while Auto rescale is on. A full-size screen keeps it at 1:1. ]]
 		local function fit()
-			if vape.ThreadFix then
-				pcall(setthreadidentity, 8)
-			end
 			local s = math.max(vape.guiscale and vape.guiscale.Scale or 1, 0.05)
 			local camera = workspace.CurrentCamera
 			local view = camera and camera.ViewportSize or Vector2.zero
@@ -12565,16 +12655,32 @@ run(function()
 			-- Centred in the screen below the top bar.
 			window.Position = UDim2.new(0.5, 0, 0.5, inset / 2 / s)
 		end
+		--[[ Fitted a frame later, once however many of these land in that frame: each runs its
+		handler inside the write that fired it, and fitting needs the thread identity raised. ]]
+		local fitQueued = false
+		local function queueFit()
+			if fitQueued then return end
+			fitQueued = true
+			task.defer(function()
+				fitQueued = false
+				if vape.ThreadFix then
+					pcall(setthreadidentity, 8)
+				end
+				if window.Parent then
+					fit()
+				end
+			end)
+		end
 		window:GetPropertyChangedSignal('Visible'):Connect(function()
 			if window.Visible then
-				fit()
+				queueFit()
 			end
 		end)
 		if vape.guiscale then
-			vape.guiscale:GetPropertyChangedSignal('Scale'):Connect(fit)
+			vape.guiscale:GetPropertyChangedSignal('Scale'):Connect(queueFit)
 		end
 		if gameCamera then
-			vape:Clean(gameCamera:GetPropertyChangedSignal('ViewportSize'):Connect(fit))
+			vape:Clean(gameCamera:GetPropertyChangedSignal('ViewportSize'):Connect(queueFit))
 		end
 
 		local function createitem(id, image)
@@ -13706,52 +13812,12 @@ run(function()
 end)
 	
 run(function()
-	--[[ The swing's 'Raycast' method name and its workspace upvalue, found by what they hold.
-	They were written at fixed slots (constant 23, upvalue 4) without looking: once a BedWars update
-	moved them, that overwrote whatever sat there -- or wrote past the end of the constants, which
-	corrupts the game's memory on executors that do not check (Delta closed on the next teleport,
-	even after Uninject, since switching off wrote the same slot). Nothing is written now unless
-	both are where they belong. ]]
-	local function hitFixSlots(fn)
-		local okK, constants = pcall(debug.getconstants, fn)
-		local okU, upvalues = pcall(debug.getupvalues, fn)
-		if not (okK and okU and type(constants) == 'table' and type(upvalues) == 'table') then return nil end
-		local constantIndex, upvalueIndex
-		for index, value in constants do
-			if value == 'Raycast' or value == 'raycast' then
-				constantIndex = index
-				break
-			end
-		end
-		for index, value in upvalues do
-			if value == bedwars.QueryUtil or (typeof(value) == 'Instance' and value.ClassName == 'Workspace') then
-				upvalueIndex = index
-				break
-			end
-		end
-		if constantIndex and upvalueIndex then
-			return constantIndex, upvalueIndex
-		end
-		return nil
-	end
-
 	vape.Legit:CreateModule({
 		Name = 'HitFix',
 		Tab = 'Combat',
 		Function = function(callback)
-			local fn = bedwars.SwordController and bedwars.SwordController.swingSwordAtMouse
-			if type(fn) ~= 'function' then return end
-			local constantIndex, upvalueIndex = hitFixSlots(fn)
-			if not constantIndex then return end
-			if callback then
-				pcall(debug.setconstant, fn, constantIndex, 'raycast')
-				pcall(debug.setupvalue, fn, upvalueIndex, bedwars.QueryUtil)
-			else
-				pcall(debug.setconstant, fn, constantIndex, 'Raycast')
-				if debug.getupvalue(fn, upvalueIndex) == bedwars.QueryUtil then
-					pcall(debug.setupvalue, fn, upvalueIndex, workspace)
-				end
-			end
+			debug.setconstant(bedwars.SwordController.swingSwordAtMouse, 23, callback and 'raycast' or 'Raycast')
+			debug.setupvalue(bedwars.SwordController.swingSwordAtMouse, 4, callback and bedwars.QueryUtil or workspace)
 		end,
 		Tooltip = 'Makes your sword hits land more reliably.'
 	})
