@@ -452,18 +452,6 @@ local function finishLoading()
 			bufferWarn('profile.session', 'session was not authorised -- leaving profiles untouched')
 			return
 		end
-		-- Crash test switch on (pistonware/crashtest.txt): no profile is loaded or saved, so a
-		-- session with parts left out can never write a config missing them. 'keepprofile' loads it
-		-- as normal: on its own, or with words that leave parts out when 'nosave' is set too, since
-		-- then nothing is written and nothing can be lost.
-		local crashTest = shared.PistonwareCrashTest
-		local function crashWord(word)
-			return crashTest ~= nil and crashTest:find(word, 1, true) ~= nil
-		end
-		if crashTest and not (crashWord('keepprofile') and (crashWord('nosave') or not crashWord('nogame'))) then
-			bufferWarn('profile.crashtest', 'crash test switch is on -- profiles are not loaded or saved this session')
-			return
-		end
 		if shared.PistonwareBootFailed then return end
 		if not moduleSetComplete then
 			failBoot('modules.timeout', 'the game payload did not signal completion within 120 seconds')
@@ -473,11 +461,7 @@ local function finishLoading()
 		debugWarn(('[pistonware] applying profile %s (teleported=%s)'):format(
 			tostring(customProfile or '<saved>'), tostring(shared.vapereload and true or false)))
 		local loadOk, _, canSave = xpcall(function()
-			--[[ Crash test, with 'nosave' only: 'noguiload' skips the GUI settings, and 'emptyprofile'
-			names a profile with no file, so nothing in it is applied but the profile still counts as
-			loaded. ]]
-			local quiet = crashWord('nosave')
-			return vape:Load((quiet and crashWord('noguiload')) or nil, (quiet and crashWord('emptyprofile')) and 'crashtestempty' or customProfile)
+			return vape:Load(nil, customProfile)
 		end, errorTrace)
 		if not loadOk or canSave == false then
 			failBoot('profile.apply', loadOk and 'profile data could not be loaded safely' or _)
@@ -485,47 +469,6 @@ local function finishLoading()
 			return
 		end
 		debugWarn('[pistonware] profile load returned')
-
-		--[[ Crash test, with 'nosave noguiload': put back only the named parts of the GUI settings.
-		'guimain' is the menu's own settings (every section, or only those named 'only-gui',
-		'only-settings', 'only-notifications', 'only-modules', 'only-general'); 'guiwindows' the tab
-		windows; 'guilists' Profiles, Friends, Targets and FFlags. ]]
-		if crashWord('nosave') and crashWord('noguiload') then
-			pcall(function()
-				local path = 'pistonware/profiles/'..game.GameId..'.gui.txt'
-				local data = isfile(path) and game:GetService('HttpService'):JSONDecode(readfile(path))
-				if type(data) ~= 'table' or type(data.Categories) ~= 'table' then return end
-				for name, catData in data.Categories do
-					local isMain = name == 'Main'
-					local isList = name == 'Profiles' or name == 'Friends' or name == 'Targets' or name == 'FFlags'
-					local wanted = (isMain and crashWord('guimain')) or (isList and crashWord('guilists'))
-						or (not isMain and not isList and crashWord('guiwindows'))
-					local category = vape.Categories[name]
-					if wanted and category and type(catData) == 'table' then
-						if isMain and type(catData.Settings) == 'table' and (crashWord('only-') or crashWord('pick-') or crashWord('drop-')) then
-							local sections = {}
-							for section, options in catData.Settings do
-								if not crashWord('only-') or crashWord('only-'..string.lower(section)) then
-									--[[ 'pick-<name>' keeps only the named settings, 'drop-<name>' leaves
-									them out; names lower-case without spaces ('pick-guitheme'). ]]
-									local kept = {}
-									for optionName, optionData in (type(options) == 'table' and options or {}) do
-										local key = string.lower(tostring(optionName)):gsub('%s', '')
-										if (not crashWord('pick-') or crashWord('pick-'..key)) and not crashWord('drop-'..key) then
-											kept[optionName] = optionData
-										end
-									end
-									sections[section] = kept
-								end
-							end
-							catData = table.clone(catData)
-							catData.Settings = sections
-						end
-						category:Load(catData)
-					end
-				end
-			end)
-		end
 
 		--[[
 			No autosave loop, and nothing timed anywhere in the save path.
@@ -542,10 +485,7 @@ local function finishLoading()
 			the only thing gating it, and vape:Load owns that flag.
 		]]
 		profileApplied = true
-		-- Crash test 'nosave': the profile is applied but nothing is ever saved (teleport, Uninject, changes).
-		if not (crashTest and crashTest:find('nosave', 1, true)) then
-			if vape.AllowSaving then vape:AllowSaving() else vape.SaveBlocked = nil end
-		end
+		if vape.AllowSaving then vape:AllowSaving() else vape.SaveBlocked = nil end
 	end
 
 	--[[ Waits until the game script has finished registering its modules, because the profile can
@@ -1673,8 +1613,7 @@ end
 			to appear. Queueing straight into a match is exactly when that happens, so skip the
 			save rather than corrupt the config -- what is on disk is already correct, there is
 			simply nothing new worth recording yet. ]]
-			-- Crash test 'notpsave': no save as the teleport starts.
-			if profileApplied and not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('notpsave', 1, true)) then
+			if profileApplied then
 				pcall(function() vape:Save() end)
 			end
 		end
@@ -1765,24 +1704,6 @@ if not shared.VapeIndependent then
 	main.lua entirely, skipping the game script below and finishLoading() with it. The error is
 	reported rather than swallowed: a silent universal failure used to look like random missing
 	modules, because nothing downstream re-raises it. ]]
-	--[[ Temporary switch for tracking down the Delta teleport crash: the words in
-	pistonware/crashtest.txt. 'nogame' leaves this place's game script out, so only the GUI and
-	universal.lua run. While the file exists no profile is loaded or saved. Delete it to go back
-	to normal. A file rather than a shared flag, so it holds across teleports and re-injects. ]]
-	do
-		local crashTest
-		pcall(function()
-			if isfile('pistonware/crashtest.txt') then
-				crashTest = string.lower(readfile('pistonware/crashtest.txt'))
-			end
-		end)
-		shared.PistonwareCrashTest = (crashTest and crashTest:gsub('%s', '') ~= '') and crashTest or nil
-		if shared.PistonwareCrashTest then
-			pcall(function()
-				vape:CreateNotification('Pistonware', 'Crash test switch is on ('..shared.PistonwareCrashTest:gsub('%s+', ' ')..'). Profiles are not loaded or saved. Delete pistonware/crashtest.txt to go back to normal.', 15, 'warning')
-			end)
-		end
-	end
 	stage('universal.lua start')
 	do
 		local okUniversal, universalError = xpcall(function()
@@ -1888,14 +1809,11 @@ if not shared.VapeIndependent then
 	not a failed boot: universal.lua is then the whole module set, so its profile still loads
 	and saves. A download that failed outright stays a failed boot. ]]
 	local adapterMissing = false
-	-- Crash test switch: 'nogame' leaves the game script out, as for a game with no adapter.
-	local skipGame = shared.PistonwareCrashTest ~= nil and shared.PistonwareCrashTest:find('nogame', 1, true) ~= nil
-	if skipGame then adapterMissing = true end
-		local cached = not skipGame and cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) or nil
+		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
 		gameScriptStarted = runGameScript(cached, tostring(game.PlaceId))
 	end
-	if not skipGame and not gameScriptStarted and not shared.PistonwareDeveloper then
+	if not gameScriptStarted and not shared.PistonwareDeveloper then
 		--[[ Single fetch (the old code requested this URL twice: once to probe, then again
 		inside downloadFile) and load straight from the response, so a stale/corrupt
 		cache file can't shadow what we just downloaded. ]]
