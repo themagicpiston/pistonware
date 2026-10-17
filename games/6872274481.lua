@@ -238,6 +238,52 @@ do
 		return table.find(store.activeKits(), kit) ~= nil or lplr:GetAttribute('ExtraKit_'..kit) == true
 	end
 end
+
+--[[ Delta (Android) only. BedWars runs Workspace.SignalBehavior = Immediate, so a handler
+connected to a game signal runs INSIDE the write, replication step or Destroy that fired it, and
+Delta's own native code sits in that path. Firing an event, writing a property or calling into
+the executor from in there nests inside it, which is the memory corruption that closes Delta at
+the next place load. So on Delta the handlers below hand their work to store.queueDispatch, and
+this pump runs it on the next Heartbeat, in arrival order. Everywhere else queueDispatch is nil
+and dispatchSafe returns the handler itself, so nothing changes. The store is emptied on
+uninject, so code that runs later reads these through locals taken at load. ]]
+store.deltaExecutor = executorName():lower():find('delta', 1, true) ~= nil
+if store.deltaExecutor then
+	local pending, count, closed = {}, 0, false
+	local function queueDispatch(fn, ...)
+		if closed then return end
+		count += 1
+		pending[count] = table.pack(fn, ...)
+	end
+	store.queueDispatch = queueDispatch
+	function store.dispatchSafe(fn)
+		return function(...)
+			queueDispatch(fn, ...)
+		end
+	end
+	vape:Clean(runService.Heartbeat:Connect(function()
+		if count == 0 then return end
+		-- Taken whole, so a job that yields or queues more cannot disturb this pass.
+		local batch, total = pending, count
+		pending, count = {}, 0
+		for i = 1, total do
+			local job = batch[i]
+			local ok, err = xpcall(job[1], errorTrace, table.unpack(job, 2, job.n))
+			if not ok then
+				bufferCall('error', 'bedwars.dispatch', err, {traceback = err})
+			end
+		end
+	end))
+	vape:Clean(function()
+		closed = true
+		table.clear(pending)
+		count = 0
+	end)
+else
+	function store.dispatchSafe(fn)
+		return fn
+	end
+end
 local Reach = {}
 local HitBoxes = {}
 local InfiniteFly = {}
@@ -948,7 +994,14 @@ local function updateVelocity(force)
 				for _, v in entitylib.character.Character:GetDescendants() do
 					modifyVelocity(v)
 				end
-				frictionConnection = entitylib.character.Character.DescendantAdded:Connect(modifyVelocity)
+				-- Delta: the write goes through the dispatch pump, not inside DescendantAdded, and is
+				-- skipped if friction was put back in the meantime.
+				local queueDispatch = store.queueDispatch
+				frictionConnection = entitylib.character.Character.DescendantAdded:Connect(queueDispatch and function(v)
+					queueDispatch(function()
+						if frictionState then modifyVelocity(v) end
+					end)
+				end or modifyVelocity)
 			end
 		else
 			for i, v in oldfrict do
@@ -1000,6 +1053,9 @@ run(function()
 	-- crash test (temporary)
 	if shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noentity', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true)) then return end
 	local oldstart = entitylib.start
+	-- Delta: the game-signal handlers below queue their work for the dispatch pump (see
+	-- store.queueDispatch). nil and a pass-through everywhere else.
+	local queueDispatch, dispatchSafe = store.queueDispatch, store.dispatchSafe
 
 	--[[ A Practice room dummy is identified by either of the two markers.
 	training-room-entity-controller watches the tag and then reads the attribute off
@@ -1060,6 +1116,11 @@ run(function()
 	registered once. ]]
 	local ENTITY_TAGS = {'entity', 'Monster', 'trainingRoomDummy'}
 
+	local onEntityTagged = dispatchSafe(customEntity)
+	local onEntityUntagged = dispatchSafe(function(ent)
+		entitylib.removeEntity(ent)
+	end)
+
 	entitylib.start = function()
 		oldstart()
 		if entitylib.Running then
@@ -1067,10 +1128,8 @@ run(function()
 				for _, ent in collectionService:GetTagged(tag) do
 					customEntity(ent)
 				end
-				table.insert(entitylib.Connections, collectionService:GetInstanceAddedSignal(tag):Connect(customEntity))
-				table.insert(entitylib.Connections, collectionService:GetInstanceRemovedSignal(tag):Connect(function(ent)
-					entitylib.removeEntity(ent)
-				end))
+				table.insert(entitylib.Connections, collectionService:GetInstanceAddedSignal(tag):Connect(onEntityTagged))
+				table.insert(entitylib.Connections, collectionService:GetInstanceRemovedSignal(tag):Connect(onEntityUntagged))
 			end
 		end
 	end
@@ -1083,9 +1142,46 @@ run(function()
 	and the Health and Shield changes of one hit draw once. The entity's own fields are still
 	updated at once, so anything reading Health or Targetable this frame reads the new value. ]]
 	local pendingUpdates = {}
+
+	--[[ Delta: one pump job sends everything queued since the last one, so no thread is made
+	inside the write. With nothing listening (every module off) it neither raises the thread
+	identity nor fires. ]]
+	local updatesQueued = false
+	local function flushEntityUpdates()
+		updatesQueued = false
+		local batch = {}
+		for entity in pendingUpdates do
+			table.insert(batch, entity)
+		end
+		table.clear(pendingUpdates)
+		local event, list = entitylib.Events.EntityUpdated, entitylib.List
+		if not (list and event.Connections and #event.Connections > 0) then return end
+		-- its own thread, as each update had, so the raised identity ends with it
+		task.spawn(function()
+			if vape.ThreadFix then
+				local ok, identity = pcall(getthreadidentity)
+				if not (ok and identity == 8) then
+					setthreadidentity(8)
+				end
+			end
+			for _, entity in batch do
+				if table.find(list, entity) then
+					event:Fire(entity)
+				end
+			end
+		end)
+	end
+
 	local function queueEntityUpdate(entity)
 		if pendingUpdates[entity] then return end
 		pendingUpdates[entity] = true
+		if queueDispatch then
+			if not updatesQueued then
+				updatesQueued = true
+				queueDispatch(flushEntityUpdates)
+			end
+			return
+		end
 		task.defer(function()
 			pendingUpdates[entity] = nil
 			if vape.ThreadFix then
@@ -1104,12 +1200,13 @@ run(function()
 			entitylib.refreshEntity(plr.Character, plr)
 		end
 		entitylib.PlayerConnections[plr] = {
-			plr.CharacterAdded:Connect(function(char)
+			-- Delta: both queued for the pump, so a removal still runs ahead of the arrival after it
+			plr.CharacterAdded:Connect(dispatchSafe(function(char)
 				entitylib.refreshEntity(char, plr)
-			end),
-			plr.CharacterRemoving:Connect(function(char)
+			end)),
+			plr.CharacterRemoving:Connect(dispatchSafe(function(char)
 				entitylib.removeEntity(char, plr == lplr)
-			end),
+			end)),
 			--[[ BedWars keeps the team on an ATTRIBUTE, and it lands AFTER the entity does.
 			The game's own controllers sit in `while Attribute == nil do task.wait(1) end`
 			loops waiting for it, so every entity is necessarily built with the team still
@@ -1235,9 +1332,10 @@ run(function()
 						end
 						localForwarder:Disconnect()
 					end
-					localForwarder = char.AttributeChanged:Connect(function(attr)
+					-- Delta: the BindableEvent is fired from the pump, not inside the attribute write
+					localForwarder = char.AttributeChanged:Connect(dispatchSafe(function(attr)
 						vapeEvents.AttributeChanged:Fire(attr)
-					end)
+					end))
 					table.insert(entitylib.Connections, localForwarder)
 				else
 					entity.Targetable = entitylib.targetCheck(entity)
@@ -1278,15 +1376,17 @@ run(function()
 						end
 					end
 
+					-- Delta: the timer is started from the pump, not inside the Value write
+					local onInventoryItem = dispatchSafe(function()
+						task.delay(0.1, function()
+							if bedwars.getInventory then
+								store.inventories[plr] = bedwars.getInventory(plr)
+								entitylib.Events.EntityUpdated:Fire(entity)
+							end
+						end)
+					end)
 					for _, v in updateobjects do
-						table.insert(entity.Connections, v:GetPropertyChangedSignal('Value'):Connect(function()
-							task.delay(0.1, function()
-								if bedwars.getInventory then
-									store.inventories[plr] = bedwars.getInventory(plr)
-									entitylib.Events.EntityUpdated:Fire(entity)
-								end
-							end)
-						end))
+						table.insert(entity.Connections, v:GetPropertyChangedSignal('Value'):Connect(onInventoryItem))
 					end
 
 					if plr then
@@ -1335,6 +1435,15 @@ run(function()
 							humrootpart = hum.RootPart
 							entity.RootPart = hum.RootPart
 							entity.HumanoidRootPart = hum.RootPart
+							return
+						end
+						-- Delta: queued for the pump. A local removal takes whatever entitylib.character
+						-- is, so it only goes ahead while that is still this entity.
+						if queueDispatch then
+							queueDispatch(function()
+								if plr == lplr and entitylib.character ~= entity then return end
+								entitylib.removeEntity(char, plr == lplr)
+							end)
 							return
 						end
 						entitylib.removeEntity(char, plr == lplr)
@@ -1404,6 +1513,12 @@ run(function()
 		if not select(2, whitelist:get(ent.Player)) then return false end
 		return lplr:GetAttribute('Team') ~= ent.Player:GetAttribute('Team')
 	end
+
+	-- Delta: only the library's PlayerRemoving handler calls this; queued like the character
+	-- removals, so its disconnects and EntityRemoved do not run inside that dispatch.
+	if queueDispatch then
+		entitylib.removePlayer = dispatchSafe(entitylib.removePlayer)
+	end
 	vape:Clean(entitylib.Events.LocalAdded:Connect(updateVelocity))
 end)
 -- crash test (temporary)
@@ -1440,7 +1555,17 @@ end
 if not (shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noentity', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true))) then
 ensureCharPrimaryPart(lplr.Character)
 -- Registered for cleanup: every reinject used to leave its copy of this listener behind.
-vape:Clean(lplr.CharacterAdded:Connect(function(c)
+vape:Clean(lplr.CharacterAdded:Connect(store.queueDispatch and store.dispatchSafe(function(c)
+    --[[ Delta: started from the pump and polled rather than WaitForChild, so the PrimaryPart
+    write is never made inside the CharacterAdded dispatch or the root part's ChildAdded. ]]
+    task.spawn(function()
+        local deadline = os.clock() + 5
+        while not c:FindFirstChild("HumanoidRootPart") and os.clock() < deadline do
+            task.wait()
+        end
+        ensureCharPrimaryPart(c)
+    end)
+end) or function(c)
     c:WaitForChild("HumanoidRootPart", 5)
     ensureCharPrimaryPart(c)
 end))
@@ -1563,7 +1688,8 @@ end
 local getnamecallmethod = getnamecallmethod
 local mt = getrawmetatable(game)
 -- crash test (temporary)
-if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
+-- Delta: nothing is written at load; see the Delta block after the hook.
+if not store.deltaExecutor and not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 setreadonly(mt, false)
 end
 --[[
@@ -1584,10 +1710,13 @@ end
 ]]
 local previousNamecallHook = shared.PistonwareNamecallHook
 local oldNamecall = mt.__namecall
+-- Delta: worked out when the hook goes in instead (installDelta below).
+if not store.deltaExecutor then
 if previousNamecallHook and oldNamecall == previousNamecallHook and shared.PistonwareOldNamecall then
     oldNamecall = shared.PistonwareOldNamecall
 end
 shared.PistonwareOldNamecall = oldNamecall
+end
 local namecallHook = function(self, ...)
     local method = getnamecallmethod()
     if method == "GetPrimaryPartCFrame" and self and self:IsA("Model") then
@@ -1657,12 +1786,13 @@ local namecallHook = function(self, ...)
     return oldNamecall(self, ...)
 end
 -- crash test (temporary)
-if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
+if not store.deltaExecutor and not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 mt.__namecall = namecallHook
 shared.PistonwareNamecallHook = namecallHook
 setreadonly(mt, true)
 end
 
+if not store.deltaExecutor then
 vape:Clean(function()
     table.clear(namecallWatch)
     table.clear(namecallObservers)
@@ -1678,6 +1808,122 @@ vape:Clean(function()
         shared.PistonwareOldNamecall = nil
     end
 end)
+else
+--[[ Delta: the game's __namecall is left alone until something is registered AND a module is on,
+and is then hooked from a Heartbeat step (never from the code that registered) through the
+executor's own hookmetamethod instead of a raw metatable write. Delta has native code of its own
+on the namecall and property-write paths, and its client was dying at the next place load with
+only this file's always-on code running. The raw write is kept only for a Delta build with no
+hookmetamethod.
+
+Reinjects stay one deep, as at load above. hookmetamethod may leave a wrapper in the metatable
+rather than the function it was given, so the previous injection's hook is recognised by what
+was read back after installing it (PistonwareNamecallTop), and PistonwareNamecallRest is what
+the metatable held right after the last restore. While either is still in place, the new hook
+chains to the session's first original instead of to a wrapper around it. ]]
+local deltaMode, deltaClosed, deltaTop
+local function installDelta()
+    if deltaMode then return true end
+    if deltaClosed then return false end
+    -- crash test (temporary)
+    if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true) then return false end
+
+    local current = mt.__namecall
+    local first = shared.PistonwareOldNamecall
+    local reuse = first ~= nil and (current == (shared.PistonwareNamecallTop or shared.PistonwareNamecallHook)
+        or current == shared.PistonwareNamecallRest)
+    -- set before the switch, so the hook never runs with nothing to chain to
+    oldNamecall = reuse and first or current
+
+    if type(hookmetamethod) == 'function' then
+        local ok, original = pcall(hookmetamethod, game, '__namecall', namecallHook)
+        if not ok then
+            deltaClosed = true
+            return false
+        end
+        if not reuse and type(original) == 'function' then
+            oldNamecall = original
+        end
+        deltaMode = 'hookmetamethod'
+    else
+        local ok = pcall(function()
+            setreadonly(mt, false)
+            mt.__namecall = namecallHook
+            setreadonly(mt, true)
+        end)
+        if not ok then
+            deltaClosed = true
+            return false
+        end
+        deltaMode = 'raw'
+    end
+
+    deltaTop = mt.__namecall
+    shared.PistonwareOldNamecall = oldNamecall
+    shared.PistonwareNamecallHook = namecallHook
+    shared.PistonwareNamecallTop = deltaTop
+    shared.PistonwareNamecallRest = nil
+    return true
+end
+
+-- Replaced in place on the exported table, so block() and every other caller go through these.
+-- They only register; the hook goes in from the Heartbeat below.
+local watch, observe = namecallGuard.watch, namecallGuard.observe
+function namecallGuard.watch(...)
+    -- crash test (temporary)
+    if deltaClosed or (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then return false end
+    return watch(...)
+end
+function namecallGuard.observe(...)
+    -- crash test (temporary)
+    if deltaClosed or (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then return nil end
+    return observe(...)
+end
+
+--[[ Registrations arrive from inside signal handlers (ChildAdded, a module toggled from GUI
+input), and hooking from in there is the nested dispatch this block exists to avoid, so the
+install waits for a frame step. Something can also register at load with every module off, and
+nothing it guards matters until a module is on, so with modules off nothing is hooked at all.
+Cost: a watch registered at enable takes effect up to one frame later, first time only. ]]
+vape:Clean(runService.Heartbeat:Connect(function()
+    if deltaMode or deltaClosed then return end
+    if next(namecallWatch) == nil and next(namecallObservers) == nil then return end
+    for _, module in vape.Modules do
+        if module.Enabled then
+            installDelta()
+            return
+        end
+    end
+end))
+
+vape:Clean(function()
+    -- closed first, so a late registration from this injection cannot put the hook back
+    deltaClosed = true
+    table.clear(namecallWatch)
+    table.clear(namecallObservers)
+    local mode = deltaMode
+    deltaMode = nil
+    if not mode then return end
+    -- only while ours is still the live one, as at load: a hook added on top chains through ours
+    if mt.__namecall == deltaTop then
+        if mode == 'hookmetamethod' then
+            pcall(hookmetamethod, game, '__namecall', oldNamecall)
+        else
+            pcall(function()
+                setreadonly(mt, false)
+                mt.__namecall = oldNamecall
+                setreadonly(mt, true)
+            end)
+        end
+        shared.PistonwareNamecallRest = mt.__namecall
+    end
+    if shared.PistonwareNamecallHook == namecallHook then
+        shared.PistonwareNamecallHook = nil
+        shared.PistonwareNamecallTop = nil
+    end
+    -- PistonwareOldNamecall stays: the next install chains to it while Rest is still in place.
+end)
+end
 
 local blankFunction = function(...) return ... end
 
@@ -3587,15 +3833,19 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 	for _, event in {'MatchEndEvent', 'EntityDeathEvent', 'BedwarsBedBreak', 'BalloonPopped', 'AngelProgress', 'GrapplingHookFunctions'} do
 		if not vape.Connections then return end
+		-- Delta: re-broadcast from the dispatch pump, not inside the remote's own dispatch.
+		-- Made here, at load, because the store is emptied on uninject.
+		local forward = store.dispatchSafe(function(...)
+			vapeEvents[event]:Fire(...)
+		end)
 		bedwars.Client:WaitFor(event):andThen(function(connection)
-			vape:Clean(connection:Connect(function(...)
-				vapeEvents[event]:Fire(...)
-			end))
+			vape:Clean(connection:Connect(forward))
 		end)
 	end
 
 	-- Named rather than picked out with select, which walks the arguments again for every field.
-	vape:Clean(bedwars.ZapNetworking.EntityDamageEventZap.On(function(entityInstance, damage, damageType, fromPosition, fromEntity, knockbackMultiplier, knockbackId, attackData, ...)
+	-- Delta: fired from the dispatch pump, as above.
+	vape:Clean(bedwars.ZapNetworking.EntityDamageEventZap.On(store.dispatchSafe(function(entityInstance, damage, damageType, fromPosition, fromEntity, knockbackMultiplier, knockbackId, attackData, ...)
 		vapeEvents.EntityDamageEvent:Fire({
 			entityInstance = entityInstance,
 			damage = damage,
@@ -3608,7 +3858,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			-- the 13th argument: the eight named above, then four this does not use
 			disableDamageHighlight = select(5, ...)
 		})
-	end))
+	end)))
 	end
 
 	-- Keep confirmed Killaura telemetry at the normalized damage-event seam. The
@@ -3651,7 +3901,8 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	--[[ optimized ZapNetworking hook ]]
 	-- crash test (temporary)
 	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
-	vape:Clean(bedwars.ZapNetworking.ProjectileLaunchZap.On(function(origin, projectileType, tool, shooter)
+	-- Delta: run from the dispatch pump, so the reads and the defer are not made inside Zap's dispatch
+	vape:Clean(bedwars.ZapNetworking.ProjectileLaunchZap.On(store.dispatchSafe(function(origin, projectileType, tool, shooter)
 		local launchedAt = os.clock()
 		local shooterPosition, shooterVelocity
 		pcall(function()
@@ -3688,13 +3939,14 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 				end
 			end
 		end)
-	end))
+	end)))
 	end
 
 	local projectileNames = {arrow = true, snowball = true}
 	-- crash test (temporary)
 	if not (shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noblocks', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true))) then
-	vape:Clean(workspace.ChildAdded:Connect(function(child)
+	-- Delta: run from the dispatch pump, so no thread is started inside ChildAdded
+	vape:Clean(workspace.ChildAdded:Connect(store.dispatchSafe(function(child)
 		if projectileNames[child.Name:lower()] then
 			task.defer(function()
 				local root = child:FindFirstChildWhichIsA("BasePart")
@@ -3712,13 +3964,14 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 				end
 			end)
 		end
-	end))
+	end)))
 	end
 
 	-- crash test (temporary)
 	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 	for _, event in {'PlaceBlockEvent', 'BreakBlockEvent'} do
-		vape:Clean(bedwars.ZapNetworking[event..'Zap'].On(function(...)
+		-- Delta: fired from the dispatch pump, not inside Zap's dispatch
+		vape:Clean(bedwars.ZapNetworking[event..'Zap'].On(store.dispatchSafe(function(...)
 			local data = {
 				blockRef = {
 					blockPosition = ...,
@@ -3726,7 +3979,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 				player = select(5, ...)
 			}
 			vapeEvents[event]:Fire(data)
-		end))
+		end)))
 	end
 	end
 
@@ -3842,19 +4095,24 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	task.spawn(function()
 		-- crash test (temporary)
 		if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true) then return end
+		--[[ Delta: required at the identity this thread already has, with no get/set identity pair.
+		bedwars-shop is in the module cache by now: builder-util, required above at this same
+		identity, imports it, and so do the game's own shop controllers. ]]
+		local deltaExecutor = store.deltaExecutor
 		local deadline = os.clock() + 60
 		local lastError = 'shop initialization has not completed'
 		while vape.Loaded ~= nil do
 			local oldIdentity
 			local shop
-			local canSetIdentity = type(getthreadidentity) == 'function'
+			local canSetIdentity = not deltaExecutor
+				and type(getthreadidentity) == 'function'
 				and type(setthreadidentity) == 'function'
 			local ok, err = xpcall(function()
 				if canSetIdentity then
 					oldIdentity = getthreadidentity()
 					assert(type(oldIdentity) == 'number', 'thread identity is unavailable')
 					setthreadidentity(2)
-				else
+				elseif not deltaExecutor then
 					assert(bedwars.AppController
 						and bedwars.AppController:isAppOpen('BedwarsItemShopApp'),
 						'open the item shop to initialize AutoBuy on this executor')
