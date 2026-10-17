@@ -452,6 +452,12 @@ local function finishLoading()
 			bufferWarn('profile.session', 'session was not authorised -- leaving profiles untouched')
 			return
 		end
+		-- Crash test switch on (pistonware/crashtest.txt): no profile is loaded or saved, so a
+		-- session with parts left out can never write a config missing them.
+		if shared.PistonwareCrashTest then
+			bufferWarn('profile.crashtest', 'crash test switch is on -- profiles are not loaded or saved this session')
+			return
+		end
 		if shared.PistonwareBootFailed then return end
 		if not moduleSetComplete then
 			failBoot('modules.timeout', 'the game payload did not signal completion within 120 seconds')
@@ -1704,6 +1710,24 @@ if not shared.VapeIndependent then
 	main.lua entirely, skipping the game script below and finishLoading() with it. The error is
 	reported rather than swallowed: a silent universal failure used to look like random missing
 	modules, because nothing downstream re-raises it. ]]
+	--[[ Temporary switch for tracking down the Delta teleport crash: the words in
+	pistonware/crashtest.txt. 'nogame' leaves this place's game script out, so only the GUI and
+	universal.lua run. While the file exists no profile is loaded or saved. Delete it to go back
+	to normal. A file rather than a shared flag, so it holds across teleports and re-injects. ]]
+	do
+		local crashTest
+		pcall(function()
+			if isfile('pistonware/crashtest.txt') then
+				crashTest = string.lower(readfile('pistonware/crashtest.txt'))
+			end
+		end)
+		shared.PistonwareCrashTest = (crashTest and crashTest:gsub('%s', '') ~= '') and crashTest or nil
+		if shared.PistonwareCrashTest then
+			pcall(function()
+				vape:CreateNotification('Pistonware', 'Crash test switch is on ('..shared.PistonwareCrashTest:gsub('%s+', ' ')..'). Profiles are not loaded or saved. Delete pistonware/crashtest.txt to go back to normal.', 15, 'warning')
+			end)
+		end
+	end
 	stage('universal.lua start')
 	do
 		local okUniversal, universalError = xpcall(function()
@@ -1809,11 +1833,14 @@ if not shared.VapeIndependent then
 	not a failed boot: universal.lua is then the whole module set, so its profile still loads
 	and saves. A download that failed outright stays a failed boot. ]]
 	local adapterMissing = false
-		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) or nil
+	-- Crash test switch: 'nogame' leaves the game script out, as for a game with no adapter.
+	local skipGame = shared.PistonwareCrashTest ~= nil and shared.PistonwareCrashTest:find('nogame', 1, true) ~= nil
+	if skipGame then adapterMissing = true end
+		local cached = not skipGame and cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
 		gameScriptStarted = runGameScript(cached, tostring(game.PlaceId))
 	end
-	if not gameScriptStarted and not shared.PistonwareDeveloper then
+	if not skipGame and not gameScriptStarted and not shared.PistonwareDeveloper then
 		--[[ Single fetch (the old code requested this URL twice: once to probe, then again
 		inside downloadFile) and load straight from the response, so a stale/corrupt
 		cache file can't shadow what we just downloaded. ]]
