@@ -1165,6 +1165,8 @@ run(function()
 	end
 
 	function topbar.refresh()
+		-- Crash test 'notopbar': the top bar is left exactly as the game builds it.
+		if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('notopbar', 1, true) then return end
 		if vape.SetVapeButtonDocked and not topbar.Unloaded then
 			vape:SetVapeButtonDocked(topbar.docked())
 		end
