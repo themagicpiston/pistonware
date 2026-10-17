@@ -502,11 +502,20 @@ local function finishLoading()
 						or (not isMain and not isList and crashWord('guiwindows'))
 					local category = vape.Categories[name]
 					if wanted and category and type(catData) == 'table' then
-						if isMain and type(catData.Settings) == 'table' and crashWord('only-') then
+						if isMain and type(catData.Settings) == 'table' and (crashWord('only-') or crashWord('pick-') or crashWord('drop-')) then
 							local sections = {}
 							for section, options in catData.Settings do
-								if crashWord('only-'..string.lower(section)) then
-									sections[section] = options
+								if not crashWord('only-') or crashWord('only-'..string.lower(section)) then
+									--[[ 'pick-<name>' keeps only the named settings, 'drop-<name>' leaves
+									them out; names lower-case without spaces ('pick-guitheme'). ]]
+									local kept = {}
+									for optionName, optionData in (type(options) == 'table' and options or {}) do
+										local key = string.lower(tostring(optionName)):gsub('%s', '')
+										if (not crashWord('pick-') or crashWord('pick-'..key)) and not crashWord('drop-'..key) then
+											kept[optionName] = optionData
+										end
+									end
+									sections[section] = kept
 								end
 							end
 							catData = table.clone(catData)
