@@ -486,6 +486,38 @@ local function finishLoading()
 		end
 		debugWarn('[pistonware] profile load returned')
 
+		--[[ Crash test, with 'nosave noguiload': put back only the named parts of the GUI settings.
+		'guimain' is the menu's own settings (every section, or only those named 'only-gui',
+		'only-settings', 'only-notifications', 'only-modules', 'only-general'); 'guiwindows' the tab
+		windows; 'guilists' Profiles, Friends, Targets and FFlags. ]]
+		if crashWord('nosave') and crashWord('noguiload') then
+			pcall(function()
+				local path = 'pistonware/profiles/'..game.GameId..'.gui.txt'
+				local data = isfile(path) and game:GetService('HttpService'):JSONDecode(readfile(path))
+				if type(data) ~= 'table' or type(data.Categories) ~= 'table' then return end
+				for name, catData in data.Categories do
+					local isMain = name == 'Main'
+					local isList = name == 'Profiles' or name == 'Friends' or name == 'Targets' or name == 'FFlags'
+					local wanted = (isMain and crashWord('guimain')) or (isList and crashWord('guilists'))
+						or (not isMain and not isList and crashWord('guiwindows'))
+					local category = vape.Categories[name]
+					if wanted and category and type(catData) == 'table' then
+						if isMain and type(catData.Settings) == 'table' and crashWord('only-') then
+							local sections = {}
+							for section, options in catData.Settings do
+								if crashWord('only-'..string.lower(section)) then
+									sections[section] = options
+								end
+							end
+							catData = table.clone(catData)
+							catData.Settings = sections
+						end
+						category:Load(catData)
+					end
+				end
+			end)
+		end
+
 		--[[
 			No autosave loop, and nothing timed anywhere in the save path.
 
