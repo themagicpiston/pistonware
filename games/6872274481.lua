@@ -765,8 +765,11 @@ local function markInput(input)
 		store.lastInput = tick()
 	end
 end
+-- crash test (temporary)
+if not (shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noentity', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true))) then
 vape:Clean(inputService.InputBegan:Connect(markInput))
 vape:Clean(inputService.InputChanged:Connect(markInput))
+end
 
 -- `seconds` overrides the default for a module that lets you pick its own threshold.
 local function isLocalAfk()
@@ -994,6 +997,8 @@ local sortmethods = {
 }
 
 run(function()
+	-- crash test (temporary)
+	if shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noentity', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true)) then return end
 	local oldstart = entitylib.start
 
 	--[[ A Practice room dummy is identified by either of the two markers.
@@ -1401,7 +1406,10 @@ run(function()
 	end
 	vape:Clean(entitylib.Events.LocalAdded:Connect(updateVelocity))
 end)
+-- crash test (temporary)
+if not (shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noentity', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true))) then
 entitylib.start()
+end
 
 --[[ pistonware funcs ]]
 
@@ -1428,12 +1436,15 @@ local function ensureCharPrimaryPart(char)
     end
 end
 
+-- crash test (temporary)
+if not (shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noentity', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true))) then
 ensureCharPrimaryPart(lplr.Character)
 -- Registered for cleanup: every reinject used to leave its copy of this listener behind.
 vape:Clean(lplr.CharacterAdded:Connect(function(c)
     c:WaitForChild("HumanoidRootPart", 5)
     ensureCharPrimaryPart(c)
 end))
+end
 
 --[[ == shared __namecall guard ==
 There is exactly ONE global __namecall hook in the whole product and it lives
@@ -1551,7 +1562,10 @@ end
 
 local getnamecallmethod = getnamecallmethod
 local mt = getrawmetatable(game)
+-- crash test (temporary)
+if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 setreadonly(mt, false)
+end
 --[[
 	Chain to the FIRST original, never to whatever is installed right now.
 
@@ -1642,9 +1656,12 @@ local namecallHook = function(self, ...)
     end
     return oldNamecall(self, ...)
 end
+-- crash test (temporary)
+if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 mt.__namecall = namecallHook
 shared.PistonwareNamecallHook = namecallHook
 setreadonly(mt, true)
+end
 
 vape:Clean(function()
     table.clear(namecallWatch)
@@ -2536,6 +2553,8 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 
 	local BowConstantsTable
+	-- crash test (temporary)
+	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nodebugread', 1, true)) then
 	for i = 1, 32 do
 		local ok, value = pcall(debug.getupvalue, Knit.Controllers.ProjectileController.enableBeam, i)
 		if not ok then break end
@@ -2543,6 +2562,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			BowConstantsTable = value
 			break
 		end
+	end
 	end
 	BowConstantsTable = BowConstantsTable or {
 		BeamGrowthMultiplier = 0.08,
@@ -2691,6 +2711,8 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 
 	OldBreak = bedwars.BlockController.isBlockBreakable
 
+	-- crash test (temporary)
+	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 	Client.Get = function(self, remoteName)
 		local call = OldGet(self, remoteName)
 
@@ -2763,6 +2785,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		end
 
 		return OldBreak(self, breakTable, plr)
+	end
 	end
 
 	local blockhealthbar = {blockHealth = -1, breakingBlockPosition = Vector3.zero}
@@ -3536,7 +3559,11 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		end
 	end
 
-	local storeChanged = bedwars.Store.changed:connect(updateStore)
+	local storeChanged
+	-- crash test (temporary)
+	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
+		storeChanged = bedwars.Store.changed:connect(updateStore)
+	end
 
 	-- Developer trace: every change to what the character is actually holding, whoever
 	-- made it. A swap logged here with no switchItem or EquipItem line just before it did
@@ -3555,7 +3582,9 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		vape:Clean(lplr.CharacterAdded:Connect(watchHand))
 	end
 	updateStore(bedwars.Store:getState(), {})
-	
+
+	-- crash test (temporary)
+	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 	for _, event in {'MatchEndEvent', 'EntityDeathEvent', 'BedwarsBedBreak', 'BalloonPopped', 'AngelProgress', 'GrapplingHookFunctions'} do
 		if not vape.Connections then return end
 		bedwars.Client:WaitFor(event):andThen(function(connection)
@@ -3564,7 +3593,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			end))
 		end)
 	end
-	
+
 	-- Named rather than picked out with select, which walks the arguments again for every field.
 	vape:Clean(bedwars.ZapNetworking.EntityDamageEventZap.On(function(entityInstance, damage, damageType, fromPosition, fromEntity, knockbackMultiplier, knockbackId, attackData, ...)
 		vapeEvents.EntityDamageEvent:Fire({
@@ -3580,6 +3609,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			disableDamageHighlight = select(5, ...)
 		})
 	end))
+	end
 
 	-- Keep confirmed Killaura telemetry at the normalized damage-event seam. The
 	-- universal overlay can be enabled before this adapter finishes loading, so it
@@ -3619,6 +3649,8 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 
 	--[[ optimized ZapNetworking hook ]]
+	-- crash test (temporary)
+	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 	vape:Clean(bedwars.ZapNetworking.ProjectileLaunchZap.On(function(origin, projectileType, tool, shooter)
 		local launchedAt = os.clock()
 		local shooterPosition, shooterVelocity
@@ -3657,8 +3689,11 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			end
 		end)
 	end))
+	end
 
 	local projectileNames = {arrow = true, snowball = true}
+	-- crash test (temporary)
+	if not (shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noblocks', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true))) then
 	vape:Clean(workspace.ChildAdded:Connect(function(child)
 		if projectileNames[child.Name:lower()] then
 			task.defer(function()
@@ -3678,7 +3713,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			end)
 		end
 	end))
-	
+	end
+
+	-- crash test (temporary)
+	if not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true)) then
 	for _, event in {'PlaceBlockEvent', 'BreakBlockEvent'} do
 		vape:Clean(bedwars.ZapNetworking[event..'Zap'].On(function(...)
 			local data = {
@@ -3689,6 +3727,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			}
 			vapeEvents[event]:Fire(data)
 		end))
+	end
 	end
 
 	--[[
@@ -3709,6 +3748,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	into it. Everything that reads store.blocks only iterates it; none of it relies on the order.
 	The same index also keeps a block from being listed twice. ]]
 	local blockSlots = {}
+	-- crash test (temporary)
+	if shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noblocks', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true)) then
+		store.blocks, store.shop, store.enchant = {}, {}, {}
+	else
 	store.blocks = collection('block', vape, function(tab, obj)
 		if blockSlots[obj] then return end
 		local slot = #tab + 1
@@ -3745,6 +3788,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			table.remove(tab, obj)
 		end
 	end)
+	end
 
 	-- Universal creates this library before the game-specific files. Keep the fallback here
 	-- for cached or partial universal copies, and reject incomplete stale tables as well.
@@ -3796,6 +3840,8 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end))
 
 	task.spawn(function()
+		-- crash test (temporary)
+		if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nohooks', 1, true) then return end
 		local deadline = os.clock() + 60
 		local lastError = 'shop initialization has not completed'
 		while vape.Loaded ~= nil do
@@ -3860,7 +3906,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		table.clear(store)
 		table.clear(sides)
 		table.clear(remotes)
-		storeChanged:disconnect()
+		if storeChanged then storeChanged:disconnect() end
 		storeChanged = nil
 	end)
 end)
@@ -5216,6 +5262,8 @@ function GroundWatcher:ResetAirTimer(reason)
 end
 
 run(function()
+	-- crash test (temporary)
+	if shared.PistonwareCrashTest and (shared.PistonwareCrashTest:find('noentity', 1, true) or shared.PistonwareCrashTest:find('nosignals', 1, true)) then return end
 	local wasGrounded
 
 	vape:Clean(runService.Heartbeat:Connect(function()
@@ -13530,6 +13578,8 @@ run(function()
 end)
 	
 run(function()
+	-- crash test (temporary)
+	if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nodebugread', 1, true) then return end
 	local DamageIndicator
 	local FontOption
 	local Color
@@ -13826,6 +13876,8 @@ run(function()
 end)
 	
 run(function()
+	-- crash test (temporary)
+	if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nodebugread', 1, true) then return end
 	local Interface
 	local HotbarOpenInventory = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-open-inventory']).HotbarOpenInventory
 	local HotbarHealthbar = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui.healthbar['hotbar-healthbar']).HotbarHealthbar
@@ -14624,6 +14676,8 @@ run(function()
 end)
 	
 run(function()
+	-- crash test (temporary)
+	if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nodebugread', 1, true) then return end
 	local UICleanup
 	local OpenInv
 	local KillFeed
@@ -15582,6 +15636,8 @@ local function republishKey()
     return true
 end
 
+-- crash test (temporary)
+if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nopayload', 1, true) then return end
 local bedwarsSource, bedwarsFailure, bedwarsCompiled = downloadBedwars()
 if not bedwarsSource then
     local failure = bedwarsFailure or bootFailure('bedwars.download', 'no usable BedWars payload')
