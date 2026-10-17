@@ -453,8 +453,10 @@ local function finishLoading()
 			return
 		end
 		-- Crash test switch on (pistonware/crashtest.txt): no profile is loaded or saved, so a
-		-- session with parts left out can never write a config missing them.
-		if shared.PistonwareCrashTest then
+		-- session with parts left out can never write a config missing them. 'keepprofile' loads it
+		-- as normal, but only while no word that leaves part of the script out is set.
+		local crashTest = shared.PistonwareCrashTest
+		if crashTest and not (crashTest:find('keepprofile', 1, true) and not crashTest:find('nogame', 1, true)) then
 			bufferWarn('profile.crashtest', 'crash test switch is on -- profiles are not loaded or saved this session')
 			return
 		end
@@ -491,7 +493,10 @@ local function finishLoading()
 			the only thing gating it, and vape:Load owns that flag.
 		]]
 		profileApplied = true
-		if vape.AllowSaving then vape:AllowSaving() else vape.SaveBlocked = nil end
+		-- Crash test 'nosave': the profile is applied but nothing is ever saved (teleport, Uninject, changes).
+		if not (crashTest and crashTest:find('nosave', 1, true)) then
+			if vape.AllowSaving then vape:AllowSaving() else vape.SaveBlocked = nil end
+		end
 	end
 
 	--[[ Waits until the game script has finished registering its modules, because the profile can
@@ -1619,7 +1624,8 @@ end
 			to appear. Queueing straight into a match is exactly when that happens, so skip the
 			save rather than corrupt the config -- what is on disk is already correct, there is
 			simply nothing new worth recording yet. ]]
-			if profileApplied then
+			-- Crash test 'notpsave': no save as the teleport starts.
+			if profileApplied and not (shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('notpsave', 1, true)) then
 				pcall(function() vape:Save() end)
 			end
 		end

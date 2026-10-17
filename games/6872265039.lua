@@ -509,6 +509,8 @@ run(function()
 	task.spawn(function()
 		repeat task.wait(0.5) until vape.Loaded == true or vape.Loaded == nil
 		if vape.Loaded == nil then return end
+		-- Crash test 'noregionlock': no settings sync and no once-a-second settings write.
+		if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('noregionlock', 1, true) then return end
 		local data
 		pcall(function()
 			if isfile(FILE) then

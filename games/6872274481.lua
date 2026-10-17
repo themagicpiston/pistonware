@@ -10196,6 +10196,8 @@ run(function()
 	
 	task.spawn(function()
 		repeat task.wait(1) until vape.Loaded or vape.Loaded == nil
+		-- Crash test 'nostaff': not switched on here (a profile that has it on still turns it on).
+		if shared.PistonwareCrashTest and shared.PistonwareCrashTest:find('nostaff', 1, true) then return end
 		if vape.Loaded and not StaffDetector.Enabled then
 			StaffDetector:Toggle()
 		end
