@@ -778,23 +778,22 @@ local theme = {
 	Raised = Color3.fromRGB(41, 41, 41),
 	Pill = Color3.fromRGB(64, 64, 64),
 	PillHover = Color3.fromRGB(80, 80, 80),
-	Badge = Color3.fromRGB(41, 41, 41),
+	Badge = Color3.fromRGB(40, 40, 40),
 	Outline = Color3.fromRGB(64, 64, 64),
 	Track = Color3.fromRGB(64, 64, 64),
 	TrackOff = Color3.fromRGB(64, 64, 64),
-	TrackOffHover = Color3.fromRGB(79, 79, 79),
+	TrackOffHover = Color3.fromRGB(80, 80, 80),
 	Knob = Color3.fromRGB(20, 20, 20),
 	KnobOff = Color3.fromRGB(20, 20, 20),
-	--[[ Measured off Slinky's own menu: the bold NONE badge reads 161 grey and the names reach about
-	240, which is its site's palette exactly -- #F1F0EA for text, #A2A19D for everything secondary. ]]
-	Text = Color3.fromRGB(241, 240, 234),
-	Label = Color3.fromRGB(241, 240, 234),
-	SubText = Color3.fromRGB(162, 161, 157),
-	Header = Color3.fromRGB(162, 161, 157),
-	-- Text under the pointer goes white (Slinky's hovered badge reads 255); a description lights to
-	-- about 203, as Slinky's does while its + is hovered.
+	--[[ Measured off Slinky's click GUI (lossless crops 149/153/154): text #DDDDDD, secondary
+	#999999. ]]
+	Text = Color3.fromRGB(221, 221, 221),
+	Label = Color3.fromRGB(221, 221, 221),
+	SubText = Color3.fromRGB(153, 153, 153),
+	Header = Color3.fromRGB(153, 153, 153),
+	-- Under the pointer the + glyph and badge text go white, and a description goes #BBBBBB.
 	Lit = Color3.fromRGB(255, 255, 255),
-	SubTextLit = Color3.fromRGB(204, 203, 198),
+	SubTextLit = Color3.fromRGB(187, 187, 187),
 	Muted = Color3.fromRGB(102, 102, 102),
 	Red = Color3.fromRGB(221, 70, 71),
 	Yellow = Color3.fromRGB(245, 190, 60),
@@ -804,8 +803,31 @@ local theme = {
 	Gap = 8,
 	RowHeight = 28,
 	Inset = 12,
-	-- Hover changes and hints coming in: quick enough to read as a response, not an animation.
-	HoverTween = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	--[[ Text sizes. A Roblox TextSize is the face's line height, not its em: Inter's ascender and
+	descender make 1.21 em, and in game Inter draws at TextSize / 1.196 em ('Hitboxes' at TextSize 16
+	drew 58 px of ink, at 19 it drew 68; Slinky's em 16 draws 67). Slinky's sizes, and every size in
+	the specs, are em px. They are written down as measured and turned into a TextSize by theme.em;
+	ui.text's Size is one of them. ]]
+	TextScale = 1.196,
+	-- The Mod Overlay's em in its own units, before its Text size: Slinky's 24 px at the default 1.2.
+	OverlayEm = 20,
+	--[[ Hovers are instant, as Slinky's are; this is left for the few colour changes that still ease,
+	such as the profile load ring's held accent. ]]
+	HoverTween = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	--[[ Slinky's motion and the colours that go with it, measured off its recorded click GUI
+	(slinky_anim/ANIM_SPEC.md). The follower rates are per second, so they hold at any frame rate. ]]
+	RedHover = Color3.fromRGB(238, 87, 88), -- Unload, Continue and the modal X under the pointer
+	TrashOff = Color3.fromRGB(119, 45, 46), -- the greyed trash, #772D2E
+	Trash = Color3.fromRGB(218, 72, 72), -- the lit trash, #DA4848 (slinky_icons/ICONS.md)
+	NotifyText = Color3.fromRGB(223, 223, 223), -- a notification's message, #DFDFDF
+	NotifyGreen = Color3.fromRGB(141, 237, 51), -- the success tag, Slinky's profile green #8DED33
+	Backdrop = Color3.fromRGB(48, 48, 48), -- behind a modal, at 0.75 opacity
+	FollowFast = 21.9, -- the tab pill, the tab page and a card's height
+	FollowDrop = 10.75, -- a dropdown box's height
+	SwitchTime = 0.10, -- a switch's knob and track, Sine InOut
+	TipInfo = TweenInfo.new(0.10, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+	ModalInfo = TweenInfo.new(0.30, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+	SlinkyInfo = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut) -- notifications
 }
 
 -- The accent, from the GUI theme slider (orange by default).
@@ -816,6 +838,11 @@ end
 -- The accent as a tint over a card, for the bound-key badge and the notification tag.
 function theme.Tint(accent, amount)
 	return theme.Card:Lerp(accent or theme.Accent(), amount or 0.18)
+end
+
+-- The TextSize that draws a size given in em px, the unit Slinky's sizes are measured in: 16 is 19.
+function theme.em(size)
+	return math.floor(size * theme.TextScale + 0.5)
 end
 
 do
@@ -873,7 +900,10 @@ local ICON_FALLBACK = {
 	x = '\u{00D7}', plus = '+', minus = '\u{2212}', share = '\u{2191}', import = '\u{2193}', download = '\u{2193}',
 	upload = '\u{2191}', folder = '\u{2026}', ['folder-open'] = '\u{2026}', ['trash-2'] = '\u{00D7}', pin = '\u{2022}',
 	check = '\u{2713}', ['chevron-down'] = 'v', ['chevron-right'] = '\u{203A}', eye = '\u{2022}', ['eye-off'] = '\u{2013}',
-	search = '?'
+	search = '?',
+	-- Slinky's own icons. The + and - have none: the expander draws its two bars instead.
+	['slinky-export'] = '\u{2191}', ['slinky-save'] = '\u{2193}', ['slinky-folder'] = '\u{2026}',
+	['slinky-trash'] = '\u{00D7}', ['slinky-plus'] = '', ['slinky-minus'] = '', ['slinky-x'] = '\u{00D7}'
 }
 
 function fonts.face(role)
@@ -1125,6 +1155,10 @@ function fonts.settle(changed)
 			local label = probeLabel(fonts.face(face.Role))
 			table.insert(labels, label)
 			preload(label)
+			--[[ The preload can come back without the face (a Failure, a timeout); a measure cannot:
+			GetTextBoundsAsync returns once the face is in, so what is laid out after this is laid out
+			in it. A text of this pass's own, so the measure cache cannot answer for it. ]]
+			pcall(getfontbounds, 'NONE Aa '..tostring(fonts.Generation or 0), 16, fonts.face(face.Role))
 		end
 		task.wait(0.25)
 		for _, label in labels do
@@ -1136,6 +1170,9 @@ function fonts.settle(changed)
 			table.clear(measureOld)
 			measureCount = 0
 		end
+		-- One more pass: every card made before it lays its title and badge out again as it is next
+		-- placed (layout.place), whatever the nudge below reaches.
+		fonts.Generation = (fonts.Generation or 0) + 1
 		local resize = {}
 		for obj in fonts.Registry do
 			if obj.Parent and (obj:IsA('TextLabel') or obj:IsA('TextButton')) and obj.AutomaticSize ~= Enum.AutomaticSize.None then
@@ -1413,7 +1450,9 @@ function ui.list(obj, gap, horizontal, align)
 	return layout
 end
 
--- A TextLabel (or TextButton/TextBox via props.Class) in one of the four Inter weights.
+--[[ A TextLabel (or TextButton/TextBox via props.Class) in one of the four Inter weights. Size is in
+em px, as Slinky's sizes are measured, and drawn through theme.em. TextSize is for text sized in
+Roblox's own units instead (the HUD's own widgets), and is set as it is. ]]
 function ui.text(parent, props)
 	props = props or {}
 	local className = props.Class or 'TextLabel'
@@ -1422,7 +1461,7 @@ function ui.text(parent, props)
 	label.BorderSizePixel = 0
 	label.FontFace = fonts.face(props.Weight or 'Medium')
 	label.TextColor3 = props.Color or theme.Label
-	label.TextSize = props.Size or 14
+	label.TextSize = props.TextSize or theme.em(props.Size or 14)
 	label.TextXAlignment = props.AlignX or Enum.TextXAlignment.Left
 	label.TextYAlignment = props.AlignY or Enum.TextYAlignment.Center
 	label.Text = props.Text or ''
@@ -1437,15 +1476,6 @@ function ui.text(parent, props)
 	return label
 end
 
---[[ How every hover hint comes in: from clear to solid over theme.HoverTween, text and background
-together. Going away stays instant. ]]
-function ui.fadeIn(label)
-	tween:Cancel(label, 'fade')
-	label.TextTransparency = 1
-	label.BackgroundTransparency = 1
-	tween:Tween(label, theme.HoverTween, {TextTransparency = 0, BackgroundTransparency = 0}, 'fade')
-end
-
 --[[ What is lit under the pointer, each with how to set it back. Showing or hiding the menu under a
 hovered element sends it no leave, so the menu's Visible handler puts all of it back to rest. ]]
 ui.hovered = setmetatable({}, {__mode = 'k'})
@@ -1455,6 +1485,527 @@ function ui.restHovered()
 	for _, rest in resting do
 		pcall(rest)
 	end
+end
+
+--[[
+	Motion: one RenderStepped driver for everything that follows a target or plays for a set time,
+	in the menu and on the HUD, on Slinky's measured curves (slinky_anim/ANIM_SPEC.md). It is
+	connected only while something moves. An entry owned by the menu jumps to its end the moment the
+	menu is shut or its owner is off screen, so a shut menu costs nothing; only HUD entries step while
+	it is shut.
+
+	An entry is {Owner = a GuiObject (menu entries), Hud = true (HUD entries), Step = function(dt)
+	that returns true when done, Finish = function() that sets the end state}. play only registers
+	it, so it is safe from any handler, a property signal included: the first step comes next frame.
+]]
+ui.anim = {Active = {}}
+do
+	local anim = ui.anim
+	local connection, queued = nil, false
+
+	-- Frame-rate independent, unlike a lerp per frame: the same curve at 60 fps as at 144.
+	function anim.follow(x, target, lambda, dt)
+		return target + (x - target) * math.exp(-lambda * dt)
+	end
+	-- The curves written out, as TweenService:GetValue is not something every client here has.
+	function anim.sineInOut(u)
+		return 0.5 - math.cos(math.pi * u) / 2
+	end
+	function anim.quintOut(u)
+		return 1 - (1 - u) ^ 5
+	end
+
+	-- Whether obj is showing: every GuiObject from it up to the open menu visible.
+	function anim.onScreen(obj)
+		if not (clickgui and clickgui.Visible) then return false end
+		local node = obj
+		while node and node ~= clickgui do
+			if node:IsA('GuiObject') and not node.Visible then return false end
+			node = node.Parent
+		end
+		return node == clickgui
+	end
+
+	local function disconnect()
+		if connection then
+			connection:Disconnect()
+			connection = nil
+		end
+	end
+
+	local function step(dt)
+		if vape.Loaded == nil then
+			disconnect()
+			table.clear(anim.Active)
+			return
+		end
+		-- A snapshot: a step can start or stop other entries.
+		local keys = {}
+		for key in anim.Active do
+			table.insert(keys, key)
+		end
+		for _, key in keys do
+			local entry = anim.Active[key]
+			if entry then
+				local done = true
+				if not entry.Hud and not (entry.Owner and anim.onScreen(entry.Owner)) then
+					pcall(entry.Finish)
+				else
+					local ok, result = pcall(entry.Step, dt)
+					if ok then
+						done = result == true
+					else
+						pcall(entry.Finish)
+					end
+				end
+				if done and anim.Active[key] == entry then
+					anim.Active[key] = nil
+				end
+			end
+		end
+		if next(anim.Active) == nil then
+			disconnect()
+		end
+	end
+
+	--[[ Connected at the end of the frame, never inside the handler that asked. A menu entry asked for
+	while its owner is off screen -- an open card's settings resizing with the menu shut -- is put at
+	its end right there instead, outside the handler, so it costs no RenderStepped connection. ]]
+	local function wake()
+		if connection or queued then return end
+		queued = true
+		task.defer(function()
+			queued = false
+			if vape.Loaded == nil then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			if connection then return end
+			for key, entry in table.clone(anim.Active) do
+				if anim.Active[key] == entry and not entry.Hud and not (entry.Owner and anim.onScreen(entry.Owner)) then
+					pcall(entry.Finish)
+					if anim.Active[key] == entry then
+						anim.Active[key] = nil
+					end
+				end
+			end
+			if next(anim.Active) ~= nil and not connection then
+				connection = runService.RenderStepped:Connect(step)
+			end
+		end)
+	end
+
+	function anim.play(key, entry)
+		anim.Active[key] = entry
+		wake()
+	end
+
+	-- finish sets the end state now: for direct callers, never from a property signal.
+	function anim.stop(key, finish)
+		local entry = anim.Active[key]
+		anim.Active[key] = nil
+		if entry and finish then
+			pcall(entry.Finish)
+		end
+	end
+
+	function anim.playing(key)
+		return anim.Active[key] ~= nil
+	end
+
+	-- For checking the idle cost: false whenever nothing is moving.
+	function anim.Connected()
+		return connection ~= nil
+	end
+end
+
+--[[
+	Fading part of the menu by its own properties, with no CanvasGroup. A group draws everything in it
+	into one texture -- scaled down, so blurred, past the texture limit -- and draws that again every
+	frame it changes. Here each showing part goes from the value it rests at towards nothing,
+	rest + (1 - rest) * hidden, written by the frame step of the motion the fade belongs to
+	(ui.anim), never from a property signal.
+
+	A page is taken a card at a time, and an open card's settings a row at a time (fade.split), and
+	only the cards and rows on screen in it are kept, so a long page, or a card taller than the page,
+	costs what shows of it. A page just shown can still report where its cards were a layout pass
+	ago, so everything showing is taken at first, and a card or row is let go -- put back at its
+	rest -- only once a frame has been drawn since and it is off the page. One that comes on screen
+	part way, scrolled to, is taken by the next draw; one the deferred layout pass places that the
+	fade has not had yet (fade.placed) is taken at once.
+
+	The fade owns a property only while it holds what the fade wrote there. Anything else that sets
+	it part way -- a hover, a toggle, the theme -- shows on the next frame as a value the fade did not
+	write, and that is its rest from then on; the end puts the rest back only where the fade still
+	owns it. A part resting fully transparent is not taken: there is nothing of it to fade. A hidden
+	object is, on its own, as a hover or an icon can show it part way, but nothing under it is.
+
+	A set is made with new, given parts with add (a part of the window and all that shows in it) and
+	page (a scrolling page, a card at a time), drawn each frame with draw(set, hidden) -- 0 at rest,
+	1 nothing showing -- and ended with finish, which also serves a fade cut short.
+]]
+ui.fade = {}
+do
+	local fade = ui.fade
+	local TEXT = {'BackgroundTransparency', 'TextTransparency', 'TextStrokeTransparency'}
+	local IMAGE = {'BackgroundTransparency', 'ImageTransparency'}
+	local SCROLL = {'BackgroundTransparency', 'ScrollBarImageTransparency'}
+	local PLAIN = {'BackgroundTransparency'}
+	local STROKE = {'Transparency'}
+	-- What each class has to fade. Anything else -- a corner, a list, a scale -- is passed over.
+	local KIND = {
+		TextLabel = TEXT, TextButton = TEXT, TextBox = TEXT,
+		ImageLabel = IMAGE, ImageButton = IMAGE,
+		ScrollingFrame = SCROLL,
+		Frame = PLAIN, ViewportFrame = PLAIN, VideoFrame = PLAIN,
+		UIStroke = STROKE
+	}
+	-- They are stored as floats: what reads back is within this of what was written.
+	local SAME = 1e-6
+	-- Draws a card is kept before where it is is believed: a frame drawn, so laid out, in between.
+	local SETTLE = 2
+	-- The set fading each page, for the layout pass (fade.placed).
+	local watching = setmetatable({}, {__mode = 'k'})
+	-- Cards' settings, taken a row at a time (fade.split). Weak: a destroyed card takes its entry with it.
+	local bodies = setmetatable({}, {__mode = 'k'})
+
+	-- Whether obj overlaps the rect at, size at all, edges included.
+	local function inView(obj, at, size)
+		local pos, extent = obj.AbsolutePosition, obj.AbsoluteSize
+		return pos.X <= at.X + size.X and pos.Y <= at.Y + size.Y
+			and pos.X + extent.X >= at.X and pos.Y + extent.Y >= at.Y
+	end
+
+	-- obj's own parts, each at the value it rests at now.
+	local function own(parts, obj, props)
+		for _, prop in props do
+			local rest = obj[prop]
+			if type(rest) == 'number' and rest < 1 then
+				table.insert(parts, {obj, prop, rest})
+			end
+		end
+	end
+
+	--[[ obj, and what shows under it when it shows. A card's settings (fade.split) give only their own
+	parts and are noted in rows, card to settings: scan takes their rows one by one. ]]
+	local function walk(parts, obj, props, rows)
+		own(parts, obj, props)
+		if not obj.Visible then return end
+		for _, child in obj:GetChildren() do
+			local kind = KIND[child.ClassName]
+			if kind == STROKE then
+				if child.Enabled then
+					own(parts, child, kind)
+				end
+			elseif kind and rows and bodies[child] then
+				own(parts, child, kind)
+				rows[obj] = child
+			elseif kind then
+				walk(parts, child, kind)
+			end
+		end
+	end
+
+	-- One frame of parts. A value that is not what was written last frame is someone else's, and
+	-- the rest from now on.
+	local function write(parts, hidden)
+		for _, part in parts do
+			local obj, prop = part[1], part[2]
+			local now = obj[prop]
+			local written = part[4]
+			if written ~= nil and math.abs(now - written) > SAME then
+				part[3] = now
+			end
+			local rest = part[3]
+			local value = rest + (1 - rest) * hidden
+			if math.abs(value - now) > SAME then
+				obj[prop] = value
+			end
+			part[4] = value
+		end
+	end
+
+	local function restore(part)
+		local written = part[4]
+		if written == nil then return end
+		local obj, prop, rest = part[1], part[2], part[3]
+		local now = obj[prop]
+		if math.abs(now - written) <= SAME and now ~= rest then
+			obj[prop] = rest
+		end
+	end
+	local function release(parts)
+		for _, part in parts do
+			pcall(restore, part)
+		end
+	end
+
+	-- unit: a column's own parts (whole false), or a card or one of its settings rows, whole.
+	local function take(set, unit, kind, whole)
+		local parts = {}
+		if whole then
+			walk(parts, unit, kind, set.Rows)
+		else
+			own(parts, unit, kind)
+		end
+		set.Units[unit] = parts
+		set.Taken[unit] = set.Frame
+		set.Off[unit] = nil
+	end
+
+	--[[ Taken at once if it is new; let go if it has been kept long enough to believe it is off the
+	page; taken again if it was let go and is back on. Without a view (at), only taken if new. A card
+	let go takes the settings rows it kept with it (fade.split): its body clips them to it, so with
+	the card off the page none of them shows either. ]]
+	local function consider(set, unit, kind, whole, at, size)
+		if set.Units[unit] then
+			if at and set.Frame - set.Taken[unit] >= SETTLE and not inView(unit, at, size) then
+				release(set.Units[unit])
+				set.Units[unit] = nil
+				set.Off[unit] = true
+				local body = set.Rows[unit]
+				if body then
+					for _, row in body:GetChildren() do
+						local parts = set.Units[row]
+						if parts then
+							release(parts)
+							set.Units[row] = nil
+							set.Off[row] = true
+						end
+					end
+				end
+			end
+		elseif not set.Off[unit] then
+			take(set, unit, kind, whole)
+		elseif at and inView(unit, at, size) then
+			take(set, unit, kind, whole)
+		end
+	end
+
+	-- A page's showing children (the columns, or the cards themselves) and theirs, the cards.
+	local function scan(set, page, settled)
+		local at, size
+		if settled then
+			at, size = page.AbsolutePosition, page.AbsoluteSize
+		end
+		for _, column in page:GetChildren() do
+			local kind = KIND[column.ClassName]
+			if kind and kind ~= STROKE and column.Visible then
+				consider(set, column, kind, false, at, size)
+				for _, card in column:GetChildren() do
+					local cardKind = KIND[card.ClassName]
+					if cardKind == STROKE then
+						if not set.Units[card] and card.Enabled then
+							take(set, card, cardKind, false)
+						end
+					elseif cardKind and card.Visible then
+						consider(set, card, cardKind, true, at, size)
+						--[[ Its settings while they show and it is kept, a row at a time, each on or off the
+						page by itself. Nothing of a card let go as off the page shows, so none of its rows
+						is looked at until it is taken again. ]]
+						local body = set.Units[card] and set.Rows[card]
+						if body and body.Visible then
+							for _, row in body:GetChildren() do
+								local rowKind = KIND[row.ClassName]
+								if rowKind and rowKind ~= STROKE and row.Visible then
+									consider(set, row, rowKind, true, at, size)
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	function fade.new()
+		return {Units = {}, Taken = {}, Off = {}, Rows = {}, Pages = {}, Frame = 0}
+	end
+
+	--[[ A card's settings, body (a child of the card), taken a row at a time rather than with the card
+	(ui.card): an open card taller than the page then costs what shows of it. ]]
+	function fade.split(body)
+		bodies[body] = true
+	end
+
+	-- A part of the window and all that shows in it, whole.
+	function fade.add(set, obj)
+		local kind = KIND[obj.ClassName]
+		if kind == STROKE then
+			if obj.Enabled then
+				take(set, obj, kind, false)
+			end
+		elseif kind then
+			take(set, obj, kind, true)
+		end
+	end
+
+	-- A scrolling page, a card at a time, from the next draw.
+	function fade.page(set, page)
+		table.insert(set.Pages, page)
+		watching[page] = set
+	end
+
+	-- One frame, hidden from 0 (at rest) to 1 (nothing showing).
+	function fade.draw(set, hidden)
+		set.Frame += 1
+		set.Hidden = hidden
+		for _, page in set.Pages do
+			scan(set, page, true)
+		end
+		for _, parts in set.Units do
+			write(parts, hidden)
+		end
+	end
+
+	-- Whether a fade is under way on page: the layout pass then notes the cards it moves (fade.placed).
+	function fade.watched(page)
+		local set = watching[page]
+		return set ~= nil and set.Hidden ~= nil
+	end
+
+	--[[ Whether neighbour, the card beside one the layout pass moved in its column, puts that one where
+	it may be on the page: none (it is at an end of its column), or one kept long enough that where
+	it is is believed, so on the page. One taken again only by this pass is not yet. ]]
+	local function besideShown(set, neighbour)
+		if neighbour == nil then return true end
+		local taken = set.Units[neighbour] and set.Taken[neighbour]
+		return taken ~= nil and set.Frame - taken >= SETTLE
+	end
+
+	--[[ The layout pass has just placed page's cards (layout.place, deferred, never inside a property
+	signal): a fade under way there takes each one showing that it has not had yet, where it has got
+	to, rather than a frame later with it drawn in full. One it let go as off the page stays let go
+	until a draw finds it on screen -- taking the whole page again here cost every card on it on
+	each frame a pass ran, as one does on every frame of a load registering modules -- unless the
+	pass moved it (moved: each card put in another column or place, with the cards either side of it
+	in its column now) to an end of its column or beside a card on the page. It may be on the page
+	then, while the next draw can still read where it was: it is taken again, with its settings
+	rows, and a draw lets it go again once it has settled off the page. ]]
+	function fade.placed(page, moved)
+		local set = watching[page]
+		if not (set and set.Hidden) then return end
+		if moved then
+			for _, entry in moved do
+				local card = entry[1]
+				if set.Off[card] and (besideShown(set, entry[2]) or besideShown(set, entry[3])) then
+					set.Off[card] = nil
+					local body = set.Rows[card]
+					if body then
+						for _, row in body:GetChildren() do
+							set.Off[row] = nil
+						end
+					end
+				end
+			end
+		end
+		scan(set, page, false)
+		for unit, parts in set.Units do
+			if set.Taken[unit] == set.Frame then
+				write(parts, set.Hidden)
+			end
+		end
+	end
+
+	-- The end, or the fade cut short: each part it still owns back at its rest, exactly.
+	function fade.finish(set)
+		for _, parts in set.Units do
+			release(parts)
+		end
+		for _, page in set.Pages do
+			if watching[page] == set then
+				watching[page] = nil
+			end
+		end
+		table.clear(set.Units)
+		table.clear(set.Taken)
+		table.clear(set.Off)
+		table.clear(set.Rows)
+		table.clear(set.Pages)
+		set.Hidden = nil
+	end
+end
+
+--[[ Instant hover, Slinky's rule: entering lights at once and leaving puts it out at once, and never
+on a touch screen, where a tap enters and never leaves. region(point), when given, narrows where on
+gui the pointer lights it, and is checked again as the pointer moves. While a modal is open nothing
+outside it lights, as the rows under its backdrop still get pointer events. Each one is registered,
+so ui.restHovered can put it out and ui.rehover light it again. The registry is keyed by the entry,
+which only gui's own connections hold, so a destroyed gui lets go of both. ]]
+ui.hoverables = setmetatable({}, {__mode = 'k'})
+function ui.hover(gui, enter, leave, region)
+	local entry = {Gui = gui, Lit = false}
+	local function set(lit)
+		if lit == entry.Lit then return end
+		entry.Lit = lit
+		if lit then
+			ui.hovered[gui] = entry.Rest
+			enter()
+		else
+			ui.hovered[gui] = nil
+			leave()
+		end
+	end
+	entry.Rest = function()
+		set(false)
+	end
+	function entry.Check(inside)
+		local lit = false
+		if inside and not ui.lastInputTouch() then
+			local modal = ui.modal
+			if not (modal and modal.Parent and not gui:IsDescendantOf(modal)) then
+				lit = region == nil or region(inputService:GetMouseLocation() + scaledgui.AbsolutePosition) == true
+			end
+		end
+		set(lit)
+	end
+	gui.MouseEnter:Connect(function()
+		entry.Check(true)
+	end)
+	if region then
+		gui.MouseMoved:Connect(function()
+			entry.Check(true)
+		end)
+	end
+	gui.MouseLeave:Connect(function()
+		entry.Check(false)
+	end)
+	ui.hoverables[entry] = true
+	return entry
+end
+
+-- After a modal closes: whatever is under the still pointer lights straight away.
+function ui.rehover()
+	local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
+	for entry in ui.hoverables do
+		local gui = entry.Gui
+		if gui.Parent and ui.within(point, gui.AbsolutePosition, gui.AbsoluteSize) and ui.rowShowing(gui, point) then
+			entry.Check(true)
+		end
+	end
+end
+
+-- Run at the end of the frame the menu is shut in (its Visible handler, build.gui).
+ui.shutHooks = {}
+function ui.whenShut(fn)
+	table.insert(ui.shutHooks, fn)
+end
+
+--[[ Run at the end of the frame the menu is opened or shut in, by the same deferred handler, with the
+identity raised: whatever shows, hides or recolours with the menu writes here, after the change, and
+never inside the write to Visible. ]]
+ui.menuHooks = {}
+function ui.whenMenu(fn)
+	table.insert(ui.menuHooks, fn)
+end
+
+-- An icon's colour, written straight to its image and to its fallback character.
+function ui.paintIcon(holder, value)
+	local image = holder:FindFirstChild('Glyph')
+	if image then
+		image.ImageColor3 = value
+	end
+	holder.TextColor3 = value
 end
 
 -- An icon: a Lucide image in pistonware/assets/icons, tinted by the holder's TextColor3; where the
@@ -1570,9 +2121,14 @@ function ui.icon(parent, name, size, props)
 	image.Position = UDim2.fromScale(0.5, 0.5)
 	image.Size = UDim2.fromOffset(size, size)
 	image.Parent = holder
-	holder:GetPropertyChangedSignal('TextColor3'):Connect(function()
-		image.ImageColor3 = holder.TextColor3
-	end)
+	--[[ A caller that sets TextColor3 (a game's own icon) gets the image along with it. The menu's own
+	icons that change colour, painted only through ui.paintIcon, which sets both, go without
+	(NoMirror): no write inside a property signal on every hover. ]]
+	if not props.NoMirror then
+		holder:GetPropertyChangedSignal('TextColor3'):Connect(function()
+			image.ImageColor3 = holder.TextColor3
+		end)
+	end
 	for key, value in props.Props or {} do
 		holder[key] = value
 	end
@@ -1583,8 +2139,10 @@ function ui.icon(parent, name, size, props)
 end
 
 --[[
-	A pill switch, Slinky's: accent track with a dark knob on the right when on, a dark track with
-	a grey knob on the left when off.
+	A pill switch, Slinky's: the accent track with the dark knob on the right when on, a grey track
+	with it on the left when off. Both move on one progress over 0.1 s, Sine InOut: the knob 20 px and
+	the track from its off grey to the accent. The off grey lightens under the pointer, mid-motion
+	too; the on colour does not.
 ]]
 function ui.switch(parent, position)
 	local track = ui.new('Frame', {
@@ -1607,136 +2165,65 @@ function ui.switch(parent, position)
 	ui.corner(knob, UDim.new(1, 0))
 
 	local switch = {Object = track, Enabled = false}
-	local hovered = false
+	-- u: how far through the motion, 0 off to 1 on; dir: which way it is going.
+	local u, dir, hovered, accentColor = 0, -1, false, nil
+	local function apply()
+		local p = ui.anim.sineInOut(u)
+		knob.Position = UDim2.new(0, math.floor(2 + 20 * p + 0.5), 0.5, 0)
+		track.BackgroundColor3 = (hovered and theme.TrackOffHover or theme.TrackOff):Lerp(accentColor or theme.Accent(), p)
+	end
+	local motion = {
+		Owner = track,
+		Step = function(dt)
+			u = math.clamp(u + dir * dt / theme.SwitchTime, 0, 1)
+			apply()
+			return u == (dir > 0 and 1 or 0)
+		end,
+		Finish = function()
+			u = dir > 0 and 1 or 0
+			apply()
+		end
+	}
 	function switch:Set(enabled, accent)
 		self.Enabled = enabled
-		tween:Tween(track, uipallet.Tween, {BackgroundColor3 = enabled and (accent or theme.Accent()) or (hovered and theme.TrackOffHover or theme.TrackOff)})
-		tween:Tween(knob, uipallet.Tween, {
-			Position = enabled and UDim2.new(1, -18, 0.5, 0) or UDim2.new(0, 2, 0.5, 0),
-			BackgroundColor3 = enabled and theme.Knob or theme.KnobOff
-		})
-	end
-	local function rest()
-		hovered = false
-		if not switch.Enabled then
-			tween:Cancel(track)
-			track.BackgroundColor3 = theme.TrackOff
+		accentColor = accent or theme.Accent()
+		dir = enabled and 1 or -1
+		-- Already there, or where nobody can see it (a shut menu, another tab): the end state at once.
+		if u == (enabled and 1 or 0) or not ui.anim.onScreen(track) then
+			ui.anim.stop(track)
+			u = enabled and 1 or 0
+			apply()
+		else
+			-- A click mid-motion turns it round from where it is.
+			ui.anim.play(track, motion)
 		end
 	end
-	track.MouseEnter:Connect(function()
+	-- Under the pointer: read by the motion's next step while it moves, painted at once otherwise.
+	ui.hover(track, function()
 		hovered = true
-		ui.hovered[track] = rest
-		if not switch.Enabled then
-			tween:Cancel(track)
-			track.BackgroundColor3 = theme.TrackOffHover
-		end
-	end)
-	track.MouseLeave:Connect(function()
-		ui.hovered[track] = nil
-		rest()
+		if not ui.anim.playing(track) then apply() end
+	end, function()
+		hovered = false
+		if not ui.anim.playing(track) then apply() end
 	end)
 	function switch:Color(accent)
-		if self.Enabled then
-			tween:Cancel(track)
+		accentColor = accent
+		if self.Enabled and not ui.anim.playing(track) then
 			track.BackgroundColor3 = accent
 		end
 	end
 	return switch
 end
 
---[[ The value bubble over a slider knob. It sits on the menu itself rather than in the card, so a
-slider at the top edge of a scrolled page shows it whole instead of cut off by the page, and it
-follows the knob as the knob moves or the page scrolls. Built the first time it is shown. ]]
-function ui.knobBubble(knob)
-	local entry = {Shown = false}
-	local bubble, bubbleScale
-	--[[ Whether the knob itself is showing: every ancestor up to the menu visible (a hidden row, a
-	collapsed card, a card moved off its tab), and its centre inside the page it scrolls in. ]]
-	local function onScreen(center)
-		local node, page = knob, nil
-		while node and node ~= clickgui do
-			if node:IsA('GuiObject') and not node.Visible then return false end
-			if not page and node:IsA('ScrollingFrame') then page = node end
-			node = node.Parent
-		end
-		if node ~= clickgui then return false end
-		if page then
-			local corner, size = page.AbsolutePosition, page.AbsoluteSize
-			if center.X < corner.X or center.X > corner.X + size.X or center.Y < corner.Y or center.Y > corner.Y + size.Y then
-				return false
-			end
-		end
-		return true
-	end
-	-- In the window's own zoom as well as the menu's scale, as the confirm dialog and picker are.
-	local function place()
-		if not (bubble and bubble.Parent and entry.Shown) then return end
-		local center = knob.AbsolutePosition + knob.AbsoluteSize / 2
-		local visible = knob.Parent ~= nil and onScreen(center)
-		bubble.Visible = visible
-		if not visible then return end
-		local s = math.max(scale.Scale, 0.05)
-		local zoom = layout and layout.Zoom or 1
-		bubbleScale.Scale = zoom
-		local offset = center - bubble.Parent.AbsolutePosition
-		bubble.Position = UDim2.fromOffset(offset.X / s, offset.Y / s - 10 * zoom)
-	end
-	function entry:Show(text)
-		-- Not over an open dropdown list.
-		if layout and layout.ListOpen then return end
-		if not bubble then
-			if not clickgui then return end
-			bubble = ui.text(clickgui, {Text = text, Size = 14, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
-				Name = 'SliderBubble',
-				AnchorPoint = Vector2.new(0.5, 1),
-				AutomaticSize = Enum.AutomaticSize.X,
-				BackgroundColor3 = theme.Pill,
-				BackgroundTransparency = 0,
-				Size = UDim2.fromOffset(0, 20),
-				Visible = false,
-				ZIndex = 15
-			}})
-			ui.corner(bubble, 5)
-			ui.padding(bubble, 7, 7, 0, 0)
-			bubbleScale = ui.new('UIScale', {Scale = layout and layout.Zoom or 1}, bubble)
-			knob:GetPropertyChangedSignal('AbsolutePosition'):Connect(place)
-			clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
-				entry.Shown = false
-				bubble.Visible = false
-			end)
-			pcall(function()
-				knob.Destroying:Connect(function()
-					bubble:Destroy()
-				end)
-			end)
-		end
-		local appearing = not (entry.Shown and bubble.Visible)
-		bubble.Text = text
-		entry.Shown = true
-		place()
-		-- In with the quick fade every hint uses; a bubble already up only changes its text.
-		if appearing and bubble.Visible then
-			ui.fadeIn(bubble)
-		end
-	end
-	function entry:SetText(text)
-		if bubble then
-			bubble.Text = text
-		end
-	end
-	function entry:Hide()
-		entry.Shown = false
-		if bubble then
-			bubble.Visible = false
-		end
-	end
-	return entry
-end
-
 --[[ The small rounded-square button that expands a card or a row: '+' closed, '-' open. The press
 is taken by the whole line the square sits on, the description beside it included, so a thumb that
-lands next to the square on a phone opens the card instead of switching the module. ]]
-function ui.expander(parent, position)
+lands next to the square on a phone opens the card instead of switching the module.
+
+opts.Lit(lit) is told whenever the square lights or goes out, so a card's description lights with
+it; opts.Region(point, square) narrows where the pointer lights it (a card's: the square's rows, from
+the square to the end of the description). ]]
+function ui.expander(parent, position, opts)
+	opts = opts or {}
 	local button = ui.new('TextButton', {
 		Name = 'Expand',
 		AutoButtonColor = false,
@@ -1764,24 +2251,48 @@ function ui.expander(parent, position)
 			Size = UDim2.fromOffset(8, 2)
 		}, square)
 	end
-	bar(0)
+	local horizontal = bar(0)
 	local upright = bar(90)
+	--[[ Slinky's own + and - images, where this client shows icon files. The two bars are what a
+	phone draws, and are hidden while an image shows; they are the same pixels, so an image that lands
+	later, with the bars still up under it, looks no different. ]]
+	local icon = ui.icon(square, 'slinky-plus', 16, {Color = theme.Text, NoMirror = true, Box = UDim2.fromOffset(16, 16), Props = {
+		Name = 'Png', AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5)
+	}})
+	local isOpen = false
+	local function syncGlyph()
+		local image = icon:FindFirstChild('Glyph')
+		local drawn = image ~= nil and image.Visible
+		horizontal.Visible = not drawn
+		upright.Visible = not drawn and not isOpen
+	end
+	syncGlyph()
 	local glyph = {}
 	-- '+' closed, '-' open.
 	function glyph:Set(open)
-		upright.Visible = not open
+		isOpen = open == true
+		ui.setIcon(icon, isOpen and 'slinky-minus' or 'slinky-plus')
+		syncGlyph()
 	end
-	local function rest()
-		tween:Tween(square, theme.HoverTween, {BackgroundColor3 = theme.Pill})
+	-- Under the pointer the square lightens and its glyph goes white, at once, as Slinky's do.
+	local function paint(lit)
+		local ink = lit and theme.Lit or theme.Text
+		square.BackgroundColor3 = lit and theme.PillHover or theme.Pill
+		horizontal.BackgroundColor3 = ink
+		upright.BackgroundColor3 = ink
+		ui.paintIcon(icon, ink)
+		if opts.Lit then
+			opts.Lit(lit)
+		end
 	end
-	button.MouseEnter:Connect(function()
-		ui.hovered[square] = rest
-		tween:Tween(square, theme.HoverTween, {BackgroundColor3 = theme.PillHover})
-	end)
-	button.MouseLeave:Connect(function()
-		ui.hovered[square] = nil
-		rest()
-	end)
+	local region = opts.Region and function(point)
+		return opts.Region(point, square)
+	end or nil
+	ui.hover(button, function()
+		paint(true)
+	end, function()
+		paint(false)
+	end, region)
 	return button, glyph
 end
 
@@ -1845,65 +2356,121 @@ end
 --[[
 	The confirmation every destructive action goes through: a card at the top of the screen,
 	'Are you sure?', what is about to happen, and a red Continue. Clicking anywhere off the card
-	cancels.
+	cancels. It comes in as Slinky's does: over 0.3 s, Quint Out, the card drops the last 48 px and
+	fades in with everything on it while the backdrop greys the screen out to 0.75. It goes at once,
+	the action runs in that same frame, and whatever is under the pointer then lights straight away.
 ]]
 function ui.confirm(body, onContinue, continueText)
 	if not clickgui then return end
-	local cardWidth = math.clamp(viewportWidth() / (math.max(scale.Scale, 0.05) * (layout and layout.Zoom or 1)) - 24, 260, 576)
-	-- A body too long for one line (a phone in portrait, a long profile name) wraps onto a second
-	-- line rather than losing its end, and the card grows to hold it.
-	local wraps = false
+	-- Opening it puts out every hint and hover light underneath.
+	ui.hideTips()
+	ui.restHovered()
+	local zoom = layout and layout.Zoom or 1
+	local cardWidth = math.clamp(viewportWidth() / (math.max(scale.Scale, 0.05) * zoom) - 24, 260, 576)
+	-- A body too long for one line (a phone in portrait, a long profile name) wraps onto the lines it
+	-- needs, four at most, rather than losing its end, and the card grows 19 a line to hold them: a
+	-- long name on a narrow phone takes three at Slinky's 15 em px.
+	local lines = 1
 	pcall(function()
-		wraps = getfontbounds(body, 15, fonts.face('Medium')).X > cardWidth - 24
+		local size, face = theme.em(15), fonts.face('Medium')
+		local height, wrapped = ui.wrappedHeight(body, size, face, cardWidth - 24)
+		if wrapped then
+			lines = math.clamp(math.floor(height / math.max(getfontbounds(body, size, face).Y, 1) + 0.5), 2, 4)
+		end
 	end)
-	local extra = wraps and 19 or 0
+	local wraps = lines > 1
+	local extra = (lines - 1) * 19
+	-- Under Roblox's top bar on a phone, level with the menu window (resize keeps layout.Top).
+	local top = layout and layout.Top or 12
 	local blocker = ui.new('TextButton', {
 		Name = 'Confirm',
 		AutoButtonColor = false,
-		BackgroundColor3 = Color3.fromRGB(48, 48, 48),
-		BackgroundTransparency = 0.25,
+		BackgroundColor3 = theme.Backdrop,
+		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		Size = UDim2.fromScale(1, 1),
 		Text = '',
 		ZIndex = 20
 	}, clickgui)
+	-- The rows under the backdrop still get pointer events: nothing outside it lights meanwhile (ui.hover).
+	ui.modal = blocker
 	local card = ui.new('TextButton', {
 		AutoButtonColor = false,
 		AnchorPoint = Vector2.new(0.5, 0),
 		BackgroundColor3 = theme.Bar,
+		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		-- Under Roblox's top bar on a phone, level with the menu window (resize keeps layout.Top).
-		Position = UDim2.new(0.5, 0, 0, layout and layout.Top or 12),
+		-- 48 px up in the card's own zoom, as the window's open drops its 50 in the window's.
+		Position = UDim2.new(0.5, 0, 0, top - math.floor(48 * zoom + 0.5)),
 		Size = UDim2.fromOffset(cardWidth, 120 + extra),
 		Text = '',
 		ZIndex = 21
 	}, blocker)
-	-- The pill draws over the dialog, and the rows under it still get their hover: put it away.
-	if ui.refreshTooltip then
-		ui.refreshTooltip()
-	end
 	ui.corner(card, 20)
 	-- The same zoom as the menu window, so the modal stays readable on a phone.
-	ui.new('UIScale', {Scale = layout and layout.Zoom or 1}, card)
-	ui.text(card, {Text = 'Are you sure?', Size = 16, Weight = 'Medium', Color = theme.Text, Props = {
-		Position = UDim2.fromOffset(12, 11), Size = UDim2.new(1, -60, 0, 20), ZIndex = 22
+	ui.new('UIScale', {Scale = zoom}, card)
+	local heading = ui.text(card, {Text = 'Are you sure?', Size = 16, Weight = 'Medium', Color = theme.Text, Props = {
+		Position = UDim2.fromOffset(12, 11), Size = UDim2.new(1, -60, 0, 20), TextTransparency = 1, ZIndex = 22
 	}})
-	ui.text(card, {Text = body, Size = 15, Color = theme.Text, Props = {
-		Position = UDim2.fromOffset(12, 45), Size = UDim2.new(1, -24, 0, 20 + extra), ZIndex = 22,
+	local message = ui.text(card, {Text = body, Size = 15, Color = theme.Text, Props = {
+		Position = UDim2.fromOffset(12, 44), Size = UDim2.new(1, -24, 0, 20 + extra), TextTransparency = 1, ZIndex = 22,
 		TextTruncate = Enum.TextTruncate.AtEnd, TextWrapped = wraps
 	}})
-	local close = ui.icon(card, 'x', 21, {Class = 'TextButton', Color = theme.SubText, Box = UDim2.fromOffset(24, 24), Props = {
-		AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 10), ZIndex = 22
+	-- Slinky's X, a 16 px image in a 24 px hit box. Where it cannot be shown the x character stands
+	-- in, at the size it always had.
+	local close = ui.icon(card, 'slinky-x', 16, {Class = 'TextButton', Color = theme.SubText, NoMirror = true, Box = UDim2.fromOffset(24, 24), Props = {
+		AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 10), TextTransparency = 1, ZIndex = 22
 	}})
+	local closeEntry = fonts.Registry[close]
+	if closeEntry then
+		closeEntry.Size = 21
+		ui.setIcon(close, 'slinky-x')
+	end
+	close.Glyph.ImageTransparency = 1
+	close.Glyph.ZIndex = 22
 	local continue = ui.text(card, {Class = 'TextButton', Text = continueText or 'Continue', Size = 15, Weight = 'Medium',
 		Color = Color3.new(1, 1, 1), AlignX = Enum.TextXAlignment.Center, Props = {
-			BackgroundColor3 = theme.Red, BackgroundTransparency = 0,
+			BackgroundColor3 = theme.Red, BackgroundTransparency = 1, TextTransparency = 1,
 			Position = UDim2.fromOffset(12, 78 + extra), Size = UDim2.new(1, -24, 0, 30), ZIndex = 22
 		}})
-	ui.corner(continue, 4)
+	ui.corner(continue, 5)
+
+	-- All on one TweenInfo. Each part fades on its own rather than in a CanvasGroup, which old phone
+	-- clients do not have; over the card's own colour the two look the same.
+	tween:Tween(blocker, theme.ModalInfo, {BackgroundTransparency = 0.25}, 'modal')
+	tween:Tween(card, theme.ModalInfo, {Position = UDim2.new(0.5, 0, 0, top), BackgroundTransparency = 0}, 'modal')
+	tween:Tween(heading, theme.ModalInfo, {TextTransparency = 0}, 'modal')
+	tween:Tween(message, theme.ModalInfo, {TextTransparency = 0}, 'modal')
+	tween:Tween(close, theme.ModalInfo, {TextTransparency = 0}, 'modal')
+	tween:Tween(close.Glyph, theme.ModalInfo, {ImageTransparency = 0}, 'modal')
+	tween:Tween(continue, theme.ModalInfo, {BackgroundTransparency = 0, TextTransparency = 0}, 'modal')
+
+	-- Under the pointer the X goes red and Continue a lighter red, at once.
+	ui.hover(close, function()
+		ui.paintIcon(close, theme.RedHover)
+	end, function()
+		ui.paintIcon(close, theme.SubText)
+	end)
+	ui.hover(continue, function()
+		continue.BackgroundColor3 = theme.RedHover
+	end, function()
+		continue.BackgroundColor3 = theme.Red
+	end)
 
 	local function dismiss()
+		if ui.modal == blocker then
+			ui.modal = nil
+		end
 		blocker:Destroy()
+		-- Hints and hover come back for whatever the pointer rests on, without waiting for it to move.
+		task.defer(function()
+			if vape.Loaded == nil then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			ui.refreshTooltip()
+			ui.rehover()
+		end)
 	end
 	blocker.MouseButton1Click:Connect(dismiss)
 	close.MouseButton1Click:Connect(dismiss)
@@ -2421,9 +2988,11 @@ candidate; the pill goes to the candidate whose title the pointer is really over
 the pointer moves or the page scrolls (the watcher is connected where the pill is built). ]]
 ui.tooltipHovered = {}
 
-local function addRowTooltip(gui, text, anchor, title, bounds)
+-- noLight: the title keeps its colour while the hint shows, as a module's name does in Slinky.
+local function addRowTooltip(gui, text, anchor, title, bounds, noLight)
 	if type(text) ~= 'string' or text == '' then return end
 	local entry = {Text = (removeTags(text):gsub('\n', ' ')), Anchor = anchor, Title = title, Bounds = bounds}
+	entry.NoLight = noLight
 	gui.MouseEnter:Connect(function()
 		ui.tooltipHovered[gui] = entry
 		ui.refreshTooltip()
@@ -2483,7 +3052,8 @@ function ui.measureTooltip(entry)
 			entry.TitleWidth = getfontbounds(title.Text, title.TextSize, title.FontFace).X
 		end
 		entry.Wrapped = lines > 1
-		entry.Size = Vector2.new(math.min(bounds.X, 340) + 18, math.max(20, bounds.Y * lines + 6))
+		-- 6 px either side of the text, as Slinky's pill; one line is 20 tall whatever the client measures.
+		entry.Size = Vector2.new(math.min(bounds.X, 340) + 12, lines > 1 and (bounds.Y * lines + 6) or 20)
 		ui.refreshTooltip()
 	end)
 end
@@ -2497,23 +3067,130 @@ function ui.lastInputTouch()
 	return ok and last == Enum.UserInputType.Touch
 end
 
---[[ While a hint is up, the title it belongs to -- a toggle's name, a module's -- is lit white, and
-set back when the hint goes. Its own colour is kept from the first time, taken at rest. ]]
+--[[ While a hint is up, the title it belongs to -- a toggle's name -- is lit white, and set back
+when the hint goes. Its own colour is kept from the first time, taken at rest. A module's name is
+not lit (NoLight): Slinky's never is. ]]
 function ui.lightTitle(entry, lit)
+	if entry and entry.NoLight then return end
 	local title = entry and entry.Title
 	if not (title and title.Parent and (title:IsA('TextLabel') or title:IsA('TextButton'))) then return end
+	-- At once, as every hover change is.
 	if lit then
 		entry.TitleColor = entry.TitleColor or title.TextColor3
-		tween:Tween(title, theme.HoverTween, {TextColor3 = theme.Lit})
+		tween:Cancel(title)
+		title.TextColor3 = theme.Lit
 	elseif entry.TitleColor then
-		tween:Tween(title, theme.HoverTween, {TextColor3 = entry.TitleColor})
+		tween:Cancel(title)
+		title.TextColor3 = entry.TitleColor
+	end
+end
+
+--[[ The hint pill: one look and one motion for every hint, a row's help, a profile icon's action, a
+slider's value. Slinky's: #404040, radius 5, 20 tall, the text plus 6 px a side. It comes in over
+0.1 s, Sine InOut, grown from a point just under its box and faded up as it grows, and goes at once.
+Each is a label on the menu's layer with a UIScale of its own. A UIScale grows a label about its
+AnchorPoint, so the anchor is put under the box instead of wrapping the label in a holder. Text and
+fill fade on their own rather than in a CanvasGroup: hints never show on a touch screen, and old
+phone clients have no CanvasGroup. ]]
+ui.tips = setmetatable({}, {__mode = 'k'})
+function ui.newTip(name, autoWidth)
+	local label = ui.text(scaledgui, {Text = '', Size = 14, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
+		Name = name,
+		AnchorPoint = Vector2.new(0.5, 1.4),
+		AutomaticSize = autoWidth and Enum.AutomaticSize.X or Enum.AutomaticSize.None,
+		BackgroundColor3 = theme.Pill,
+		BackgroundTransparency = 0,
+		Position = UDim2.fromScale(-1, -1),
+		RichText = true,
+		Size = UDim2.fromOffset(0, 20),
+		Visible = false,
+		ZIndex = 40
+	}})
+	ui.corner(label, 5)
+	ui.padding(label, 6, 6, 0, 0)
+	local tip = {Label = label, Zoom = ui.new('UIScale', {Scale = 1}, label)}
+	ui.tips[tip] = true
+	return tip
+end
+
+--[[ Puts a hint centred on centreX with its box's top at boxTop, in the menu's units; height is the
+box's before the window's zoom. It grows from 8 px under its box, or from 8 px over it when it is put
+under its anchor (below). appearing plays the way in; otherwise it moves straight there. ]]
+function ui.tipPlace(tip, centreX, boxTop, height, appearing, below)
+	local label = tip.Label
+	local zoom = layout and layout.Zoom or 1
+	height = math.max(height, 1)
+	local originY
+	if below then
+		label.AnchorPoint = Vector2.new(0.5, -8 / height)
+		originY = boxTop - 8 * zoom
+	else
+		label.AnchorPoint = Vector2.new(0.5, 1 + 8 / height)
+		originY = boxTop + (height + 8) * zoom
+	end
+	label.Position = UDim2.fromOffset(math.floor(centreX + 0.5), math.floor(originY + 0.5))
+	if appearing then
+		if tip.Grow then
+			tip.Grow:Cancel()
+		end
+		tween:Cancel(label, 'tip')
+		tip.Zoom.Scale = 0
+		label.TextTransparency = 1
+		label.BackgroundTransparency = 1
+		label.Visible = true
+		local grow = tweenService:Create(tip.Zoom, theme.TipInfo, {Scale = zoom})
+		tip.Grow = grow
+		grow.Completed:Once(function()
+			if tip.Grow == grow then
+				tip.Grow = nil
+			end
+		end)
+		grow:Play()
+		tween:Tween(label, theme.TipInfo, {TextTransparency = 0, BackgroundTransparency = 0}, 'tip')
+	elseif not tip.Grow then
+		tip.Zoom.Scale = zoom
+	end
+end
+
+function ui.tipHide(tip)
+	if not tip then return end
+	if tip.Grow then
+		tip.Grow:Cancel()
+		tip.Grow = nil
+	end
+	tween:Cancel(tip.Label, 'tip')
+	tip.Label.Visible = false
+end
+
+-- Every hint away at once: a modal opening, the menu showing or shutting.
+function ui.hideTips()
+	for tip in ui.tips do
+		ui.tipHide(tip)
+	end
+	ui.tooltipShown = nil
+	if ui.tooltipEntry then
+		ui.lightTitle(ui.tooltipEntry, false)
+		ui.tooltipEntry = nil
+	end
+end
+
+-- The page scrolled under a still pointer: each slider hint showing follows its knob, or goes.
+function ui.placeTips()
+	local done = {}
+	for tip in ui.tips do
+		local place = tip.Place
+		if place and not done[place] and tip.Label.Visible then
+			done[place] = true
+			pcall(place)
+		end
 	end
 end
 
 -- Puts the pill on the switch of the title the pointer is on, or away when it is on none.
 function ui.refreshTooltip()
+	if not ui.rowTip then return end
 	local current, entry
-	if tooltipsEnabled and clickgui and clickgui.Visible and not (layout and layout.ListOpen)
+	if tooltipsEnabled and clickgui and clickgui.Visible
 		and not clickgui:FindFirstChild('Confirm') and not ui.lastInputTouch() then
 		--[[ The pointer is measured from the top of the screen, but the positions the rows report
 		are measured from the GUI's own origin, under Roblox's top bar; the menu's own position in
@@ -2526,7 +3203,10 @@ function ui.refreshTooltip()
 			elseif not current and ui.rowShowing(gui, point) then
 				if not candidate.Size then
 					ui.measureTooltip(candidate)
-				else
+				end
+				-- A text measured before is answered at once, inside that call: it counts now, rather
+				-- than this pass putting away the pill the measure has just shown.
+				if candidate.Size then
 					-- Only the title's words count, not the whole row.
 					local title = candidate.Title or gui
 					local corner, size = title.AbsolutePosition, title.AbsoluteSize
@@ -2546,11 +3226,11 @@ function ui.refreshTooltip()
 			ui.tooltipEntry = nil
 		end
 		ui.tooltipShown = nil
-		tooltip.Visible = false
+		ui.tipHide(ui.rowTip)
 		return
 	end
 
-	-- A new hint, or one coming back after something else put the pill away (an open list).
+	-- A new hint, or one coming back after something else put the pill away (a modal opening).
 	local appearing = ui.tooltipShown ~= current or not tooltip.Visible
 	if ui.tooltipEntry and ui.tooltipEntry ~= entry then
 		ui.lightTitle(ui.tooltipEntry, false)
@@ -2562,13 +3242,10 @@ function ui.refreshTooltip()
 	tooltip.Size = UDim2.fromOffset(entry.Size.X, entry.Size.Y)
 	local s = math.max(scale.Scale, 0.05)
 	-- In the window's zoom as well as the menu's scale, the size the rows it explains are drawn at.
-	local zoom = ui.tooltipZoom and layout and layout.Zoom or 1
-	if ui.tooltipZoom then
-		ui.tooltipZoom.Scale = zoom
-	end
+	local zoom = layout and layout.Zoom or 1
 	local width, height = entry.Size.X * zoom, entry.Size.Y * zoom
 	local anchor = entry.Anchor and entry.Anchor.Parent and entry.Anchor or current
-	--[[ Centred 4 px over the switch, as the slider's value sits over its knob, but never past the
+	--[[ Centred 6 px over the switch, as the slider's value sits over its knob, but never past the
 	card's right edge; under the switch only at the top edge of the screen. Measured from the pill's
 	own parent, so it lands where the switch really is. ]]
 	local origin = tooltip.Parent and tooltip.Parent.AbsolutePosition or Vector2.zero
@@ -2577,29 +3254,16 @@ function ui.refreshTooltip()
 	local bound = entry.Bounds and entry.Bounds.Parent and entry.Bounds or current
 	local rowRight = (bound.AbsolutePosition.X + bound.AbsoluteSize.X - origin.X) / s
 	local left = math.min(switchCentre - width / 2, rowRight - width - 4)
-	local top = switchTop - height - 4
+	local top, below = switchTop - height - 6, false
 	if top < 4 then
-		top = switchTop + anchor.AbsoluteSize.Y / s + 4
+		top, below = switchTop + anchor.AbsoluteSize.Y / s + 4, true
 	end
 	left = math.clamp(left, 4, math.max(viewportWidth() / s - width - 4, 4))
-	-- Whole pixels, so the same place from one refresh to the next reads as unchanged.
-	local target = UDim2.fromOffset(math.floor(left + 0.5), math.floor(top + 0.5))
 	if appearing then
-		-- In quickly: faded up from clear while rising the last few px into place.
 		ui.lightTitle(entry, true)
-		tween:Cancel(tooltip)
-		tooltip.Position = target + UDim2.fromOffset(0, 4)
-		tooltip.Visible = true
-		ui.fadeIn(tooltip)
-		tween:Tween(tooltip, theme.HoverTween, {Position = target})
-		ui.tooltipTarget = target
-	elseif ui.tooltipTarget ~= target then
-		-- Moved under a pill already up (the page scrolled): straight there.
-		tween:Cancel(tooltip)
-		tooltip.Position = target
-		ui.tooltipTarget = target
 	end
-	tooltip.Visible = true
+	-- In with the way every hint comes in; one already up moves straight to a new place (a scroll).
+	ui.tipPlace(ui.rowTip, left + width / 2, top, entry.Size.Y, appearing, below)
 end
 
 local function createSignal()
@@ -2757,13 +3421,22 @@ function vape:CreateCategoryList(props)
 end
 
 --[[
-	A notification is a pill in the bottom-right corner, or the top-left one Slinky uses (the
-	Notifications card's Position): an uppercase tag in the accent (green for a success, yellow
+	A notification is Slinky's capsule in the bottom-right corner, or the top-left one Slinky uses
+	(the Notifications card's Position): an uppercase tag in the accent (green for a success, yellow
 	for a warning, red for an alert) and the message beside it. Same signature, same folder and
-	same Notifications toggle as before; the rich text callers send is drawn as written.
+	same Notifications toggle as before; the rich text callers send is drawn as written. It moves as
+	Slinky's do (OVERLAY_SPEC 3, ANIM_SPEC 9): in from 100 px out while it fades in, out the same way,
+	and the rest close up on the same 0.2 s Sine InOut, all through TweenService. It stays the 5 s
+	Slinky's do, or longer when the caller asks for longer.
 ]]
-local NOTIFICATION_HEIGHT = 36
+local NOTIFICATION_HEIGHT = 42
 local NOTIFICATION_GAP = 8
+-- The margin from the corner, and how far a pill slides in and out, in the HUD's units at 1080p.
+ui.NotifyMargin = 12
+ui.NotifySlide = 100
+-- The shortest a pill stays, in seconds from the start of its way in to the end of its way out:
+-- Slinky's 5 (ANIM_SPEC 9, out from 4.8 s).
+ui.NotifyLifetime = 5
 
 --[[ How far the pills ahead of the index-th one reach from the corner, in the HUD's units: each one's
 own span (its height and the gap, at the zoom it was drawn at -- a wrapped message is taller), or a
@@ -2779,24 +3452,18 @@ local function notificationOffset(index)
 end
 
 --[[ Where the index-th notification sits, stacked away from its corner, as an AnchorPoint and a
-Position. Hidden is the same row slid off the screen edge it comes in from. The top-left stack
-starts under Roblox's top bar, which this ScreenGui draws over. The margins grow with the phone zoom
-the pills are drawn at. ]]
+Position. Hidden is the same row slid out toward the screen edge it comes in from, 100 px; the
+AnchorPoint is the corner's either way. The top-left stack starts under Roblox's top bar, which this
+ScreenGui draws over. The margins grow with the phone zoom the pills are drawn at. ]]
 function ui.notificationPlace(index, hidden, before)
 	local zoom = ui.hudZoom()
 	before = before or notificationOffset(index)
+	local margin = ui.NotifyMargin * zoom
+	local slide = hidden and ui.NotifySlide * zoom or 0
 	if layout and layout.NotifyTop then
-		local y = ui.insetUnits() + 12 * zoom + before
-		if hidden then
-			return Vector2.new(1, 0), UDim2.new(0, -24, 0, y)
-		end
-		return Vector2.zero, UDim2.new(0, 16 * zoom, 0, y)
+		return Vector2.zero, UDim2.new(0, margin - slide, 0, ui.insetUnits() + margin + before)
 	end
-	local y = -(16 * zoom + before)
-	if hidden then
-		return Vector2.new(0, 1), UDim2.new(1, 24, 1, y)
-	end
-	return Vector2.new(1, 1), UDim2.new(1, -16 * zoom, 1, y)
+	return Vector2.new(1, 1), UDim2.new(1, -margin + slide, 1, -(margin + before))
 end
 
 --[[ The notifications still showing, oldest first. Ordered by the number each was given when it
@@ -2833,14 +3500,29 @@ end
 function ui.restackNow()
 	local before = 0
 	for index, notif in ui.showingNotifications() do
-		local anchor, position = ui.notificationPlace(index, false, before)
-		before += notif:GetAttribute('Span') or (NOTIFICATION_HEIGHT + NOTIFICATION_GAP) * ui.hudZoom()
-		if tween.Tween then
-			tween:Tween(notif, TweenInfo.new(0.35, Enum.EasingStyle.Exponential), {
-				AnchorPoint = anchor,
-				Position = position
-			})
+		-- Over every older pill still showing, by its place in the stack; one on its way out is under them all.
+		local z = 5 + math.min(index, 29)
+		if notif.ZIndex ~= z then
+			notif.ZIndex = z
 		end
+		local anchor, position = ui.notificationPlace(index, false, before)
+		--[[ Only a pill whose place changed moves, on the same curve as the rest. One on its way in
+		keeps its own tween; one whose place changes part way in carries its x along to the new
+		place. A corner change starts it from the new corner's edge, as if it had just come in. ]]
+		local top = layout and layout.NotifyTop and true or false
+		if notif:GetAttribute('SlotX') ~= position.X.Offset or notif:GetAttribute('SlotY') ~= position.Y.Offset or notif:GetAttribute('SlotTop') ~= top then
+			if notif:GetAttribute('SlotTop') ~= top then
+				local _, hidden = ui.notificationPlace(index, true, before)
+				tween:Cancel(notif)
+				notif.AnchorPoint = anchor
+				notif.Position = hidden
+			end
+			notif:SetAttribute('SlotX', position.X.Offset)
+			notif:SetAttribute('SlotY', position.Y.Offset)
+			notif:SetAttribute('SlotTop', top)
+			tween:Tween(notif, theme.SlinkyInfo, {Position = position})
+		end
+		before += notif:GetAttribute('Span') or (NOTIFICATION_HEIGHT + NOTIFICATION_GAP) * ui.hudZoom()
 	end
 end
 
@@ -2878,8 +3560,13 @@ function vape:CreateNotification(title, text, duration, type)
 			setthreadidentity(8)
 		end
 
-		duration = tonumber(duration) or 3
-		local accent = type == 'alert' and theme.Red or type == 'warning' and theme.Yellow or type == 'success' and theme.Green or theme.Accent()
+		--[[ How long it stays, its way in and out included: Slinky's 5 s for a toggle or a profile
+		message, whatever shorter time it asks for, and its own time for one that asks for longer (a
+		warning, an error; an endless one, math.huge, stays until the menu goes, as it always has).
+		Nil, 0, a negative time, or one that is not a number (NaN too: it is never above 0) gets 5 s. ]]
+		duration = tonumber(duration)
+		duration = math.max(duration and duration > 0 and duration or 0, ui.NotifyLifetime)
+		local accent = type == 'alert' and theme.Red or type == 'warning' and theme.Yellow or type == 'success' and theme.NotifyGreen or theme.Accent()
 
 		--[[ The title is the tag when it is a name ('Pistonware', 'AutoWin'). A sentence passed as
 		the title -- the profile swap sends 'Profile swap to <name>' -- would be cut off in the tag,
@@ -2899,12 +3586,12 @@ function vape:CreateNotification(title, text, duration, type)
 		local messageHeight, wraps, messageWidth = NOTIFICATION_HEIGHT, false, 0
 		pcall(function()
 			local available = viewportWidth() / (math.max(scale.Scale, 0.05) * zoom) - 40
-			local tagWidth = getfontbounds(tagText, 12, fonts.face('Bold')).X + 18
+			local tagWidth = getfontbounds(tagText, theme.em(14), fonts.face('Medium')).X + 21
 			messageWidth = math.floor(math.clamp(available - tagWidth - 32, 140, 560))
 			local height
-			height, wraps = ui.wrappedHeight(removeTags(tostring(text or '')), 15, fonts.face('Medium'), messageWidth)
+			height, wraps = ui.wrappedHeight(removeTags(tostring(text or '')), theme.em(14), fonts.face('Medium'), messageWidth)
 			if wraps then
-				messageHeight = math.max(NOTIFICATION_HEIGHT, math.ceil(height) + 14)
+				messageHeight = math.max(NOTIFICATION_HEIGHT, math.ceil(height) + 16)
 			end
 		end)
 
@@ -2914,63 +3601,88 @@ function vape:CreateNotification(title, text, duration, type)
 				index += 1
 			end
 		end
-		local hiddenAnchor, hiddenPosition = ui.notificationPlace(index, true)
+		local anchor, hiddenPosition = ui.notificationPlace(index, true)
+		local _, shownPosition = ui.notificationPlace(index, false)
+		--[[ Slinky's capsule: #141414, no outline, 8 px round the tag and 16 past the message. Newer
+		pills draw over older ones, so the ones closing up pass over one on its way out. ]]
 		local notification = ui.new('Frame', {
-			AnchorPoint = hiddenAnchor,
+			AnchorPoint = anchor,
 			AutomaticSize = Enum.AutomaticSize.X,
 			BackgroundColor3 = theme.Bar,
-			BackgroundTransparency = 0.04,
+			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
 			Position = hiddenPosition,
 			Size = UDim2.fromOffset(0, messageHeight),
-			ZIndex = 5
+			ZIndex = 5 + math.min(index, 29)
 		})
 		notification:SetAttribute('Order', order)
 		notification:SetAttribute('Span', (messageHeight + NOTIFICATION_GAP) * zoom)
+		-- Where it is headed: a restack moves it only when that changes, so its way in is not restarted.
+		notification:SetAttribute('SlotX', shownPosition.X.Offset)
+		notification:SetAttribute('SlotY', shownPosition.Y.Offset)
+		notification:SetAttribute('SlotTop', layout and layout.NotifyTop and true or false)
 		-- The phone zoom; a pill lives a few seconds, so it keeps the zoom it was drawn at.
 		ui.hudScale(notification, true)
 		notification.Parent = notifications
 		ui.corner(notification, wraps and UDim.new(0, 18) or UDim.new(1, 0))
-		ui.stroke(notification, theme.Outline, 1, 0.55)
-		ui.padding(notification, 6, 16, 0, 0)
-		ui.list(notification, 10, true)
+		ui.padding(notification, 8, 16, 0, 0)
+		ui.list(notification, 8, true)
 
-		local tagLabel = ui.text(notification, {Text = tagText, Size = 12, Weight = 'Bold', Color = accent, AlignX = Enum.TextXAlignment.Center, Props = {
+		-- The tag: the accent over the pill at 1/7 (Slinky's 0.857 transparency), 26 tall, radius 10.
+		local tagLabel = ui.text(notification, {Text = tagText, Size = 14, Weight = 'Medium', Color = accent, AlignX = Enum.TextXAlignment.Center, Props = {
 			AutomaticSize = Enum.AutomaticSize.X,
-			BackgroundColor3 = theme.Tint(accent, 0.22),
-			BackgroundTransparency = 0,
+			BackgroundColor3 = theme.Tint(accent, 1 / 7),
+			BackgroundTransparency = 1,
 			LayoutOrder = 1,
-			Size = UDim2.fromOffset(0, 24),
+			Size = UDim2.fromOffset(0, 26),
+			TextTransparency = 1,
 			ZIndex = 5
 		}})
-		ui.corner(tagLabel, 6)
-		ui.padding(tagLabel, 9, 9, 0, 0)
+		ui.corner(tagLabel, 10)
+		ui.padding(tagLabel, 10, 11, 0, 0)
 
-		local message = ui.text(notification, {Text = tostring(text or ''), Size = 15, Weight = 'Medium', Color = theme.Text, Props = {
+		local message = ui.text(notification, {Text = tostring(text or ''), Size = 14, Weight = 'Medium', Color = theme.NotifyText, Props = {
 			AutomaticSize = wraps and Enum.AutomaticSize.None or Enum.AutomaticSize.X,
 			LayoutOrder = 2,
 			RichText = true,
 			Size = UDim2.fromOffset(wraps and messageWidth or 0, messageHeight),
+			TextTransparency = 1,
 			TextWrapped = wraps,
 			ZIndex = 5
 		}})
 		message.TextYAlignment = Enum.TextYAlignment.Center
 
-		-- In from its edge, and any that were asked for after it but built first move down a place.
+		--[[ In: from 100 px out to its place while the pill, tag and text fade in, all on one 0.2 s Sine
+		InOut. Position and fade are separate tweens, so a restack that moves it on its way in leaves
+		the fade running. Any pills asked for after it but built first move down a place. ]]
+		local function fade(value)
+			tween:Tween(notification, theme.SlinkyInfo, {BackgroundTransparency = value}, 'notify')
+			tween:Tween(tagLabel, theme.SlinkyInfo, {BackgroundTransparency = value, TextTransparency = value}, 'notify')
+			tween:Tween(message, theme.SlinkyInfo, {TextTransparency = value}, 'notify')
+		end
+		tween:Tween(notification, theme.SlinkyInfo, {Position = shownPosition})
+		fade(0)
 		ui.restackNotifications()
 
-		task.delay(duration, function()
-			-- Out the way it came in, at the height it is at now; the others close up behind it.
+		-- Out over the last 0.2 s of that time (the curve's own length), so it is gone as the time ends.
+		local exitTime = theme.SlinkyInfo.Time
+		task.delay(duration - exitTime, function()
+			-- Out the way it came in, at the height it is at now, fading as it goes; the others close
+			-- up behind it on the same frame and the same curve.
 			notification:SetAttribute('Leaving', true)
-			if tween.Tween then
-				local anchor, position = ui.notificationPlace(1, true)
-				tween:Tween(notification, TweenInfo.new(0.35, Enum.EasingStyle.Exponential), {
-					AnchorPoint = anchor,
-					Position = UDim2.new(position.X.Scale, position.X.Offset, notification.Position.Y.Scale, notification.Position.Y.Offset)
-				}, 'tweenstwo')
-			end
+			notification.ZIndex = 5
+			local _, hidden = ui.notificationPlace(1, true)
+			tween:Tween(notification, theme.SlinkyInfo, {
+				Position = UDim2.new(hidden.X.Scale, hidden.X.Offset, notification.Position.Y.Scale, notification.Position.Y.Offset)
+			})
+			fade(1)
+			ui.restackNotifications()
 
-			task.wait(0.25)
+			task.wait(exitTime)
+			tween:Cancel(notification)
+			for _, part in {notification, tagLabel, message} do
+				tween:Cancel(part, 'notify')
+			end
 			notification:ClearAllChildren()
 			notification:Destroy()
 		end)
@@ -3122,12 +3834,15 @@ function vape:Load(skipgui, profile)
 			end
 		end
 
-		self:UpdateTextGUI(true)
 	else
 		-- Creation is deferred until main.lua confirms a complete boot. Writing here would
 		-- serialize only the modules registered so far when a game payload failed or yielded.
 		self.PendingProfileCreate = canSave and true or nil
 	end
+	--[[ The first-load redraw -- the overlay's list and watermark, and the menu's colours -- whether
+	or not there was a profile file: the Mod Overlay and its watermark start on, so a first inject
+	with none has them to draw too. A request, run once this load has returned. ]]
+	self:UpdateTextGUI(true)
 
 	if canSave then
 		self:CreateNotification('Pistonware', 'Loaded profile '..self.Profile, 3, 'success')
@@ -3160,6 +3875,18 @@ function vape:Load(skipgui, profile)
 		a one-second window is not worth what flushing it costs.
 	]]
 	self.SaveNeeded = nil
+	--[[ A profile upgraded as it loaded (the Mod Overlay's move to Slinky's defaults, in
+	build.modOverlay) owes its file one write, so the new values and the marker that stops a second
+	upgrade reach the disk. It goes the way a new profile's first write does: now when saving is
+	open, or when main.lua opens it at the end of the boot (AllowSaving), and never in a boot that
+	failed. Only this load's own upgrade: a load a newer one took over from returned above, and one
+	that could not read its files (canSave false) writes nothing. ]]
+	if self.UpgradeGeneration == generation then
+		self.UpgradeGeneration = nil
+		if canSave then
+			self.PendingProfileCreate = true
+		end
+	end
 	if self.PendingProfileCreate and self:CanSave() then
 		self.PendingProfileCreate = nil
 		self:RequestSave()
@@ -3379,31 +4106,56 @@ function build.root()
 	notifications = Instance.new('Folder')
 	notifications.Name = 'Notifications'
 	notifications.Parent = scaledgui
-	tooltip = ui.text(scaledgui, {Text = '', Size = 14, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
-		BackgroundColor3 = theme.Pill,
-		BackgroundTransparency = 0,
-		Position = UDim2.fromScale(-1, -1),
-		RichText = true,
-		Visible = false,
-		ZIndex = 40
-	}})
-	ui.corner(tooltip, 5)
-	ui.padding(tooltip, 9, 9, 0, 0)
-	-- The window's zoom, set where the pill is placed (refreshTooltip).
-	ui.tooltipZoom = ui.new('UIScale', {Scale = 1}, tooltip)
-	-- Closing the menu under a hovered row sends no leave, so the pill is put away here.
+	-- The row hint pill (ui.newTip): a toggle's or a module's help, a profile icon's action.
+	ui.rowTip = ui.newTip('Tooltip')
+	tooltip = ui.rowTip.Label
+	-- The window's zoom is set where the pill is placed (ui.tipPlace).
+	ui.tooltipZoom = ui.rowTip.Zoom
+	--[[ Showing or hiding the menu under a hovered row sends it no leave, so every hint and hover light
+	is put back here, whatever waits for the menu to shut or follows it in and out runs, and the
+	window comes in or goes with its dim (layout.MenuShown). Only a request: nothing is written inside
+	the property change. ]]
 	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
-		table.clear(ui.tooltipHovered)
-		ui.refreshTooltip()
-		ui.restHovered()
+		if ui.menuQueued then return end
+		ui.menuQueued = true
+		task.defer(function()
+			ui.menuQueued = false
+			if vape.Loaded == nil then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			table.clear(ui.tooltipHovered)
+			-- Each on its own: whatever one of them meets, the shut hooks and the dim below still run.
+			pcall(ui.hideTips)
+			pcall(ui.refreshTooltip)
+			pcall(ui.restHovered)
+			if not clickgui.Visible then
+				for _, hook in ui.shutHooks do
+					pcall(hook)
+				end
+			end
+			-- What follows the menu (ui.whenMenu): the overlay windows, the HUD widgets and their outlines.
+			for _, hook in ui.menuHooks do
+				pcall(hook)
+			end
+			-- Still in the frame the menu opened or shut, before it is drawn.
+			if layout and layout.MenuShown then
+				layout.MenuShown(clickgui.Visible)
+			end
+		end)
 	end))
 	--[[ The pointer moving or the page scrolling re-decides which row the pill is on; while one is
 	showing it is also re-checked a few times a second, for a row hidden or collapsed under a still
 	pointer. ]]
 	vape:Clean(inputService.InputChanged:Connect(function(input)
-		if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.MouseWheel)
+		local wheel = input.UserInputType == Enum.UserInputType.MouseWheel
+		if (input.UserInputType == Enum.UserInputType.MouseMovement or wheel)
 			and (ui.tooltipShown or next(ui.tooltipHovered)) then
 			ui.refreshTooltip()
+		end
+		-- A slider's value hint follows its knob as the page scrolls under a still pointer.
+		if wheel and clickgui.Visible then
+			ui.placeTips()
 		end
 	end))
 	local tooltipCheck = 0
@@ -3820,14 +4572,15 @@ function build.lists()
 				Size = UDim2.fromOffset(0, 30)
 			}})
 			ui.corner(button, UDim.new(1, 0))
-			ui.padding(button, 16, 16, 0, 0)
+			-- 12 a side, as the Targets chips: at 16 the three pills ran past a 442 px phone window.
+			ui.padding(button, 12, 12, 0, 0)
 			local stroke = ui.stroke(button, theme.Outline, 1, 0.1)
 			-- Centred on the button, kept inside the strip rather than the button itself.
 			if tip then addRowTooltip(button, tip, button, nil, row) end
-			button.MouseEnter:Connect(function()
+			-- Lighter under the pointer, at once, and never on a touch screen (ui.hover).
+			ui.hover(button, function()
 				button.BackgroundColor3 = theme.Raised
-			end)
-			button.MouseLeave:Connect(function()
+			end, function()
 				button.BackgroundColor3 = theme.Card
 			end)
 			return button, stroke
@@ -4344,7 +5097,7 @@ function build.lists()
 
 	--[[ Reads an exported profile (or a bare config) and returns the payload and the name it was
 	exported under, or nil after saying why. ]]
-	local function readProfileImport()
+	local function readProfileImport(takeFlags)
 		local blob = readImport(profileimportbox, EXPORT_FOLDER..'/importprofile.txt')
 		if not blob then
 			vape:CreateNotification('Pistonware', 'Nothing to import -- paste a profile into the Import profile box, or copy one to your clipboard.', 10, 'alert')
@@ -4354,6 +5107,17 @@ function build.lists()
 		local decoded = decodeImport(blob)
 		if not decoded then
 			vape:CreateNotification('Pistonware', 'That does not look like a profile (it is not readable JSON).', 10, 'alert')
+			return nil
+		end
+
+		--[[ An FFlags export belongs to the FFlags tab. The Import profile box files it there, under
+		its own name (profilescategory.ImportFlags, set by the FFlags tab); a profile card cannot take one. ]]
+		if decoded.Pistonware == 'fflags' then
+			if takeFlags and profilescategory.ImportFlags then
+				profilescategory.ImportFlags(decoded)
+			else
+				vape:CreateNotification('Pistonware', 'That is an FFlags export, not a profile. Paste it into the Import profile box below, or into Add FFlags in the FFlags tab.', 10, 'alert')
+			end
 			return nil
 		end
 
@@ -4371,7 +5135,7 @@ function build.lists()
 		--[[ vape:Load walks Modules, Categories and Legit unchecked, so a payload missing one throws part
 		way through the apply with saving off. Modules is what makes it a profile; the other two may be empty. ]]
 		if type(payload.Modules) ~= 'table' then
-			vape:CreateNotification('Pistonware', 'That JSON is not a pistonware profile.', 10, 'alert')
+			vape:CreateNotification('Pistonware', 'That JSON is not a pistonware profile. A list of FFlags goes into Add FFlags in the FFlags tab.', 10, 'alert')
 			return nil
 		end
 		if type(payload.Categories) ~= 'table' then payload.Categories = {} end
@@ -4380,7 +5144,7 @@ function build.lists()
 	end
 
 	local function importProfile()
-		local payload, name = readProfileImport()
+		local payload, name = readProfileImport(true)
 		if not payload then return end
 
 		-- Only a bare config arrives without one, and it has to be filed under something.
@@ -4467,6 +5231,8 @@ function build.lists()
 		Darker = true,
 		LayoutOrder = 1001,
 		Placeholder = 'Paste an exported profile',
+		-- Pasted, imported and emptied: never saved or restored (Transient, components.TextBox).
+		Transient = true,
 		Function = function(enter)
 			if enter then
 				importProfile()
@@ -4538,6 +5304,10 @@ function build.lists()
 			end)
 			if selectedFFlag == name then
 				selectedFFlag = 'default'
+				-- An apply still going was writing this set: it stops at its next frame.
+				if applyFFlags then
+					applyFFlags(true, nil, {})
+				end
 			end
 		end,
 		-- Restoring a saved selection must not write flags into the client on every inject.
@@ -4545,6 +5315,10 @@ function build.lists()
 			selectedFFlag = name
 		end,
 		OnExpand = function()
+			-- Clear FFlag quarantine shows only with something in quarantine.json, read here rather than at boot.
+			if fflags and fflags.ShowQuarantine then
+				pcall(fflags.ShowQuarantine)
+			end
 			-- The list is a UI affordance, not boot-critical state. Create its default row and
 			-- backing files only when the user opens the pane (or when they add/import a set).
 			if fflags and not fflags:GetValue('default') then
@@ -4617,6 +5391,393 @@ function build.lists()
 		return type(data) == 'table' and data or {}
 	end
 
+	--[[ The type prefix comes off before the call.
+
+	setfflag takes the BARE name -- 'DisablePostFx', not 'FFlagDisablePostFx' -- and works
+	out the type itself. The prefix is part of how a flag is written down in the JSON files
+	people share, not part of the name the engine knows it by. Handed the full name the
+	call matches nothing, returns cleanly, and changes nothing: the silent no-op this tab
+	was reporting as success.
+
+	Anchored to the front, where the version this is taken from gsubs each prefix anywhere
+	in the string. Identical for every real flag name, and it cannot eat a 'FInt' that
+	happens to sit in the middle of one. Anchoring also removes the ordering hazard --
+	'FFlag' can never match inside 'DFFlagX' and leave 'DX' behind.
+
+	FLog and DFLog are included because your own list uses them (FLogNetwork,
+	FLogIXPGraphicsOptimizationModeQualityScale); they resolve the same way. ]]
+	local FFLAG_PREFIXES = {'DFFlag', 'DFInt', 'DFString', 'DFLog', 'FFlag', 'FInt', 'FString', 'FLog'}
+	local function bareFlagName(flag)
+		-- Compared, not matched: a set of thousands builds no table and no pattern per flag.
+		for _, prefix in FFLAG_PREFIXES do
+			if #flag > #prefix and flag:sub(1, #prefix) == prefix then
+				return flag:sub(#prefix + 1)
+			end
+		end
+		return flag
+	end
+
+	--[[ Stringified: the executors that take a value at all take it as a string, and the
+	sets people share are a mix of "true", true and numbers.
+
+	Booleans go in lower case, whatever spelling the list used.
+
+	These lists are written for bootstrappers, which hand Roblox a JSON file and let its
+	settings loader coerce "True" into a boolean. setfflag is a different route into the
+	same flags, and the engine parses the string strictly there: "True" is not "true", so
+	the flag keeps its default and nothing is reported -- the call still returns cleanly,
+	which is exactly the silent no-op this tab was showing as success.
+
+	Worth doing across the board: 122 of the 234 values in the list you pasted are
+	capitalised, so this is most of the file rather than an edge case.
+
+	Only booleans are touched. FInt/DFInt values are numbers, and FString values are
+	content -- asset ids, URLs, embedded JSON -- where case is meaningful. ]]
+	local function flagValue(value)
+		local wanted = tostring(value)
+		local lowered = wanted:lower()
+		if lowered == 'true' or lowered == 'false' then
+			wanted = lowered
+		end
+		return wanted
+	end
+
+	--[[ Whether what the engine reads back is the value wanted (flagValue's). Booleans ignore case:
+	the engine may report "True" for "true". Nothing else does: an FString's case is its content, so
+	'ABC' wanted over 'abc' held is a flag to write, not one already set. ]]
+	local function sameFlagValue(have, wanted)
+		local text = tostring(have)
+		if wanted == 'true' or wanted == 'false' then
+			return text:lower() == wanted
+		end
+		return text == wanted
+	end
+
+	--[[
+		The crash guard.
+
+		An apply reads and writes flags a few at a time (see applyFFlags). The guard file names the
+		next few Settle seconds before they are read -- an executor's getfflag can close the client
+		as well as its setfflag -- so the file is on disk first, and goes on naming a written flag
+		for Linger seconds, as a client can die on one a few frames later. It is emptied Linger
+		seconds after the last write. Whichever apply wrote last, the newest one empties it: an apply that supersedes
+		another takes the guard over, one that starts no thread (an empty set, Reset) included. So
+		a file still naming flags when this session first applies means the last apply never
+		finished: Roblox closed with those going in. They are added to quarantine.json and skipped
+		from then on, the user is told which, and Clear FFlag quarantine (or taking a name out of
+		the file) tries them again.
+
+		One file per account, applying.<UserId>.txt: a second client sharing the workspace neither
+		reads nor empties this one's, and the dots keep it out of the sets' own files, whose names
+		are letters, digits, spaces, _ and -. A teleport ends a session where a crash would, so from
+		its start no guard is kept (Leaving) and only a crash leaves one; a teleport that fails
+		starts it again. Roblox closed by hand mid-apply still reads as a crash, which the alert
+		allows for.
+
+		Looked at once a session, at its first apply: after that the file is this session's own.
+		An apply stopped by an Uninject empties it, so a reinject is not taken for a crash.
+	]]
+	local fflagRun = {
+		-- Applying, the guard file's path, is set at the first apply, from the account.
+		Quarantine = FFLAG_FOLDER..'/quarantine.json',
+		-- A frame's reads stop at the budget, and it writes at most Batch flags.
+		Budget = 0.004,
+		Batch = 8,
+		--[[ Seconds from writing the guard to the first read or write of the flags it names. A flag that
+		closes the client does it within milliseconds, before a file written in the same frame is on
+		disk, and a guard that never landed names the wrong flags. ]]
+		Settle = 0.1,
+		-- Seconds a written flag stays named in the guard: the close can come a few frames on.
+		Linger = 0.3,
+		-- Whether the guard file names anything.
+		Named = false,
+		--[[ The getfflag seen reading a flag this session. Until it has, a set it reads none of is no
+		evidence about this client (it may not work on this executor), and the report says that. ]]
+		Reader = false,
+		-- Counts applies: a newer one supersedes one still going, which stops at its next frame.
+		Generation = 0,
+		Checked = false,
+		Leaving = false,
+		--[[ The flags written in the last Linger seconds, whichever apply wrote them, as {name, when}:
+		the next guard names them too. ]]
+		Previous = {}
+	}
+
+	local function clearGuard()
+		fflagRun.Previous = {}
+		if fflagRun.Named then
+			fflagRun.Named = false
+			pcall(writefile, fflagRun.Applying, '')
+		end
+	end
+
+	--[[ An apply that starts no thread still supersedes one going, and that one stops without
+	touching the guard, which is no longer its own. So this lets go of it, Linger seconds on as a
+	finished apply does, unless a newer apply has taken it over by then. ]]
+	local function releaseGuard(generation)
+		if not fflagRun.Named then return end
+		task.spawn(function()
+			task.wait(fflagRun.Linger)
+			if fflagRun.Generation == generation then
+				clearGuard()
+			end
+		end)
+	end
+
+	-- quarantine.json is a list of bare names; a hand-edited map of name = true reads too.
+	local function readQuarantine()
+		local quarantine = {}
+		local data = loadJson(fflagRun.Quarantine)
+		if type(data) == 'table' then
+			for key, value in data do
+				if type(value) == 'string' then
+					quarantine[value] = true
+				elseif type(key) == 'string' and value then
+					quarantine[key] = true
+				end
+			end
+		end
+		return quarantine
+	end
+
+	-- What the last session left in applying.txt, moved into the quarantine: the names it added.
+	local function takeLeftover(quarantine)
+		local ok, text = pcall(readfile, fflagRun.Applying)
+		if not (ok and type(text) == 'string') or not text:find('%S') then
+			return {}
+		end
+		local caught = {}
+		for line in text:gmatch('[^\r\n]+') do
+			local name = line:match('^%s*(%S+)')
+			if name and not quarantine[name] then
+				quarantine[name] = true
+				table.insert(caught, name)
+			end
+		end
+		if #caught > 0 then
+			local list = {}
+			for name in quarantine do
+				table.insert(list, name)
+			end
+			table.sort(list)
+			writeJson(fflagRun.Quarantine, list)
+			if fflags.ShowQuarantine then
+				fflags.ShowQuarantine(true)
+			end
+		end
+		pcall(writefile, fflagRun.Applying, '')
+		return caught
+	end
+
+	-- A few names, then how many more: a notification has no room for thirty.
+	local function someNames(names, most)
+		local shown = table.move(names, 1, math.min(#names, most), 1, {})
+		return table.concat(shown, ', ')..(#names > most and ' and '..(#names - most)..' more' or '')
+	end
+
+	-- What an apply left out and why, after its applied count.
+	local function skipSuffix(result)
+		local parts = {}
+		if #result.Strings > 0 then
+			table.insert(parts, #result.Strings..' FString flag'..(#result.Strings == 1 and '' or 's')..' ('..someNames(result.Strings, 3)..'), as reading or setting one in a running game closes Roblox')
+		end
+		if result.Unknown > 0 then
+			table.insert(parts, result.Unread
+				and result.Unknown.." that your executor's getfflag could not read (it read none of them, so none could be checked against this client)"
+				or result.Unknown..' this client does not have')
+		end
+		if result.Quarantined > 0 then
+			table.insert(parts, result.Quarantined..' quarantined after Roblox closed while applying them (Clear FFlag quarantine lets them in again)')
+		end
+		return #parts > 0 and ' Skipped '..table.concat(parts, '; ')..'.' or ''
+	end
+
+	--[[ The tail of both reports: applySuffix over the flags that were tried, then the skips. ]]
+	local function resultSuffix(result)
+		local attempted = result.Total - result.Skipped
+		return (attempted > 0 and applySuffix(attempted, result.Failed, result.Verified, result.Verifiable) or '.')..skipSuffix(result)
+	end
+
+	--[[ One apply, a frame at a time, in its own thread (applyFFlags spawns it). finish gets the
+	counts at the end; an apply superseded or stopped by an Uninject never reaches it. ]]
+	local function runFFlagApply(generation, flags, setter, getter, result, finish)
+		local run = fflagRun
+		local function stopped()
+			if run.Generation == generation and vape.Loaded ~= nil then
+				return false
+			end
+			-- Uninjected: nothing is going in any more. Superseded: the newer apply owns the guard.
+			if run.Generation == generation then
+				clearGuard()
+			end
+			return true
+		end
+
+		--[[ Never in the frame that asked for it (a click, an Enter), nor in one that an apply it
+		supersedes has written in: that one stops when this frame ends. ]]
+		task.wait()
+		if stopped() then return end
+		ensureFolder(FFLAG_FOLDER)
+		local quarantine = readQuarantine()
+		if not run.Checked then
+			run.Checked = true
+			local player = cloneref(game:GetService('Players')).LocalPlayer
+			run.Applying = FFLAG_FOLDER..'/applying.'..tostring(player and player.UserId or 0)..'.txt'
+			-- An event, not a property signal; the file is still written a step later.
+			local teleport = player and player.OnTeleport
+			if teleport then
+				vape:Clean(teleport:Connect(function(state)
+					run.Leaving = state ~= Enum.TeleportState.Failed
+					if run.Leaving then
+						task.defer(pcall, writefile, run.Applying, '')
+					end
+				end))
+			end
+			local caught = takeLeftover(quarantine)
+			if #caught > 0 then
+				vape:CreateNotification('Pistonware', 'Roblox closed while '..(#caught == 1 and 'this flag was' or 'these flags were')..' going in last time, so '..(#caught == 1 and 'it is' or 'they are')..' quarantined and skipped from now on: '..someNames(caught, 8)..'. If that was not a crash, Clear FFlag quarantine lets '..(#caught == 1 and 'it' or 'them')..' in again.', 15, 'alert')
+			end
+		end
+
+		--[[ Each flag's bare name and value, and what is left out outright. No engine calls, but a
+		shared list can run to thousands, so this keeps to the frame budget as the reads do. It
+		walks an array of its own across those yields, never the set's hash. ]]
+		local pending = {}
+		for flag, value in flags do
+			if type(flag) == 'string' then
+				table.insert(pending, {flag, value})
+			end
+		end
+		local queue = {}
+		local start = os.clock()
+		for index = 1, #pending do
+			if os.clock() - start >= run.Budget then
+				task.wait()
+				if stopped() then return end
+				start = os.clock()
+			end
+			local flag = pending[index][1]
+			local name = bareFlagName(flag)
+			if quarantine[name] then
+				result.Quarantined += 1
+			elseif flag:sub(1, #flag - #name) == 'FString' then
+				--[[ A plain FString is never touched: getfflag on one closes the client (seen every time on
+				Potassium), before anything could be written. A DFString is not one of these. ]]
+				table.insert(result.Strings, name)
+			else
+				table.insert(queue, {name, flagValue(pending[index][2])})
+			end
+		end
+		table.sort(result.Strings)
+		table.sort(queue, function(a, b)
+			return a[1] < b[1]
+		end)
+
+		local cursor, readable = 1, 0
+		while cursor <= #queue do
+			if stopped() then return end
+			--[[ The guard names the flags this round may read, and those written in the last Linger
+			seconds, Settle seconds before the first read: getfflag can close the client as setfflag can,
+			and a flag that did it mid-read used to go unnamed, so it was never quarantined. ]]
+			local window = math.min(cursor + run.Batch - 1, #queue)
+			local now, names, kept = os.clock(), {}, {}
+			for _, written in run.Previous do
+				if now - written[2] < run.Linger then
+					table.insert(kept, written)
+					table.insert(names, written[1])
+				end
+			end
+			run.Previous = kept
+			for index = cursor, window do
+				table.insert(names, queue[index][1])
+			end
+			if not run.Leaving then
+				run.Named = true
+				pcall(writefile, run.Applying, table.concat(names, '\n'))
+			end
+			repeat
+				task.wait()
+				if stopped() then return end
+			until os.clock() - now >= run.Settle
+			start = os.clock()
+			local batch = {}
+			--[[ Reads first. Nothing is written for a flag the engine does not know (getfflag throws or
+			has nil for it) or for one that already holds the value; those count as verified. ]]
+			while cursor <= window and os.clock() - start < run.Budget do
+				local entry = queue[cursor]
+				cursor += 1
+				local write = true
+				if getter then
+					local ok, have = pcall(getter, entry[1])
+					if not ok or have == nil then
+						result.Unknown += 1
+						write = false
+					else
+						readable += 1
+						run.Reader = getter
+						if sameFlagValue(have, entry[2]) then
+							result.Verified += 1
+							write = false
+						end
+					end
+				end
+				if write then
+					table.insert(batch, entry)
+				end
+			end
+
+			if #batch > 0 then
+				-- Named already, above; each stays named for Linger seconds from now.
+				for _, entry in batch do
+					table.insert(run.Previous, {entry[1], os.clock()})
+				end
+				for _, entry in batch do
+					-- false is a refusal where an executor gives one (Real, Wave); nothing, or anything else, is a write.
+					local ok, took = pcall(setter, entry[1], entry[2])
+					if ok and took ~= false then
+						if getter then
+							local read, got = pcall(getter, entry[1])
+							if read and got ~= nil and sameFlagValue(got, entry[2]) then
+								result.Verified += 1
+							end
+						end
+					else
+						result.Failed += 1
+					end
+				end
+			end
+			task.wait()
+		end
+
+		--[[ getfflag is believed for every flag, whatever the size of the set: a flag it does not know
+		is not written. Where it read none of this set and has read no flag this session, that is no
+		evidence about this client -- its getfflag may not work on this executor -- so the report says
+		getfflag could not read them rather than that the client lacks them. Nothing is written for
+		them either way. ]]
+		result.Unread = getter ~= nil and readable <= 0 and result.Unknown > 0 and run.Reader ~= getter
+
+		-- The guard stays Linger seconds past the last write, for a client that dies on it a few frames on.
+		local lastWrite = run.Previous[#run.Previous]
+		while lastWrite and os.clock() - lastWrite[2] < run.Linger do
+			task.wait()
+			if stopped() then return end
+		end
+		if stopped() then return end
+		clearGuard()
+		result.Skipped = result.Unknown + #result.Strings + result.Quarantined
+		finish(result)
+	end
+
+	--[[ The report of an apply that was not asked to stay quiet. ]]
+	local function reportApply(result)
+		if result.Total - result.Skipped <= 0 then
+			vape:CreateNotification('Pistonware', 'None of the '..result.Total..' flags in <font color="'..ui.hex(theme.Accent())..'">'..result.Set..'</font> were applied.'..skipSuffix(result), 10, 'alert')
+			return
+		end
+		vape:CreateNotification('Pistonware', 'Applied '..(result.Total - result.Skipped - result.Failed)..' of '..result.Total..' flags from <font color="'..ui.hex(theme.Accent())..'">'..result.Set..'</font>'..resultSuffix(result), 10,
+			(result.Verifiable and result.Verified <= 0) and 'alert' or nil)
+	end
+
 	--[[
 		A flag that was SET is not a flag that CHANGED.
 
@@ -4635,103 +5796,54 @@ function build.lists()
 		separately: how many were set, and how many actually hold the value now. Where there is
 		no getfflag the verified count is not guessed at -- it is left out of the message.
 
-		Returns total, failed, verified, verifiable so the adder can say all of this in one line.
+		Applied a frame at a time, in a thread of its own, and it returns at once. Writing a set
+		of two hundred in one go was a frame-long stall with no trace of which flag took the
+		client down; now each frame reads within a few milliseconds and writes at most eight
+		flags under the crash guard, leaving out the unknown, FString and quarantined ones. A
+		newer apply -- a swap, an add -- supersedes one still going.
+
+		quiet: no report of its own. done(result), when given, gets the counts at the end: Set,
+		Total, Failed, Verified, Verifiable, Unknown, Unread, Strings (names), Quarantined and Skipped.
+		flags: the set itself, when the caller has it decoded already (the import); otherwise the
+		selected set's file is read. An empty one only stops an apply still going (Reset, Delete).
 	]]
-	function applyFFlags(quiet)
+	function applyFFlags(quiet, done, flags)
+		fflagRun.Generation += 1
+		local generation = fflagRun.Generation
 		local setter = setfflag or set_fflag
 		local getter = getfflag or get_fflag
-		local flags = selectedFlags()
-		local total, failed, verified = 0, 0, 0
+		flags = flags or selectedFlags()
+		local result = {
+			Set = selectedFFlag, Total = countFlags(flags), Failed = 0, Verified = 0, Verifiable = getter ~= nil,
+			Unknown = 0, Unread = false, Strings = {}, Quarantined = 0, Skipped = 0
+		}
 
-		for flag, value in flags do
-			if type(flag) ~= 'string' then continue end
-			total += 1
-
-			--[[ The type prefix comes off before the call.
-
-			setfflag takes the BARE name -- 'DisablePostFx', not 'FFlagDisablePostFx' -- and works
-			out the type itself. The prefix is part of how a flag is written down in the JSON files
-			people share, not part of the name the engine knows it by. Handed the full name the
-			call matches nothing, returns cleanly, and changes nothing: the silent no-op this tab
-			was reporting as success.
-
-			Anchored to the front, where the version this is taken from gsubs each prefix anywhere
-			in the string. Identical for every real flag name, and it cannot eat a 'FInt' that
-			happens to sit in the middle of one. Anchoring also removes the ordering hazard --
-			'FFlag' can never match inside 'DFFlagX' and leave 'DX' behind.
-
-			FLog and DFLog are included because your own list uses them (FLogNetwork,
-			FLogIXPGraphicsOptimizationModeQualityScale); they resolve the same way. ]]
-			local name = flag
-			for _, prefix in {'DFFlag', 'DFInt', 'DFString', 'DFLog', 'FFlag', 'FInt', 'FString', 'FLog'} do
-				local stripped = name:match('^'..prefix..'(.+)$')
-				if stripped then
-					name = stripped
-					break
-				end
-			end
-			--[[ Stringified: the executors that take a value at all take it as a string, and the
-			sets people share are a mix of "true", true and numbers. ]]
-			local wanted = tostring(value)
-
-			--[[ Booleans go in lower case, whatever spelling the list used.
-
-			These lists are written for bootstrappers, which hand Roblox a JSON file and let its
-			settings loader coerce "True" into a boolean. setfflag is a different route into the
-			same flags, and the engine parses the string strictly there: "True" is not "true", so
-			the flag keeps its default and nothing is reported -- the call still returns cleanly,
-			which is exactly the silent no-op this tab was showing as success.
-
-			Worth doing across the board: 122 of the 234 values in the list you pasted are
-			capitalised, so this is most of the file rather than an edge case.
-
-			Only booleans are touched. FInt/DFInt values are numbers, and FString values are
-			content -- asset ids, URLs, embedded JSON -- where case is meaningful. ]]
-			local lowered = wanted:lower()
-			if lowered == 'true' or lowered == 'false' then
-				wanted = lowered
-			end
-			if not (setter and pcall(setter, name, wanted)) then
-				failed += 1
-				continue
-			end
-
-			if getter then
-				--[[ Compared case-insensitively: these lists are written for bootstrappers, which
-				accept "True" where the engine reports back "true". A case difference here is the
-				same value, not a flag that refused to take. ]]
-				local ok, got = pcall(getter, name)
-				if ok and got ~= nil and tostring(got):lower() == wanted:lower() then
-					verified += 1
-				end
-			end
-		end
-
-		local verifiable = getter ~= nil
-
-		if total <= 0 then
+		if result.Total <= 0 then
+			releaseGuard(generation)
 			if not quiet then
-				vape:CreateNotification('Pistonware', 'Switched to <font color="'..ui.hex(theme.Accent())..'">'..selectedFFlag..'</font>, which has no flags in it yet.', 5)
+				vape:CreateNotification('Pistonware', 'Switched to <font color="'..ui.hex(theme.Accent())..'">'..result.Set..'</font>, which has no flags in it yet.', 5)
 			end
-			return 0, 0, 0, verifiable
+			if done then done(result) end
+			return
 		end
 
 		if not setter then
+			releaseGuard(generation)
 			vape:CreateNotification('Pistonware', 'Your executor cannot set fast flags (no setfflag), so the list here is stored but not applied.', 10, 'alert')
-			return total, total, 0, verifiable
+			result.Failed = result.Total
+			if done then done(result) end
+			return
 		end
 
-		if failed >= total then
-			vape:CreateNotification('Pistonware', 'None of the '..total..' flags in '..selectedFFlag..' could be applied.', 10, 'alert')
-			return total, failed, 0, verifiable
-		end
-
-		if not quiet then
-			vape:CreateNotification('Pistonware', 'Applied '..(total - failed)..' of '..total..' flags from <font color="'..ui.hex(theme.Accent())..'">'..selectedFFlag..'</font>'..applySuffix(total, failed, verified, verifiable), 10,
-				(verifiable and verified <= 0) and 'alert' or nil)
-		end
-
-		return total, failed, verified, verifiable
+		task.spawn(runFFlagApply, generation, flags, setter, getter, result, function(final)
+			local attempted = final.Total - final.Skipped
+			if attempted > 0 and final.Failed >= attempted then
+				vape:CreateNotification('Pistonware', 'None of the '..final.Total..' flags in '..final.Set..' could be applied.'..skipSuffix(final), 10, 'alert')
+			elseif not quiet then
+				reportApply(final)
+			end
+			if done then done(final) end
+		end)
 	end
 
 	local function exportFFlags()
@@ -4763,6 +5875,41 @@ function build.lists()
 		else
 			vape:CreateNotification('Pistonware', 'Export failed -- could not reach the clipboard or write to '..EXPORT_FOLDER..'.', 10, 'alert')
 		end
+	end
+
+	--[[ An FFlags export pasted into the Profiles tab's Import profile box: filed as an FFlags profile
+	under the name it was exported with, as a profile import keeps its name -- one already called that
+	is replaced. The set you are on stays current (unless it is the one replaced, which is applied
+	again); clicking the new row in this tab applies it. ]]
+	profilescategory.ImportFlags = function(decoded)
+		local data = type(decoded.Data) == 'table' and decoded.Data or {}
+		local count = countFlags(data)
+		if count <= 0 then
+			vape:CreateNotification('Pistonware', 'That FFlags export has no flags in it.', 10, 'alert')
+			return
+		end
+		local name = sanitizeName(decoded.Name) or 'imported'
+		local existed = fflags:GetValue(name) ~= nil
+		ensureFolder(FFLAG_FOLDER)
+		local ok, err = writeJson(fflagPath(name), data)
+		if not ok then
+			vape:CreateNotification('Pistonware', 'Import failed, '..tostring(err), 10, 'alert')
+			return
+		end
+		-- On a name that IS listed, ChangeValue is the delete half of the list's toggle.
+		if not existed then
+			fflags:ChangeValue(name)
+		end
+		if profileimportbox then
+			profileimportbox:SetValue('')
+		end
+		local label = '<font color="'..ui.hex(theme.Accent())..'">'..name..'</font>'
+		if name == selectedFFlag then
+			applyFFlags()
+			vape:CreateNotification('Pistonware', 'Replaced the FFlags profile '..label..' with the '..count..' flag'..(count == 1 and '' or 's')..' you pasted.', 10)
+			return
+		end
+		vape:CreateNotification('Pistonware', (existed and 'Replaced' or 'Imported')..' the FFlags profile '..label..' ('..count..' flag'..(count == 1 and '' or 's')..'). Click it in the FFlags tab to apply it.', 10)
 	end
 
 	local fflagimportbox
@@ -4801,6 +5948,10 @@ function build.lists()
 		other fast-flag tool hands out, and it is what a user pasting from one of them will have.
 		The envelope's name is deliberately ignored now -- where the flags go is the row you have
 		selected, not something the sender gets to decide. ]]
+		if decoded.Pistonware == 'profile' then
+			vape:CreateNotification('Pistonware', 'That is a profile export, not FFlags. Paste it into Import profile in the Profiles tab.', 10, 'alert')
+			return
+		end
 		local payload = decoded
 		if decoded.Pistonware == 'fflags' and type(decoded.Data) == 'table' then
 			payload = decoded.Data
@@ -4840,13 +5991,16 @@ function build.lists()
 			fflagimportbox:SetValue('')
 		end
 
-		local total, failed, verified, verifiable = applyFFlags(true)
-		vape:CreateNotification('Pistonware',
-			'Added '..added..' flag'..(added == 1 and '' or 's')..
-			(changed > 0 and ' and updated '..changed or '')..
-			' in <font color="'..ui.hex(theme.Accent())..'">'..target..'</font> -- applied '..(total - failed)..' of '..total..
-			applySuffix(total, failed, verified, verifiable), 10,
-			(verifiable and verified <= 0) and 'alert' or nil)
+		--[[ The apply goes a frame at a time, so this one-line report waits for its counts. It is
+		handed the merged set, rather than reading back the file just written. ]]
+		applyFFlags(true, function(result)
+			vape:CreateNotification('Pistonware',
+				'Added '..added..' flag'..(added == 1 and '' or 's')..
+				(changed > 0 and ' and updated '..changed or '')..
+				' in <font color="'..ui.hex(theme.Accent())..'">'..target..'</font> -- applied '..(result.Total - result.Skipped - result.Failed)..' of '..result.Total..
+				resultSuffix(result), 10,
+				(result.Verifiable and result.Verified <= 0) and 'alert' or nil)
+		end, flags)
 	end
 
 	--[[ In the list rather than behind the gear, and directly under the rows: what a paste does
@@ -4857,6 +6011,8 @@ function build.lists()
 		Darker = true,
 		LayoutOrder = 1001,
 		Placeholder = 'Paste flags to add',
+		-- Pasted, added and emptied: never saved or restored (Transient, components.TextBox).
+		Transient = true,
 		Function = function(enter)
 			if enter then
 				importFFlags()
@@ -4900,6 +6056,8 @@ function build.lists()
 				vape:CreateNotification('Pistonware', 'Could not clear '..target..', '..tostring(err), 10, 'alert')
 				return
 			end
+			-- An apply still going stops at its next frame, rather than writing the set just cleared.
+			applyFFlags(true, nil, {})
 
 			if emptied <= 0 then
 				vape:CreateNotification('Pistonware', '<font color="'..ui.hex(theme.Accent())..'">'..target..'</font> was already empty.', 5)
@@ -4915,6 +6073,50 @@ function build.lists()
 		end,
 		Tooltip = 'Removes every flag from the selected profile, keeping the profile itself'
 	})
+
+	--[[ The way back for flags the crash guard quarantined when Roblox closed mid-apply for some
+	other reason -- closed by hand, or a crash of its own -- and the only one on a phone, where
+	quarantine.json is out of reach. ]]
+	fflags.QuarantineButton = fflags.Inline:CreateButton({
+		Name = 'Clear FFlag quarantine',
+		Darker = true,
+		LayoutOrder = 1005,
+		Function = function()
+			local names = {}
+			for name in readQuarantine() do
+				table.insert(names, name)
+			end
+			if #names <= 0 then
+				fflags.ShowQuarantine(false)
+				vape:CreateNotification('Pistonware', 'No flags are quarantined.', 5)
+				return
+			end
+			table.sort(names)
+			ensureFolder(FFLAG_FOLDER)
+			local ok, err = writeJson(fflagRun.Quarantine, {})
+			if not ok then
+				vape:CreateNotification('Pistonware', 'Could not clear '..fflagRun.Quarantine..', '..tostring(err), 10, 'alert')
+				return
+			end
+			fflags.ShowQuarantine(false)
+			vape:CreateNotification('Pistonware', 'Took '..#names..' flag'..(#names == 1 and '' or 's')..' out of quarantine: '..someNames(names, 8)..'. They go in again the next time a set holding them is applied.', 10)
+		end,
+		Tooltip = 'Lets flags held back after Roblox closed mid-apply go in again'
+	})
+
+	--[[ The button shows only while something is quarantined (owner, 2026-10-21). Hidden from the
+	start, so nothing is read at boot; quarantine.json is read when the FFlags list opens (OnExpand),
+	and the button is shown or hidden again whenever the quarantine changes. ]]
+	function fflags.ShowQuarantine(shown)
+		if shown == nil then
+			shown = next(readQuarantine()) ~= nil
+		end
+		local button = fflags.QuarantineButton
+		if button and button.Object then
+			button.Object.Visible = shown
+		end
+	end
+	fflags.ShowQuarantine(false)
 
 	
 	--[[
@@ -4986,12 +6188,10 @@ function build.moveHud(pane)
 	end
 	layout.StopMovingHud = stop
 	done.MouseButton1Click:Connect(stop)
-	-- Closed some other way (Unload, a module's hold gesture): the window is back for the next open.
-	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
-		if not clickgui.Visible then
-			stop()
-		end
-	end))
+	--[[ Closed some other way (Unload, a module's hold gesture): the window is back for the next open.
+	A shut hook, run by the menu's deferred Visible watcher before the dim goes (layout.MenuShown),
+	never inside the property change. ]]
+	ui.whenShut(stop)
 
 	pane:CreateButton({
 		Name = 'Move HUD',
@@ -5544,6 +6744,33 @@ function build.settings()
 		end
 		vape.GUIBind.Object.Visible = false
 	end
+
+	--[[ Slinky's Layout section: single-line cards, and a third column on a wide screen. GUI settings,
+	saved in gui.txt with the rest of the Main pane, so every profile shares them. ]]
+	local layoutPane = vape.Categories.Main.Settings:CreateSettingsPane({Name = 'Layout'})
+	layoutPane:CreateToggle({
+		Name = 'Compact',
+		Default = false,
+		Function = function(enabled)
+			layout.Compact = enabled
+			for view in layout.CardViews do
+				pcall(view.ApplyLayout, view)
+			end
+		end,
+		Tooltip = 'One line per card: the + beside the name and no description.'
+	})
+	layoutPane:CreateToggle({
+		Name = 'Wide',
+		Default = false,
+		Function = function(enabled)
+			layout.Wide = enabled
+			local main = vape.Categories.Main
+			if main and main.Resize then
+				main.Resize()
+			end
+		end,
+		Tooltip = 'Three columns of cards when the screen is wide enough.'
+	})
 end
 
 --[[
@@ -5646,10 +6873,10 @@ function build.keyFooter()
 		TextSize = 14,
 		ZIndex = 2
 	}, corner)
-	discord.MouseEnter:Connect(function()
+	-- Lit under the pointer, never on a touch screen (ui.hover).
+	ui.hover(discord, function()
 		discord.TextColor3 = LINE
-	end)
-	discord.MouseLeave:Connect(function()
+	end, function()
 		discord.TextColor3 = GREY
 	end)
 
@@ -5821,7 +7048,9 @@ function build.modOverlay()
 	local CustomTextColor
 	local CustomTextColorSlider
 	local Labels = {}
-	local info = TweenInfo.new(0.3, Enum.EasingStyle.Exponential)
+	--[[ Slinky's one curve for the list (OVERLAY_SPEC 0): a line comes and goes over 0.2 s of Sine
+	InOut. The line motion takes its time from here; the curve itself is ui.anim.sineInOut. ]]
+	local info = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
 
 	-- Options that default on run their callback while the rest are still being built.
 	local function refresh()
@@ -5844,6 +7073,8 @@ function build.modOverlay()
 		Fixed = true,
 		Function = refresh
 	})
+	-- On from the start, as the owner's profiles have it. A profile that saved it off loads it off.
+	TextGUI.Button:Toggle()
 
 	--[[ Slinky's card, in Slinky's order: Visible categories, Customization, Conditions. Everything
 	Pistonware adds on top keeps working under Extras at the end. ]]
@@ -5854,7 +7085,8 @@ function build.modOverlay()
 		TabFilters[tab] = TextGUI:CreateToggle({
 			Name = 'Show '..tab,
 			DisplayName = tab,
-			Default = true,
+			-- What you fight and move with; Kits, Utility and Visual start hidden.
+			Default = tab == 'Combat' or tab == 'Move',
 			Function = refresh
 		})
 	end
@@ -5866,7 +7098,8 @@ function build.modOverlay()
 		Min = 0.2,
 		Max = 2,
 		Decimal = 10,
-		Default = 0.8,
+		-- Slinky's 24 px text at 1080p. A phone keeps 0.8: its list would cover the screen at 1.2.
+		Default = isMobile() and 0.8 or 1.2,
 		Function = function(val)
 			Scale.Scale = val * ui.hudZoom()
 			refresh()
@@ -5876,21 +7109,21 @@ function build.modOverlay()
 		Name = 'Padding X',
 		Min = 0,
 		Max = 8,
-		Default = 6,
+		Default = 4,
 		Function = refresh
 	})
 	PaddingY = TextGUI:CreateSlider({
 		Name = 'Padding Y',
 		Min = 0,
 		Max = 5,
-		Default = 2,
+		Default = 1,
 		Function = refresh
 	})
 	Rounding = TextGUI:CreateSlider({
 		Name = 'Rounding',
 		Min = 0,
 		Max = 8,
-		Default = 3,
+		Default = 5,
 		Suffix = 'px',
 		Function = refresh,
 		Tooltip = '0 turns the rounding off'
@@ -5921,8 +7154,9 @@ function build.modOverlay()
 		Function = movedList,
 		Tooltip = 'How far down from the top of the screen the list sits'
 	})
-	-- The text colour, starting on the accent. Changing it by hand switches the list from following
-	-- the accent to this colour; a profile loading its saved value does not.
+	-- The text colour, starting on the accent's values, which Color Mode's default (Custom color) keeps
+	-- the list on. Changing it by hand while the list follows the accent switches it to this colour; a
+	-- profile loading its saved value does not.
 	ColorSlider = TextGUI:CreateColorSlider({
 		Name = 'Text GUI color',
 		DisplayName = 'Text color',
@@ -5938,10 +7172,10 @@ function build.modOverlay()
 	})
 	DetailsColor = TextGUI:CreateColorSlider({
 		Name = 'Details color',
-		-- Slinky's cool grey, (157, 155, 162).
-		DefaultHue = 0.7143,
-		DefaultSat = 0.0432,
-		DefaultValue = 0.6353,
+		-- A light neutral grey, value 0.7355 (no saturation, so the accent's hue under it shows nothing).
+		DefaultHue = 0.0556,
+		DefaultSat = 0,
+		DefaultValue = 0.7355,
 		Function = refresh
 	})
 	Lowercase = TextGUI:CreateToggle({
@@ -5974,9 +7208,10 @@ function build.modOverlay()
 		Default = 'Inter',
 		Function = refresh
 	})
+	-- The first entry is the default: the Text color above, which starts on the accent's values.
 	ColorMode = TextGUI:CreateDropdown({
 		Name = 'Color Mode',
-		List = {'Match GUI color', 'Custom color'},
+		List = {'Custom color', 'Match GUI color'},
 		Function = refresh,
 		Tooltip = 'Follow the accent, or keep the Text color above'
 	})
@@ -5997,7 +7232,7 @@ function build.modOverlay()
 		Name = 'Transparency',
 		Min = 0,
 		Max = 1,
-		Default = 0.28,
+		Default = 0.5,
 		Decimal = 10,
 		Function = refresh,
 		Darker = true,
@@ -6030,11 +7265,13 @@ function build.modOverlay()
 	})
 	Animations = TextGUI:CreateToggle({
 		Name = 'Animations',
+		Default = true,
 		Tooltip = 'Slides lines in and out',
 		Function = refresh
 	})
 	Watermark = TextGUI:CreateToggle({
 		Name = 'Watermark',
+		Default = true,
 		Tooltip = 'Shows the Pistonware logo above the list',
 		Function = function(callback)
 			if WatermarkStyle then
@@ -6048,7 +7285,7 @@ function build.modOverlay()
 		List = {'Logo', 'Text'},
 		Function = refresh,
 		Darker = true,
-		Visible = false,
+		Visible = Watermark.Enabled,
 		Tooltip = 'Logo: the Pistonware piston.\nText: the Pistonware name.\nBoth follow Gradient and V4 Gradient.'
 	})
 	HideModules = TextGUI:CreateToggle({
@@ -6069,6 +7306,7 @@ function build.modOverlay()
 	})
 	HideRender = TextGUI:CreateToggle({
 		Name = 'Hide render',
+		Default = true,
 		Function = refresh,
 		Tooltip = 'Hides the modules that only change what you see'
 	})
@@ -6113,15 +7351,93 @@ function build.modOverlay()
 		Visible = false
 	})
 
+	--[[ The look the owner set by hand (profiles/blatant6872274481.txt) is the default, and it reaches a
+	profile saved before it, once. On its first load, each look option here that still holds a default
+	some earlier build shipped or was built with takes the new one -- Text size 0.8 or 1 -> 1.2 on a
+	monitor (a phone keeps its size), Padding X 6, 5 or 3 -> 4, Padding Y 2 -> 1, Rounding 3 -> 5,
+	Transparency 0.3 or 0.28 -> 0.5, Details color the cool grey or the 0.64, 0.6 or #9C9C9C grey ->
+	the light grey, Animations off -> on, and Render background off -> on where the old Vape Text GUI
+	saved the profile -- and anything changed by hand stays. What the list shows and how it is coloured
+	is never moved (the Show toggles, Hide render, Watermark, Lowercase, Shadow, Only bound modules,
+	Sort, the colours and Color Mode): those defaults are for new profiles only. The overlay's saved
+	table then carries DefaultsVersion 4 (3 and 2 were the earlier rules), and vape:Load has the profile
+	written through the normal save, so the upgrade never runs on it again: an old value picked later is
+	kept. ]]
+	do
+		local function near(value, target)
+			return type(value) == 'number' and math.abs(value - target) < 1e-3
+		end
+		local function upgrade(options)
+			local moved = false
+			-- Every old default of an option, then its new one. Text size is left alone on a phone.
+			for name, pair in {
+				Scale = {{0.8, 1}, 1.2},
+				['Padding X'] = {{6, 5, 3}, 4},
+				['Padding Y'] = {{2}, 1},
+				Rounding = {{3}, 5},
+				Transparency = {{0.3, 0.28}, 0.5}
+			} do
+				local saved = options[name]
+				if type(saved) == 'table' and not (name == 'Scale' and isMobile()) then
+					for _, old in pair[1] do
+						if near(saved.Value, old) then
+							saved.Value = pair[2]
+							moved = true
+							break
+						end
+					end
+				end
+			end
+			local details = options['Details color']
+			-- The cool grey, or a neutral 0.64, 0.6 or 0.6118 grey (no saturation, so its hue says nothing).
+			if type(details) == 'table' and not details.Rainbow and (details.Opacity == nil or near(details.Opacity, 1))
+				and ((near(details.Hue, 0.7143) and near(details.Sat, 0.0432) and near(details.Value, 0.6353))
+					or (near(details.Sat, 0) and (near(details.Value, 0.64) or near(details.Value, 0.6) or near(details.Value, 0.6118)))) then
+				details.Hue, details.Sat, details.Value = 0.0556, 0, 0.7355
+				moved = true
+			end
+			local animations = options.Animations
+			if type(animations) == 'table' and animations.Enabled == false then
+				animations.Enabled = true
+				moved = true
+			end
+			-- No backdrop was only ever a default in the old Vape Text GUI, whose profiles have no Padding X
+			-- or still carry its Arial; anywhere else it was picked.
+			local background = options['Render background']
+			if type(background) == 'table' and background.Enabled == false
+				and (options['Padding X'] == nil or (type(options.Font) == 'table' and options.Font.Value == 'Arial')) then
+				background.Enabled = true
+				moved = true
+			end
+			return moved
+		end
+
+		local loadOverlay, saveOverlay = TextGUI.Load, TextGUI.Save
+		function TextGUI:Load(data)
+			-- The saved table is this load's own copy, just read off disk: upgraded, then applied.
+			if type(data) == 'table' and type(data.Options) == 'table' and (tonumber(data.DefaultsVersion) or 1) < 4
+				and upgrade(data.Options) then
+				vape.UpgradeGeneration = vape.LoadGeneration
+			end
+			return loadOverlay(self, data)
+		end
+		function TextGUI:Save(data)
+			saveOverlay(self, data)
+			if type(data['Text GUI']) == 'table' then
+				data['Text GUI'].DefaultsVersion = 4
+			end
+		end
+	end
+
 	--[[ The overlay's objects. ]]
 	Scale = Instance.new('UIScale')
 	Scale.Parent = TextGUI.Children
 	--[[ The Text size, times the HUD's phone zoom, so the lines are still snapped through Scale alone.
 	Set here as well as by the slider: a profile that keeps the default never calls its Function, which
-	left the list drawn at 1 instead of 0.8. ]]
+	left the list drawn at 1 instead of its default. ]]
 	local function applyTextSize()
 		local option = TextGUI.Options.Scale
-		Scale.Scale = (option and option.Value or 0.8) * ui.hudZoom()
+		Scale.Scale = (option and option.Value or (isMobile() and 0.8 or 1.2)) * ui.hudZoom()
 	end
 	--[[ The list's corner: Position X in from the right edge of the screen and Position Y down from its
 	top. A phone's corner belongs to the screen's rounded edge, Roblox's top bar and the >_ button in
@@ -6152,7 +7468,8 @@ function build.modOverlay()
 			refresh()
 		end
 	end)
-	local Logo = ui.text(TextGUI.Children, {Text = 'Pistonware', Size = 24, Weight = 'Bold', Color = Color3.new(1, 1, 1), Props = {
+	-- The watermark is ours, not Slinky's: sized in Roblox's own units (TextSize).
+	local Logo = ui.text(TextGUI.Children, {Text = 'Pistonware', TextSize = 24, Weight = 'Bold', Color = Color3.new(1, 1, 1), Props = {
 		Name = 'Logo',
 		AutomaticSize = Enum.AutomaticSize.X,
 		Position = UDim2.new(1, -142, 0, 3),
@@ -6173,7 +7490,7 @@ function build.modOverlay()
 		return stroke
 	end
 	outlineText(Logo)
-	local LogoShadow = ui.text(TextGUI.Children, {Text = 'Pistonware', Size = 24, Weight = 'Bold', Color = Color3.new(), Props = {
+	local LogoShadow = ui.text(TextGUI.Children, {Text = 'Pistonware', TextSize = 24, Weight = 'Bold', Color = Color3.new(), Props = {
 		AutomaticSize = Enum.AutomaticSize.X,
 		Size = UDim2.fromOffset(0, 28),
 		TextTransparency = 0.65,
@@ -6209,7 +7526,7 @@ function build.modOverlay()
 	ascii.Image.Parent = ascii.Frame
 	ascii.Gradient = Instance.new('UIGradient')
 	ascii.Gradient.Parent = ascii.Image
-	ascii.Text = ui.text(ascii.Frame, {Text = 'Pistonware', Size = 24, Weight = 'Bold', Color = Color3.new(1, 1, 1), Props = {
+	ascii.Text = ui.text(ascii.Frame, {Text = 'Pistonware', TextSize = 24, Weight = 'Bold', Color = Color3.new(1, 1, 1), Props = {
 		AutomaticSize = Enum.AutomaticSize.X,
 		LayoutOrder = 2,
 		Size = UDim2.fromOffset(0, ascii.Size)
@@ -6244,26 +7561,9 @@ function build.modOverlay()
 	ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	ListLayout.Parent = LabelHolder
 
-	LabelCustom:GetPropertyChangedSignal('Position'):Connect(function()
-		LabelCustomShadow.Position = UDim2.new(
-			LabelCustom.Position.X.Scale,
-			LabelCustom.Position.X.Offset + 1,
-			0,
-			LabelCustom.Position.Y.Offset + 1
-		)
-	end)
-
-	LabelCustom:GetPropertyChangedSignal('FontFace'):Connect(function()
-		LabelCustomShadow.FontFace = LabelCustom.FontFace
-	end)
-
-	LabelCustom:GetPropertyChangedSignal('Text'):Connect(function()
-		LabelCustomShadow.Text = contentText(LabelCustom)
-	end)
-
-	LabelCustom:GetPropertyChangedSignal('Size'):Connect(function()
-		LabelCustomShadow.Size = LabelCustom.Size
-	end)
+	--[[ The custom text's shadow takes its text, face, size and place where the label is given them
+	(the redraw, rebuildTextGUI), not from the label's property signals: each of those wrote the
+	shadow inside the label's own change. ]]
 
 	--[[ A move can take the list to the other half of the screen, which flips its side. Layout runs
 	this inside the move, so it only asks for a redraw: that works the side out again at the end of
@@ -6286,8 +7586,8 @@ function build.modOverlay()
 	updated in place. The list used to be destroyed and rebuilt on every redraw -- each toggle and
 	every Killaura hand change -- which made and destroyed up to nine instances a line and measured
 	every name again. A redraw now measures only text that changed, reshapes only the lines whose
-	own or neighbouring width changed, and adds or removes only the lines that come or go. The look,
-	the order and the slide in and out are the same. ]]
+	own or neighbouring width changed, and adds or removes only the lines that come or go. A line
+	on its way out keeps its place until it has gone. ]]
 	local Lines = {}
 	--[[ Redraws are requests. Any number in a frame cost one, run after the callers' code and never
 	on their thread: a toggle, Killaura's frame or a profile load no longer waits on a text
@@ -6312,12 +7612,7 @@ function build.modOverlay()
 		end)
 	end
 
-	local function sameSize(a, b)
-		return a ~= nil and b ~= nil and a.X.Scale == b.X.Scale and a.X.Offset == b.X.Offset
-			and a.Y.Scale == b.Y.Scale and a.Y.Offset == b.Y.Offset
-	end
-
-	-- A line's background: the windows and fills shapePill (below) made for it.
+	-- A line's background: the fill shapePill (below) made for it.
 	local function clearShape(line)
 		for _, part in line.Parts do
 			part:Destroy()
@@ -6326,16 +7621,106 @@ function build.modOverlay()
 		table.clear(line.Fills)
 		line.LastTint = nil
 		line.ShapeKey = nil
+		-- A new fill has not been faded yet.
+		line.DrawnP = nil
 	end
 
 	local function removeLine(name)
 		local line = Lines[name]
 		if line then
-			tween:Cancel(line.Object)
 			line.Object:Destroy()
 			Lines[name] = nil
 		end
 	end
+
+	--[[ Slinky's line motion (OVERLAY_SPEC 1). Each line has one progress, U: 0 shown, 1 gone, run
+	linearly over the curve's 0.2 s and drawn through its Sine InOut as p. At p a line's row is cut to
+	(1 - p) of its height from the top, the rows under it close up in whole pixels, and its text and
+	backdrop slide toward the screen edge by p of the text's width and fade to 1 - p together. Nothing
+	scales and the width never changes. A line coming in plays the same thing backwards from where it
+	is, so one turned back on part way out turns round without a jump. Stepped by ui.anim as a HUD
+	entry: it runs with the menu shut, and only while a line is moving. ]]
+	local motion = {Duration = info.Time, ListHeight = 0, Px = 1, Right = true, Transparency = 0}
+
+	-- Draws every line at its progress, writing only what changed since it was last drawn.
+	function motion.layout()
+		local listHeight, right, transparency = motion.ListHeight, motion.Right, motion.Transparency
+		local y = 0
+		for _, line in Labels do
+			local p = ui.anim.sineInOut(line.U or 0)
+			-- The rows are stacked by the list layout, so a row's top is the sum of the heights above
+			-- it; each height is cut at the next row's top, in whole pixels.
+			local top = math.floor(y)
+			y += line.Full * (1 - p)
+			local h = math.floor(y) - top
+			local holder = line.Object
+			if holder.Visible ~= (h > 0) then
+				holder.Visible = h > 0
+			end
+			if h > 0 then
+				if line.DrawnH ~= h or line.DrawnFull ~= line.Full or line.DrawnShare ~= line.WidthShare then
+					line.DrawnH, line.DrawnFull, line.DrawnShare = h, line.Full, line.WidthShare
+					holder.Size = UDim2.new(line.WidthShare, listHeight > 0 and UDim.new(h / listHeight, 0) or UDim.new(0, math.floor(h / motion.Px + 0.5)))
+					-- Always a whole row tall: the cut hides the bottom of the row rather than squashing it.
+					line.Slide.Size = UDim2.new(1, 0, line.Full / h, 0)
+				end
+				local x = math.floor(line.TextPx * p)
+				if line.DrawnX ~= x or line.DrawnRight ~= right or line.DrawnWidth ~= line.WidthPx then
+					line.DrawnX, line.DrawnRight, line.DrawnWidth = x, right, line.WidthPx
+					local share = x / math.max(line.WidthPx, 1)
+					line.Slide.Position = UDim2.fromScale(right and share or -share, 0)
+				end
+			end
+			-- One alpha for the text and its backdrop, as Slinky fades them.
+			if line.DrawnP ~= p or line.DrawnT ~= transparency then
+				line.DrawnP, line.DrawnT = p, transparency
+				line.Text.TextTransparency = p
+				line.Shadow.TextTransparency = 0.5 + 0.5 * p
+				for _, fill in line.Fills do
+					fill.BackgroundTransparency = 1 - (1 - transparency) * (1 - p)
+				end
+			end
+		end
+	end
+
+	--[[ Moves every moving line on by dt (math.huge: straight to its end), then draws the list. A line
+	that has finished going leaves the list here, and the list is redrawn round the gap: the corner
+	above it and the colours below. True once nothing moves. ]]
+	function motion.advance(dt)
+		local moving, gone = false, false
+		for index = #Labels, 1, -1 do
+			local line = Labels[index]
+			if line.Dir ~= 0 then
+				line.U = math.clamp(line.U + line.Dir * dt / motion.Duration, 0, 1)
+				if line.U == (line.Dir > 0 and 1 or 0) then
+					line.Dir = 0
+				else
+					moving = true
+				end
+			end
+			if line.Dir == 0 and line.U == 1 and not line.Enabled then
+				table.remove(Labels, index)
+				removeLine(line.Name)
+				gone = true
+			end
+		end
+		motion.layout()
+		if gone then
+			vape:UpdateTextGUI()
+		end
+		return not moving
+	end
+
+	-- The overlay switched off mid-motion: every line goes straight to its end.
+	motion.Entry = {
+		Hud = true,
+		Step = function(dt)
+			return motion.advance(TextGUI.Button.Enabled and dt or math.huge)
+		end,
+		Finish = function()
+			motion.advance(math.huge)
+		end
+	}
 
 	function rebuildTextGUI(afterload)
 		if not afterload and not vape.Loaded then return end
@@ -6348,18 +7733,34 @@ function build.modOverlay()
 
 			local asciiMark = Watermark.Enabled and WatermarkStyle.Value == 'Logo'
 			Logo.Visible = Watermark.Enabled and not asciiMark
-			Logo.Position = isRight and UDim2.new(1 / Scale.Scale, -(Logo.AbsoluteSize.X / math.max(scale.Scale * Scale.Scale, 0.05)) - 4, 0, 4) or UDim2.fromOffset(4, 4)
-			Logo.TextXAlignment = isRight and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left
 			ascii.Frame.Visible = asciiMark
-			ascii.Frame.Position = isRight and UDim2.new(1 / Scale.Scale, -(ascii.Frame.AbsoluteSize.X / math.max(scale.Scale * Scale.Scale, 0.05)) - 4, 0, 4) or UDim2.fromOffset(4, 4)
-			-- Height the list starts below: the text logo's line, or the whole piston.
-			local markHeight = Logo.Visible and 32 or asciiMark and ascii.Height + ascii.Padding * 2 + 8 or 0
+			--[[ The watermark hangs from its outer top corner, in from the list's edge by the list's own
+			Padding X. A self-sizing box keeps its anchor as it resizes, so a face that arrives after this
+			redraw (fonts.settle lays the Bold name out again), its outline or a Text size change grows it
+			inward, never off the screen. It used to be placed from its own AbsoluteSize, read once here:
+			sized in the fallback face before the Bold arrived, it then grew past the screen's edge.
+			Nothing here reads a size back. ]]
+			--[[ Units from the top to the mark, and from the mark to the list: the name's line box has the
+			face's own space under its glyphs, the piston fills its box to the edge, so it gets less. ]]
+			local MARK_TOP, MARK_GAP, PISTON_GAP = 4, 8, 3
+			local markAnchor = Vector2.new(isRight and 1 or 0, 0)
+			local markPosition = UDim2.new(isRight and UDim.new(1 / Scale.Scale, -PaddingX.Value) or UDim.new(0, PaddingX.Value), UDim.new(0, MARK_TOP))
+			Logo.AnchorPoint, Logo.Position = markAnchor, markPosition
+			Logo.TextXAlignment = isRight and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left
+			ascii.Frame.AnchorPoint, ascii.Frame.Position = markAnchor, markPosition
+			LogoShadow.AnchorPoint, LogoShadow.TextXAlignment = markAnchor, Logo.TextXAlignment
+			LogoShadow.Position = markPosition + UDim2.fromOffset(1, 1)
+			-- The list starts below the mark and a gap: the name's line, or the whole piston.
+			local markHeight = Logo.Visible and MARK_TOP + Logo.Size.Y.Offset + MARK_GAP
+				or asciiMark and MARK_TOP + ascii.Height + ascii.Padding * 2 + PISTON_GAP or 0
 			LogoShadow.Visible = Logo.Visible and Shadow.Enabled
-			LogoShadow.Position = Logo.Position + UDim2.fromOffset(1, 1)
 			LabelCustom.Text = CustomTextBox.Value
 			LabelCustom.FontFace = CustomTextFont.Value
 			LabelCustom.Visible = LabelCustom.Text ~= '' and CustomText.Enabled
 			LabelCustomShadow.Visible = LabelCustom.Visible and Shadow.Enabled
+			-- The shadow beside the label, here rather than from the label's property signals.
+			LabelCustomShadow.Text = contentText(LabelCustom)
+			LabelCustomShadow.FontFace = LabelCustom.FontFace
 			ListLayout.HorizontalAlignment = isRight and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left
 			LabelHolder.Size = UDim2.fromScale(1 / Scale.Scale, 1)
 
@@ -6367,7 +7768,9 @@ function build.modOverlay()
 				local size = getfontbounds(contentText(LabelCustom), LabelCustom.TextSize, LabelCustom.FontFace)
 				if textGUIGeneration ~= generation then return end
 				LabelCustom.Size = UDim2.fromOffset(size.X, size.Y)
-				LabelCustom.Position = UDim2.new(isRight and 1 / Scale.Scale or 0, isRight and -size.X or 0, 0, (markHeight > 0 and markHeight + 4 or 8))
+				LabelCustom.Position = UDim2.new(isRight and 1 / Scale.Scale or 0, isRight and -size.X or 0, 0, (markHeight > 0 and markHeight or 8))
+				LabelCustomShadow.Size = LabelCustom.Size
+				LabelCustomShadow.Position = UDim2.new(LabelCustom.Position.X.Scale, LabelCustom.Position.X.Offset + 1, 0, LabelCustom.Position.Y.Offset + 1)
 			end
 
 			--[[ Every line, and the list's top, lands on whole screen pixels. Offsets cannot do it:
@@ -6379,6 +7782,9 @@ function build.modOverlay()
 			The list starts under the watermark and the custom text. ]]
 			local px = math.max(scale.Scale, 0.05) * math.max(Scale.Scale, 0.05)
 			local listHeight = TextGUI.Children.Size.Y.Offset * px
+			-- The size the lines' text is drawn and measured at, in screen pixels: its TextSize times
+			-- the scale, floored, as Roblox does (24 at Text size 1.2 is 28.8, which draws at 28).
+			local drawnSize = math.max(math.floor(theme.em(theme.OverlayEm) * px + 1e-4), 1)
 			--[[ Widths the same way: a share of the holder's width on screen (the overlay's width at
 			the menu's scale; the holder undoes the Text size), so each line's free end lands on a
 			whole pixel too. In units it fell part way through one, and the stair edge drew soft. ]]
@@ -6386,9 +7792,9 @@ function build.modOverlay()
 			local function pixelWidth(units)
 				local pixels = math.max(math.floor(units * px + 0.5), 1)
 				if listWidth > 0 then
-					return UDim.new(pixels / listWidth, 0)
+					return UDim.new(pixels / listWidth, 0), pixels
 				end
-				return UDim.new(0, units)
+				return UDim.new(0, units), pixels
 			end
 			local function pixelHeight(units)
 				local pixels = math.max(math.floor(units * px + 0.5), 1)
@@ -6404,8 +7810,22 @@ function build.modOverlay()
 			LabelHolder.Position = top > 0 and UDim2.new(UDim.new(0, 0), (pixelHeight(top))) or UDim2.new()
 
 			local padX, padY = PaddingX.Value, PaddingY.Value
+			--[[ A line is 1 em plus the padding: Slinky's list at 1080p puts its lines 26 px apart for 24 px
+			text, which is Text size 1.2 with Padding Y 1 here. The em, not the TextSize, which is the
+			face's line height (theme.em). The text is placed by its baseline: the row's middle plus 0.273
+			em (half Inter's x-height, 1118 of 2048), so the x-height band sits centred in the row -- 20 px
+			down a 26 px row at Slinky's 24 px em and 13 down an 18 px row at 16, both where Slinky puts
+			it. A label hangs from its top and Roblox draws the baseline 0.8006 of the drawn size below
+			that (Inter's ascender over its line height, 1984 of 2478), so the label goes to the nearest
+			whole unit to it. One unit more than the padding on the screen-edge side: Slinky's text sits
+			a little further from the screen's edge (4.3 px at 1080p) than from its backdrop's open end. ]]
+			local _, boxHeight, boxPixels = pixelHeight(theme.OverlayEm + padY * 2)
+			local baselinePx = math.floor(boxPixels / 2 + 0.273 * theme.OverlayEm * px + 0.5)
+			local textX = isRight and padX or padX + 1
+			local textY = math.floor((baselinePx - 0.8006 * drawnSize) / px + 0.5)
 			local detailsHex = hexOf(Color3.fromHSV(DetailsColor.Hue, DetailsColor.Sat, DetailsColor.Value))
 			local fontFace = FontOption.Value
+			local animate = Animations.Enabled
 			local listed = {}
 			table.clear(Labels)
 			for name, module in orderedModules(vape.ModuleOrder) do
@@ -6438,10 +7858,11 @@ function build.modOverlay()
 				end
 
 				local line = Lines[name]
-				-- On last time: kept, or slides out if it is off now. Off last time (or never listed)
-				-- and off now: not listed, and a line left from its slide out goes below.
+				-- On last time: kept, or on its way out if it is off now. Off and still on its way out:
+				-- kept until it has gone. Off and gone, or never listed: not listed, and removed below.
 				local wasShown = line ~= nil and line.Enabled
-				if module.Enabled or wasShown then
+				local leaving = line ~= nil and not module.Enabled and animate and (wasShown or line.U < 1)
+				if module.Enabled or leaving then
 					--[[ ExtraText belongs to the game script, not to this file, and it is called
 					here for every enabled module on every redraw. A module whose state is not
 					ready yet would otherwise throw and abort the whole rebuild. ]]
@@ -6457,7 +7878,9 @@ function build.modOverlay()
 						shown = shown:lower()
 						extra = extra:lower()
 					end
-					local text = escape(shown)..(extra ~= '' and " <font color='"..detailsHex.."'>"..escape(extra)..'</font>' or '')
+					-- A four-per-em space before the detail: a quarter em, Slinky's 4 px gap at its 16 px text
+					-- (measured in game at TextSize 19: a thin space drew 3, this 4).
+					local text = escape(shown)..(extra ~= '' and "\u{2005}<font color='"..detailsHex.."'>"..escape(extra)..'</font>' or '')
 
 					if not line then
 						local holder = Instance.new('Frame')
@@ -6465,99 +7888,103 @@ function build.modOverlay()
 						holder.ClipsDescendants = true
 						holder.Name = name
 						holder.Size = UDim2.fromOffset()
+						holder.Visible = false
 						holder.Parent = LabelHolder
+						--[[ What the row draws rides on this: a whole row tall however far the row is cut,
+						and moved toward the screen edge as the line comes and goes. ]]
+						local slide = Instance.new('Frame')
+						slide.BackgroundTransparency = 1
+						slide.BorderSizePixel = 0
+						slide.Name = 'Slide'
+						slide.Size = UDim2.fromScale(1, 1)
+						slide.Parent = holder
 
-						-- The background is shaped once the list is sorted (shapePill, below): its corners depend on
-						-- the lines above and below. The text draws over it, and over its shadow, which is
-						-- parented first so it draws underneath; it is hidden while Shadow is off.
+						-- The background is shaped once the list is sorted (shapePill, below): its corner depends on
+						-- the line below. The text draws over it, and over its shadow, which is parented first
+						-- so it draws underneath; it is hidden while Shadow is off.
 						local label = Instance.new('TextLabel')
 						label.BackgroundTransparency = 1
 						label.BorderSizePixel = 0
 						label.FontFace = fontFace
 						label.ZIndex = 2
 						label.RichText = true
-						label.TextSize = 20
+						label.TextSize = theme.em(theme.OverlayEm)
 						label.TextXAlignment = Enum.TextXAlignment.Left
+						-- Hung from its top, so the baseline is placed exactly (below).
+						label.TextYAlignment = Enum.TextYAlignment.Top
 						local shadowlabel = label:Clone()
 						shadowlabel.TextColor3 = Color3.new()
 						shadowlabel.TextTransparency = 0.5
 						shadowlabel.Visible = false
-						shadowlabel.Parent = holder
-						label.Parent = holder
-						line = {Object = holder, Text = label, Shadow = shadowlabel, Fills = {}, Parts = {}, Enabled = false}
+						shadowlabel.Parent = slide
+						label.Parent = slide
+						-- Gone to start with: one coming in comes from there.
+						line = {Name = name, Object = holder, Slide = slide, Text = label, Shadow = shadowlabel, Fills = {}, Parts = {}, Enabled = false, U = 1, Dir = 0}
 						Lines[name] = line
 					end
 					listed[name] = true
 					local label, shadowlabel = line.Text, line.Shadow
 
-					-- Measured again only when the text or font changed. Recorded once measured, so a
-					-- rebuild that takes over during the measure measures it itself.
-					if line.Markup ~= text or line.Font ~= fontFace then
+					--[[ Measured at the size it is drawn at (drawnSize), in whole screen pixels, and taken back
+					to the list's units: measured at the TextSize and scaled, a row came out 1-2 px off its
+					text. Measured again only when the text, the font, that size or the scale changed: the
+					units are the pixels over the scale, so a rescale too small to change the drawn size
+					still changes them (the measure itself is then the cache's). Recorded once measured, so
+					a rebuild that takes over during the measure measures it itself. ]]
+					if line.Markup ~= text or line.Font ~= fontFace or line.DrawnSize ~= drawnSize or line.Px ~= px then
 						label.FontFace = fontFace
 						label.Text = text
-						local size = getfontbounds(contentText(label), label.TextSize, label.FontFace)
+						local bounds = getfontbounds(contentText(label), drawnSize, label.FontFace)
 						if textGUIGeneration ~= generation then return end
-						label.Size = UDim2.fromOffset(size.X, size.Y)
+						local measured = Vector2.new(bounds.X / px, bounds.Y / px)
+						label.Size = UDim2.fromOffset(math.ceil(measured.X), math.ceil(measured.Y))
 						shadowlabel.FontFace = fontFace
 						shadowlabel.Text = contentText(label)
 						shadowlabel.Size = label.Size
-						line.Markup, line.Font, line.Measure = text, fontFace, size
+						line.Markup, line.Font, line.DrawnSize, line.Px, line.Measure = text, fontFace, drawnSize, px, measured
+						line.TextPixels = math.floor(bounds.X + 0.5)
 					end
 					local size = line.Measure
 
-					--[[ A line is 1 em plus the padding: Slinky's list at 1080p puts its lines 19 px apart
-					for 16 px text, which is Text size 0.8 with Padding Y 2 here. The glyphs sit at 0.59
-					of the label's height, so the label is placed to centre them in the box. ]]
-					local boxScale, boxHeight, boxPixels = pixelHeight(label.TextSize + padY * 2)
-					local textY = math.floor(boxHeight / 2 - size.Y * 0.587 + 0.5)
-					if line.PadX ~= padX or line.TextY ~= textY then
-						line.PadX, line.TextY = padX, textY
-						label.Position = UDim2.fromOffset(padX, textY)
-						shadowlabel.Position = UDim2.fromOffset(padX + 1, textY + 1)
+					if line.PadX ~= textX or line.TextY ~= textY then
+						line.PadX, line.TextY = textX, textY
+						label.Position = UDim2.fromOffset(textX, textY)
+						shadowlabel.Position = UDim2.fromOffset(textX + 1, textY + 1)
 					end
 					if shadowlabel.Visible ~= Shadow.Enabled then
 						shadowlabel.Visible = Shadow.Enabled
 					end
 
-					local holder = line.Object
-					local tweenSize = UDim2.new(pixelWidth(size.X + padX * 2), boxScale)
-					if Animations.Enabled then
-						if not wasShown then
-							-- Coming in (new, or back while still sliding out): from nothing, as a new line did.
-							tween:Cancel(holder)
-							holder.Size = UDim2.fromOffset()
-							tween:Tween(holder, info, {
-								Size = tweenSize
-							})
-						elseif module.Enabled then
-							-- Staying: a new width applies at once; a slide in still running carries on.
-							if not sameSize(line.Target, tweenSize) then
-								tween:Cancel(holder)
-								holder.Size = tweenSize
+					-- The row in screen pixels: its height, its width (which never changes as it moves; the
+					-- extra unit is the screen-edge side's, above) and the text's width, which is how far it
+					-- slides.
+					line.Full = boxPixels
+					line.WidthShare, line.WidthPx = pixelWidth(size.X + padX * 2 + 1)
+					line.TextPx = line.TextPixels
+					if animate then
+						if module.Enabled then
+							-- Coming in: a new line from gone, or one turned back on part way out from where
+							-- it is. Staying: as it is, a way in still running carries on.
+							if not wasShown then
+								line.Dir = line.U > 0 and -1 or 0
 							end
 						else
-							-- Leaving: from where it is to nothing; it goes with the next redraw.
-							tween:Tween(holder, info, {
-								Size = UDim2.fromOffset()
-							})
+							-- Going, or still going: on toward gone from where it is.
+							line.Dir = line.U < 1 and 1 or 0
 						end
 					else
-						tween:Cancel(holder)
-						holder.Size = module.Enabled and tweenSize or UDim2.fromOffset()
+						line.U, line.Dir = module.Enabled and 0 or 1, 0
 					end
 
 					line.Enabled = module.Enabled
-					line.Target = tweenSize
 					line.Width = size.X
 					line.Height = boxHeight
-					line.Pixels = boxPixels
 					line.Display = shown
-					line.Size = module.Enabled and tweenSize or UDim2.fromOffset()
 					table.insert(Labels, line)
 				end
 			end
 
-			-- Lines whose module left the list, or that finished sliding out, go now.
+			-- Lines whose module left the list, or that finished going, go now.
 			for name in Lines do
 				if not listed[name] then
 					removeLine(name)
@@ -6581,81 +8008,64 @@ function build.modOverlay()
 				end
 			end
 
-			--[[ Rounded the way Slinky rounds its list: only the corners that stick out -- a line's top
-			corner when the line above is narrower or there is none, its bottom corner when the line
-			below is -- so where the stair steps in, the two lines meet square and the outline runs
-			smooth. A corner rounds no further than its step is wide: two names a few pixels apart
-			used to get the full radius, which curved in past the line under it and bit a notch out of
-			the stair. Roblox rounds all four corners of a frame or none, so each background is two
-			halves, each a clipped window onto a frame the height of the whole line that is rounded or
-			not; the split falls on a whole pixel, so the halves leave no seam. The side against the
-			screen edge is never rounded. Rounding is in Slinky's units, 1.6 pixels each. A line is
+			--[[ Rounded the way Slinky rounds its list (OVERLAY_SPEC 2): only a line's bottom corner on
+			the list's open side, as far as the line sticks out past the one under it and no further than
+			the radius, the last line all the way; every top corner, and the side against the screen
+			edge, stays square. Lines on their way in or out count as neighbours. One fill per line does
+			it: a frame overhanging the row's top and its screen-edge side by its radius, so the row's
+			own clip squares those corners off. Rounding is in Slinky's units, 1.6 pixels each. A line is
 			reshaped only when something its shape is made from changed. ]]
 			local radius = math.floor(Rounding.Value * 1.6 + 0.5)
 			local transparency = BackgroundTransparency.Value
 			local tinted = BackgroundTint.Enabled
-			-- How far a corner may round against the line beside it: all the way at the list's ends.
-			local function stepRadius(label, other)
-				if not other then return radius end
-				return math.clamp(math.floor(label.Width - other.Width), 0, radius)
-			end
-			local function shapePill(label, topRadius, bottomRadius)
-				local pixels = math.max(label.Pixels or 1, 1)
-				local split = pixels > 1 and math.floor(pixels / 2) / pixels or 1
-				local most = math.floor((label.Height or 0) / 2)
+			local function shapePill(label, below)
+				-- Slinky's r = floor(step) in pixels, capped; offsets are whole units, so the nearest unit to it.
+				local corner = radius
+				if below then
+					local step = math.floor((label.WidthPx or label.Width * px) - (below.WidthPx or below.Width * px))
+					corner = math.clamp(math.floor(step / px + 0.5), 0, radius)
+				end
+				corner = math.min(corner, math.floor((label.Height or 0) / 2))
 				-- The tint is in the key: a fill that was tinted goes back to the plain colour by being made again.
-				local key = table.concat({topRadius, bottomRadius, most, pixels, isRight and 1 or 0, transparency, tinted and 1 or 0}, ':')
+				local key = table.concat({corner, isRight and 1 or 0, tinted and 1 or 0}, ':')
 				if label.ShapeKey == key then return end
 				clearShape(label)
 				label.ShapeKey = key
-				for half = 1, split < 1 and 2 or 1 do
-					local share = half == 1 and split or 1 - split
-					-- One frame for the whole line takes the larger of the two.
-					local corner = math.min(split < 1 and (half == 1 and topRadius or bottomRadius) or math.max(topRadius, bottomRadius), most)
-					local window = Instance.new('Frame')
-					window.BackgroundTransparency = 1
-					window.BorderSizePixel = 0
-					window.ClipsDescendants = true
-					window.Position = UDim2.fromScale(0, half == 1 and 0 or split)
-					window.Size = UDim2.fromScale(1, share)
-					window.ZIndex = 1
-					window.Parent = label.Object
-					local fill = Instance.new('Frame')
-					fill.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
-					fill.BackgroundTransparency = transparency
-					fill.BorderSizePixel = 0
-					fill.Position = UDim2.new(0, isRight and 0 or -corner, half == 1 and 0 or 1 - 1 / share, 0)
-					fill.Size = UDim2.new(1, corner, 1 / share, 0)
-					fill.ZIndex = 1
-					fill.Parent = window
-					if corner > 0 then
-						local round = Instance.new('UICorner')
-						round.CornerRadius = UDim.new(0, corner)
-						round.Parent = fill
-					end
-					table.insert(label.Parts, window)
-					table.insert(label.Fills, fill)
+				local fill = Instance.new('Frame')
+				fill.BackgroundColor3 = Color3.new()
+				fill.BackgroundTransparency = transparency
+				fill.BorderSizePixel = 0
+				fill.Position = UDim2.new(0, isRight and 0 or -corner, 0, -corner)
+				fill.Size = UDim2.new(1, corner, 1, corner)
+				fill.ZIndex = 1
+				fill.Parent = label.Slide
+				if corner > 0 then
+					local round = Instance.new('UICorner')
+					round.CornerRadius = UDim.new(0, corner)
+					round.Parent = fill
 				end
+				table.insert(label.Parts, fill)
+				table.insert(label.Fills, fill)
 			end
 			if Background.Enabled then
-				local showing = {}
-				for _, label in Labels do
-					if label.Enabled then
-						table.insert(showing, label)
-					else
-						-- On its way out; it closes to nothing either way.
-						shapePill(label, radius, radius)
-					end
-				end
-				for index, label in showing do
-					local above, below = showing[index - 1], showing[index + 1]
-					shapePill(label, stepRadius(label, above), stepRadius(label, below))
+				for index, label in Labels do
+					shapePill(label, Labels[index + 1])
 				end
 			else
 				for _, label in Labels do
 					if label.ShapeKey then
 						clearShape(label)
 					end
+				end
+			end
+
+			-- Drawn at once, then moved on from the next frame while any line is coming or going.
+			motion.ListHeight, motion.Px, motion.Right, motion.Transparency = listHeight, px, isRight, transparency
+			motion.layout()
+			for _, line in Labels do
+				if line.Dir ~= 0 then
+					ui.anim.play(Lines, motion.Entry)
+					break
 				end
 			end
 		end
@@ -6786,7 +8196,7 @@ function build.targetInfo()
 
 	TargetInfoOverlay = vape:CreateOverlay({
 		Name = 'Target Info',
-		Tooltip = 'Shows who you are fighting and how much health they have left.',
+		Tooltip = 'Shows who you are fighting and their health.',
 		CategorySize = WIDTH,
 		Function = function(callback)
 			if callback then
@@ -6829,13 +8239,14 @@ function build.targetInfo()
 	local Ring = ui.stroke(Headshot, CARD.Green, 2, 0)
 
 	local left = PAD + AVATAR + 10
-	local Title = ui.text(Holder, {Text = 'No target', Size = 15, Weight = 'SemiBold', Color = CARD.Name, Props = {
+	-- Our own card, not Slinky's: its text is sized in Roblox's own units (TextSize).
+	local Title = ui.text(Holder, {Text = 'No target', TextSize = 15, Weight = 'SemiBold', Color = CARD.Name, Props = {
 		Name = 'Name',
 		Position = UDim2.fromOffset(left, 8),
 		Size = UDim2.new(1, -(left + PAD), 0, 20),
 		TextTruncate = Enum.TextTruncate.AtEnd
 	}})
-	local Distance = ui.text(Holder, {Text = '', Size = 13, Weight = 'Medium', Color = CARD.Muted, AlignX = Enum.TextXAlignment.Right, Props = {
+	local Distance = ui.text(Holder, {Text = '', TextSize = 13, Weight = 'Medium', Color = CARD.Muted, AlignX = Enum.TextXAlignment.Right, Props = {
 		Name = 'Distance',
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -PAD, 0, 8),
@@ -6855,13 +8266,13 @@ function build.targetInfo()
 		Size = UDim2.new(1, -(left + PAD), 0, 18)
 	}, Holder)
 	ui.list(HealthRow, 5, true)
-	local HealthText = ui.text(HealthRow, {Text = '', Size = 14, Weight = 'Bold', Color = CARD.Green, Props = {
+	local HealthText = ui.text(HealthRow, {Text = '', TextSize = 14, Weight = 'Bold', Color = CARD.Green, Props = {
 		Name = 'Health',
 		AutomaticSize = Enum.AutomaticSize.X,
 		LayoutOrder = 1,
 		Size = UDim2.fromOffset(0, 18)
 	}})
-	local MaxText = ui.text(HealthRow, {Text = '', Size = 12, Weight = 'Medium', Color = CARD.Muted, Props = {
+	local MaxText = ui.text(HealthRow, {Text = '', TextSize = 12, Weight = 'Medium', Color = CARD.Muted, Props = {
 		Name = 'MaxHealth',
 		AutomaticSize = Enum.AutomaticSize.X,
 		LayoutOrder = 2,
@@ -7324,53 +8735,92 @@ function build.loops()
 	end))
 
 	local cursorConnection
+	local colorPassQueued = false
+	--[[ The menu's own pointer, for while Roblox's is hidden (a game locking it) and the menu or a
+	window is up. It is drawn by a frame step that runs only then and writes only what changed: with
+	Roblox's pointer showing there is nothing to draw, so the step stops itself, and the menu opening
+	or a game hiding the pointer again starts it. Starting it writes nothing. ]]
+	local cursorShown, cursorX, cursorY = false, nil, nil
+	local function cursorWake()
+		if cursorConnection then return end
+		cursorConnection = runService.RenderStepped:Connect(function()
+			local isVisible = clickgui.Visible
+			for _, window in vape.Windows do
+				isVisible = isVisible or window.Visible
+			end
+
+			if not isVisible or inputService.MouseIconEnabled then
+				if cursorShown then
+					cursorShown = false
+					vape.Cursor.Visible = false
+				end
+				cursorConnection:Disconnect()
+				cursorConnection = nil
+				return
+			end
+
+			if not cursorShown then
+				cursorShown = true
+				vape.Cursor.Visible = true
+			end
+			local mouseLocation = inputService:GetMouseLocation()
+			if mouseLocation.X ~= cursorX or mouseLocation.Y ~= cursorY then
+				cursorX, cursorY = mouseLocation.X, mouseLocation.Y
+				vape.Cursor.Position = UDim2.fromOffset(cursorX - 31, cursorY - 32)
+			end
+		end)
+	end
 	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
 		vape.ClickGuiOpen = clickgui.Visible
 		if not clickgui.Visible then
-			tooltip.Visible = false
-			tooltip.Text = ''
 			vape.CurrentTooltip = nil
+			--[[ A bind left waiting for a key stops waiting now, and its badge is put back after the
+			change: SetBind writes the badge, which here would be inside the write to Visible. One armed
+			again by then is left as it is. ]]
 			if vape.Binding then
 				local stale = vape.Binding
 				vape.Binding = nil
-				pcall(function() stale:SetBind(stale.Keys, true) end)
+				task.defer(function()
+					if vape.Loaded == nil or vape.Binding == stale then return end
+					if vape.ThreadFix then
+						setthreadidentity(8)
+					end
+					pcall(function() stale:SetBind(stale.Keys, true) end)
+				end)
 			end
 		end
 
 		--[[ Opening the menu repaints it only if a colour pass was skipped while it was shut, or
 		something was added to it since the last one: otherwise every card already shows these
 		colours, and the pass walked every option of every module for nothing. Closing it touches
-		only the overlay, which was all that call ever reached with the menu shut. ]]
-		if clickgui.Visible and (not layout or layout.ColorDirty ~= false) then
-			vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
-		elseif vape.Loaded ~= nil and TextGUI and TextGUI.Button and TextGUI.Button.Enabled then
-			TextGUI:UpdateColor(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
-		end
-
-		if clickgui.Visible and inputService.MouseEnabled then
-			if cursorConnection then
-				cursorConnection:Disconnect()
-			end
-
-			cursorConnection = runService.RenderStepped:Connect(function()
-				local isVisible = clickgui.Visible
-				for _, window in vape.Windows do
-					isVisible = isVisible or window.Visible
+		only the overlay, which was all that call ever reached with the menu shut. The pass is asked
+		for here and runs after the change, never inside it: this handler runs inside the write to
+		Visible, and each colour the pass writes would be a write nested in that one. Any number of
+		changes in a frame get one pass, for the menu as it is by then. ]]
+		if not colorPassQueued then
+			colorPassQueued = true
+			task.defer(function()
+				colorPassQueued = false
+				if vape.Loaded == nil then return end
+				if vape.ThreadFix then
+					setthreadidentity(8)
 				end
-
-				if not isVisible then
-					vape.Cursor.Visible = false
-					cursorConnection:Disconnect()
-					cursorConnection = nil
-					return
-				end
-
-				vape.Cursor.Visible = not inputService.MouseIconEnabled
-				if vape.Cursor.Visible then
-					local mouseLocation = inputService:GetMouseLocation()
-					vape.Cursor.Position = UDim2.fromOffset(mouseLocation.X - 31, mouseLocation.Y - 32)
+				if clickgui.Visible and (not layout or layout.ColorDirty ~= false) then
+					vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
+				elseif TextGUI and TextGUI.Button and TextGUI.Button.Enabled then
+					TextGUI:UpdateColor(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value, true)
 				end
 			end)
+		end
+
+		if clickgui.Visible and inputService.MouseEnabled and not inputService.MouseIconEnabled then
+			cursorWake()
+		end
+	end))
+	-- A game hiding Roblox's pointer while the menu is up starts the step; showing it, the step stops.
+	vape:Clean(inputService:GetPropertyChangedSignal('MouseIconEnabled'):Connect(function()
+		if clickgui.Visible and inputService.MouseEnabled and not inputService.MouseIconEnabled then
+			cursorWake()
 		end
 	end))
 
@@ -7897,6 +9347,14 @@ function vape:Uninject()
 		end
 	end
 
+	--[[ A dropdown left open watches every press for one outside it (box.Watch), a connection of its
+	own: closed with its list here, or it would outlive this GUI. ]]
+	if layout and layout.OpenLists then
+		for close in table.clone(layout.OpenLists) do
+			pcall(close)
+		end
+	end
+
 	for _, connection in self.Connections do
 		cleanupConnection(connection)
 	end
@@ -8020,15 +9478,16 @@ end
 --[[
 	Tabs and the card layout.
 
-	The menu is one window: a tab bar and, under it, a page per tab holding two independent
-	columns of cards. Which tab a module lands in is its own `Tab` setting when it gives one, and
-	otherwise follows the category it registered in -- the categories themselves are unchanged,
-	because game files and the lobby's own filters still talk to them by name.
+	The menu is one window: a tab bar and, under it, a page per tab holding two (three with
+	Layout > Wide) independent columns of cards. Which tab a module lands in is its own `Tab`
+	setting when it gives one, and otherwise follows the category it registered in -- the
+	categories themselves are unchanged, because game files and the lobby's own filters still talk
+	to them by name.
 
 	Cards are placed by one deferred pass per frame, not as they arrive: a payload registers
 	hundreds of modules in a burst, and placing each one as it came would re-sort the tab every
-	time. Sorted alphabetically by the name the card shows, alternating left and right, so an
-	expanded card only ever pushes its own column down.
+	time. Sorted alphabetically by the name the card shows, dealt round-robin across the columns, so
+	an expanded card only ever pushes its own column down.
 ]]
 TABS = {'Combat', 'Move', 'Visual', 'Utility', 'Kits', 'FFlags'}
 local TAB_OF_CATEGORY = {
@@ -8043,6 +9502,11 @@ layout = {
 	Dirty = {},
 	Search = '',
 	Columns = 2,
+	-- The GUI card's Layout section: a third column on a wide screen, and single-line cards.
+	Wide = false,
+	Compact = false,
+	-- Every card ui.card has built, for Compact to lay out again.
+	CardViews = setmetatable({}, {__mode = 'k'}),
 	Binds = setmetatable({}, {__mode = 'k'}),
 	-- The colour pickers' 'Recently used' row, newest first, shared by every picker.
 	RecentColors = {},
@@ -8081,6 +9545,9 @@ function layout.remove(card)
 			table.remove(layout.Entries, index)
 		end
 	end
+	if layout.ViewOf then
+		layout.ViewOf[card] = nil
+	end
 	layout.request('*')
 end
 
@@ -8108,7 +9575,7 @@ function layout.place(tab)
 		if included and (entry.Visible == nil or entry.Visible()) then
 			table.insert(list, entry)
 		elseif entry.Card.Parent ~= layout.Hidden and (entry.Card.Parent == page.Left or entry.Card.Parent == page.Right
-			or (not searching and entry.Tab == tab)) then
+			or entry.Card.Parent == page.Mid or (not searching and entry.Tab == tab)) then
 			-- Out of this page: no longer matching the search, hidden, or another tab's card left
 			-- over from a search.
 			entry.Card.Parent = layout.Hidden
@@ -8120,22 +9587,49 @@ function layout.place(tab)
 		return a.Key < b.Key
 	end)
 
+	local cols = columns >= 3 and {page.Left, page.Mid, page.Right}
+		or columns == 2 and {page.Left, page.Right} or {page.Left}
+	local n = #cols
+	--[[ For a fade under way on this page (ui.fade.placed): each card this pass puts in another column
+	or place, with the cards either side of it in that column now. ]]
+	local moved = ui.fade.watched(page.Frame) and {} or nil
 	for index, entry in list do
-		local column = (columns == 1 or index % 2 == 1) and page.Left or page.Right
-		if entry.Card.Parent ~= column then
-			entry.Card.Parent = column
+		local column = cols[(index - 1) % n + 1] -- round-robin by alphabetical index
+		local card = entry.Card
+		local shifted = false
+		if card.Parent ~= column then
+			card.Parent = column
+			shifted = true
 		end
-		if entry.Card.LayoutOrder ~= index then
-			entry.Card.LayoutOrder = index
+		if card.LayoutOrder ~= index then
+			card.LayoutOrder = index
+			shifted = true
+		end
+		if shifted and moved then
+			local before, after = list[index - n], list[index + n]
+			table.insert(moved, {card, before and before.Card, after and after.Card})
+		end
+		-- Made before the last font pass (ui.card): its title and badge are laid out again as it shows.
+		local view = layout.ViewOf and layout.ViewOf[entry.Card]
+		if view and view.FitGen ~= fonts.Generation then
+			view.FitGen = fonts.Generation
+			pcall(view.Refit, view)
 		end
 	end
 
-	page.Right.Visible = columns > 1
-	page.Left.Size = columns > 1 and UDim2.new(0.5, -theme.Gap / 2, 0, 0) or UDim2.new(1, 0, 0, 0)
+	for i, frame in cols do
+		frame.Visible = true
+		frame.Size = UDim2.new(1 / n, -theme.Gap * (n - 1) / n, 0, 0)
+		frame.Position = UDim2.new((i - 1) / n, theme.Gap * (i - 1) / n, 0, 0)
+	end
+	page.Mid.Visible = n == 3
+	page.Right.Visible = n >= 2
 	if page.Empty then
 		-- 'No modules match.' only once something has been typed.
 		page.Empty.Visible = #list == 0 and (tab ~= 'Search' or searching)
 	end
+	-- A switch or an open fading this page takes what has just been placed in it (ui.fade).
+	ui.fade.placed(page.Frame, moved)
 end
 
 function layout.flush()
@@ -8213,27 +9707,101 @@ end
 
 --[[ A card opened near the bottom of its page brings its settings into view: the page scrolls just
 far enough to show the card's bottom, never so far that the card's top leaves the page. Waits two
-frames for the opened body to be laid out and the page's canvas to grow round it. ]]
-function ui.revealCard(card)
+frames for the opened body to be laid out. The card's height follows its settings for about 0.3 s
+(ui.card), so the scroll is worked out for the height it is growing to -- height(), in screen
+pixels -- rather than the height drawn so far, and runs alongside the growth. ]]
+function ui.revealCard(card, height)
 	task.spawn(function()
 		task.wait()
 		task.wait()
 		local page = card.Parent and card:FindFirstAncestorWhichIsA('ScrollingFrame')
 		if not page then return end
+		local drawn = card.AbsoluteSize.Y
+		local final = drawn
+		if height then
+			local ok, value = pcall(height)
+			if ok and type(value) == 'number' and value > 0 then
+				final = value
+			end
+		end
 		local viewTop = page.AbsolutePosition.Y
 		local viewBottom = viewTop + page.AbsoluteWindowSize.Y
 		local cardTop = card.AbsolutePosition.Y
-		local overflow = cardTop + card.AbsoluteSize.Y - viewBottom
+		local overflow = cardTop + final - viewBottom
 		if overflow <= 0 then return end
 		-- In screen pixels; the canvas is measured before the menu's scale and the window's zoom.
 		local shift = math.min(overflow + 8, cardTop - viewTop)
 		if shift <= 0 then return end
 		local s = math.max(scale.Scale, 0.05) * (layout.Zoom or 1)
-		local furthest = math.max((page.AbsoluteCanvasSize.Y - page.AbsoluteWindowSize.Y) / s, 0)
+		-- The canvas grows with the card: as far as it reaches once the card has grown.
+		local furthest = math.max((page.AbsoluteCanvasSize.Y + math.max(final - drawn, 0) - page.AbsoluteWindowSize.Y) / s, 0)
 		local target = math.clamp(page.CanvasPosition.Y + shift / s, 0, furthest)
 		tween:Tween(page, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 			CanvasPosition = Vector2.new(page.CanvasPosition.X, target)
 		})
+	end)
+end
+
+--[[ A title with badges after it in its row (ui.card, the profile cards). The row's list puts the
+badge 5 px after the title's drawn text, Slinky's gap whatever the title's length. A title too long
+for the row gives way -- shrunk by the list, cut with an ellipsis -- rather than push its badges on,
+and the row clips, so nothing in it ever passes the row's end: 8 px short of the switch, 7 short of
+the profile icons. All of it the engine's, set once here: nothing measured, nothing to keep up. ]]
+function ui.fitTitle(row, label)
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	pcall(function()
+		local flex = Instance.new('UIFlexItem')
+		flex.FlexMode = Enum.UIFlexMode.Shrink
+		flex.Parent = label
+	end)
+	row.ClipsDescendants = true
+end
+
+--[[ Developer builds: how the titles on screen fit their boxes, added to the font log once a font
+pass (fonts.Generation), a second after the menu opens -- for a machine we cannot see, where a title
+measured in a fallback face kept a box narrower than its text and ran into its badge. Listed: a title
+the engine says does not fit (cut with an ellipsis: a long one on purpose, or one sized in an older
+face), and one whose text width matches its box neither in units nor in pixels, as whether TextBounds
+counts the window's zoom is not known yet. Each line gives the text width, the box in units and in
+pixels, and how far after the text's end the badge starts, read both ways (units/pixels). ]]
+function layout.CheckFits()
+	if not (shared.PistonwareDeveloper and writefile and readfile) or layout.FitsLogged == (fonts.Generation or 0) then return end
+	layout.FitsLogged = fonts.Generation or 0
+	task.delay(1, function()
+		if vape.Loaded == nil then return end
+		if not (clickgui and clickgui.Visible) then
+			layout.FitsLogged = nil
+			return
+		end
+		local lines, checked = {}, 0
+		for view in layout.CardViews do
+			local title = view.Title
+			local unit = view.NameRow.AbsoluteSize.Y / 20
+			if title.Parent and unit > 0 and ui.anim.onScreen(title) then
+				checked += 1
+				pcall(function()
+					local ink, boxPx = title.TextBounds.X, title.AbsoluteSize.X
+					local box = boxPx / unit
+					local fits = title.TextFits
+					if fits == false or math.min(math.abs(ink - box), math.abs(ink - boxPx)) > 0.5 then
+						local badge = view.NameRow:FindFirstChild('Bind')
+						local gap = '-'
+						if badge and badge.Visible then
+							local after = badge.AbsolutePosition.X - title.AbsolutePosition.X
+							gap = string.format('%.1f/%.1f', after / unit - ink, (after - ink) / unit)
+						end
+						table.insert(lines, string.format('  %s: text %.1f box %.1f (%.0f px) fits %s gap %s', title.Text, ink, box,
+							boxPx, tostring(fits), gap))
+					end
+				end)
+			end
+		end
+		pcall(function()
+			local path = FONT_DIR..'/load-status.txt'
+			local ok, body = pcall(readfile, path)
+			local head = string.format('titles (font pass %d): %d on screen, %d listed', fonts.Generation or 0, checked, #lines)
+			writefile(path, (ok and type(body) == 'string' and body..'\n' or '')..head..(#lines > 0 and '\n'..table.concat(lines, '\n') or ''))
+		end)
 	end)
 end
 
@@ -8243,13 +9811,14 @@ end
 	cards (GUI, Notifications, Friends ...) are all this.
 ]]
 function ui.card(props)
+	-- Not sized by what it holds: its height follows that (view:Retarget below), and the column stacks
+	-- on the height drawn.
 	local card = ui.new('Frame', {
 		Name = props.Name,
-		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundColor3 = theme.Card,
 		BackgroundTransparency = 0,
 		BorderSizePixel = 0,
-		Size = UDim2.new(1, 0, 0, 0)
+		Size = UDim2.new(1, 0, 0, 72)
 	}, props.Parent or layout.Hidden)
 	ui.corner(card, 20)
 	ui.list(card, 0)
@@ -8270,7 +9839,7 @@ function ui.card(props)
 		Position = UDim2.fromOffset(theme.Inset, 12),
 		Size = UDim2.new(1, -(theme.Inset * 2 + 48), 0, 20)
 	}, header)
-	ui.list(nameRow, 4, true)
+	ui.list(nameRow, 5, true)
 	local title = ui.text(nameRow, {Text = props.Display or props.Name, Size = 16, Weight = 'Medium', Color = theme.Text, Props = {
 		Name = 'Name',
 		AutomaticSize = Enum.AutomaticSize.X,
@@ -8279,48 +9848,67 @@ function ui.card(props)
 	}})
 	-- Lifts the caps a pixel, onto the badge's and the switch's centre line.
 	ui.padding(title, 0, 0, 0, 2)
+	ui.fitTitle(nameRow, title)
 
 	local switch = props.Switch and ui.switch(header, UDim2.new(1, -theme.Inset, 0, 22)) or nil
-	local expand, glyph = ui.expander(header, UDim2.fromOffset(theme.Inset, 40))
-	local description = ui.text(header, {Text = ui.firstLine(props.Tooltip), Size = 14, Color = theme.SubText, Props = {
+	--[[ The + and the description are one hover region, as Slinky's are: lighting either lights both.
+	It is the square's rows, from the square to the end of the description's words, or the square
+	alone in Compact, which shows no description. The press still takes the whole line. ]]
+	local description
+	local descHover = {}
+	-- Where the description's words end on screen. Measured once a text, on its own thread: the first
+	-- measure of a text yields. Until then the label's own right edge.
+	function descHover.End()
+		local text, face = description.Text, description.FontFace
+		if (descHover.Text ~= text or descHover.Face ~= face) and not descHover.Busy then
+			descHover.Busy = true
+			task.spawn(function()
+				local ok, bounds = pcall(getfontbounds, text, description.TextSize, face)
+				descHover.Busy = false
+				descHover.Text, descHover.Face, descHover.Width = text, face, ok and bounds and bounds.X or nil
+			end)
+		end
+		local right = description.AbsolutePosition.X + description.AbsoluteSize.X
+		if descHover.Text ~= text or not descHover.Width then return right end
+		return math.min(description.AbsolutePosition.X + descHover.Width * description.AbsoluteSize.Y / 20, right)
+	end
+	local expand, glyph = ui.expander(header, UDim2.fromOffset(theme.Inset, 40), {
+		Lit = function(lit)
+			description.TextColor3 = lit and theme.SubTextLit or theme.SubText
+		end,
+		Region = function(point, square)
+			local corner, size = square.AbsolutePosition, square.AbsoluteSize
+			if point.X < corner.X or point.Y < corner.Y or point.Y > corner.Y + size.Y then return false end
+			local right = corner.X + size.X
+			if description.Visible then
+				right = math.max(right, descHover.End())
+			end
+			return point.X <= right
+		end
+	})
+	description = ui.text(header, {Text = ui.firstLine(props.Tooltip), Size = 14, Color = theme.SubText, Props = {
 		Name = 'Description',
 		Position = UDim2.fromOffset(theme.Inset + 28, 40),
 		Size = UDim2.new(1, -(theme.Inset * 2 + 28), 0, 20),
 		TextTruncate = Enum.TextTruncate.AtEnd
 	}})
-	--[[ The description line, and the + beside it, light the description up a little while hovered.
-	The + button spans the line, so both are entered at once and their events can come in either
-	order: a leave only puts it out when the pointer is really off both. ]]
-	local function restDescription()
-		tween:Tween(description, theme.HoverTween, {TextColor3 = theme.SubText})
-	end
-	for _, part in {description, expand} do
-		part.MouseEnter:Connect(function()
-			ui.hovered[description] = restDescription
-			tween:Tween(description, theme.HoverTween, {TextColor3 = theme.SubTextLit})
-		end)
-		part.MouseLeave:Connect(function()
-			-- Measured as the hint pill measures it: the pointer in the GUI's own space.
-			local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
-			for _, other in {description, expand} do
-				if other.Visible and ui.within(point, other.AbsolutePosition, other.AbsoluteSize) then return end
-			end
-			ui.hovered[description] = nil
-			restDescription()
-		end)
-	end
 
+	--[[ The settings: what modules get as their Children, still the card's own child by its name. It
+	is as tall as the card leaves under the header, and clips what is past that, so while the card
+	grows or shrinks they show only down to 8 px above its drawn bottom. ]]
 	local body = ui.new('Frame', {
 		Name = props.ChildrenName or (props.Name..'Children'),
-		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundColor3 = theme.Card,
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
+		ClipsDescendants = true,
 		LayoutOrder = 2,
 		Size = UDim2.new(1, 0, 0, 0),
 		Visible = false
 	}, card)
-	ui.list(body, 0, false, Enum.HorizontalAlignment.Center)
+	local bodyList = ui.list(body, 0, false, Enum.HorizontalAlignment.Center)
+	-- A page fade takes the settings a row at a time: a card open past the page costs what shows.
+	ui.fade.split(body)
 
 	local view = {
 		Card = card,
@@ -8331,14 +9919,101 @@ function ui.card(props)
 		Expand = expand,
 		Glyph = glyph,
 		Description = description,
-		Body = body
+		Body = body,
+		Clip = body,
+		BodyList = bodyList,
+		-- The height being drawn, in GUI units.
+		Height = 72
 	}
+
+	--[[ The title and the badge after it are sized by their text. One laid out before the face it is
+	drawn in had loaded kept the fallback's narrower box, and its badge sat on its last letters: so a
+	card notes the font pass it was made after (fonts.settle), and layout.place lays the two out again
+	as it is next shown after a later one. ]]
+	view.FitGen = fonts.Generation
+	function view:Refit()
+		for _, label in {title, nameRow:FindFirstChild('Bind')} do
+			local text = label.Text
+			label.Text = text..' '
+			label.Text = text
+		end
+	end
+	layout.ViewOf = layout.ViewOf or setmetatable({}, {__mode = 'k'})
+	layout.ViewOf[card] = view
+
+	--[[ The card's height, as Slinky's (ANIM_SPEC 2): the header, the 8 px foot, and the settings while
+	open, followed at 21.9 a second on the shared driver and drawn in whole units. Opening shows the
+	settings at once and the card grows over them; closing hides them at once and the empty card
+	shrinks. Anything that changes the settings' height -- a dropdown opening, rows a mode shows or
+	hides -- moves it the same way, and only its own column moves with it. ]]
+	function view.TargetHeight()
+		local head = header.Size.Y.Offset
+		local height = head + 8
+		if body.Visible then
+			--[[ Screen pixels to GUI units wherever the card is, in the window's zoom or parked outside
+			it: off the title row, which is 20 tall in every layout, so a header Compact has only just
+			resized cannot skew it. ]]
+			local unit = nameRow.AbsoluteSize.Y / 20
+			if unit > 0 then
+				height += math.floor(bodyList.AbsoluteContentSize.Y / unit + 0.5)
+			end
+		end
+		return height
+	end
+	-- The same in screen pixels, for ui.revealCard.
+	function view.TargetPixels()
+		return view.TargetHeight() * nameRow.AbsoluteSize.Y / 20
+	end
+	local function draw(height)
+		local rounded, head = math.floor(height + 0.5), header.Size.Y.Offset
+		if rounded == view.Drawn and head == view.DrawnHead then return end
+		view.Drawn, view.DrawnHead = rounded, head
+		card.Size = UDim2.new(1, 0, 0, rounded)
+		body.Size = UDim2.new(1, 0, 0, math.max(rounded - 8 - head, 0))
+	end
+	-- The driver's entry (ui.anim): the target is read every step, so content still changing retargets it.
+	view.Motion = {Owner = card}
+	function view.Motion.Step(dt)
+		local target = view.TargetHeight()
+		view.Height = ui.anim.follow(view.Height, target, theme.FollowFast, dt)
+		if math.abs(target - view.Height) < 0.01 then
+			view.Height = target
+		end
+		draw(view.Height)
+		return view.Height == target
+	end
+	function view.Motion.Finish()
+		view.Height = view.TargetHeight()
+		draw(view.Height)
+	end
+	-- Follows the settings from where the card is; snap puts it at its height now.
+	function view:Retarget(snap)
+		if snap then
+			ui.anim.stop(card)
+			view.Motion.Finish()
+		else
+			ui.anim.play(card, view.Motion)
+		end
+	end
+	--[[ Only a request, made from inside the layout's own change: the driver takes it from the next
+	frame, or ends it at once with the card off screen. A closed card draws no settings, so their
+	changes wait for it to open; so does a change of width alone. ]]
+	bodyList:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+		local height = bodyList.AbsoluteContentSize.Y
+		if height == view.ContentHeight then return end
+		view.ContentHeight = height
+		if body.Visible then
+			view:Retarget()
+		end
+	end)
 
 	function view:SetExpanded(open)
 		body.Visible = open and view.HasOptions
 		glyph:Set(open)
+		-- With the card off screen (the menu shut, another tab) nothing is watching: its height at once.
+		view:Retarget(not ui.anim.onScreen(card))
 		if open and view.HasOptions then
-			ui.revealCard(card)
+			ui.revealCard(card, view.TargetPixels)
 		end
 	end
 
@@ -8354,6 +10029,28 @@ function ui.card(props)
 		if not has then
 			body.Visible = false
 		end
+		view:ApplyLayout()
+	end
+
+	-- Normal: header 64 (title row, then + and description). Compact (Slinky's Layout > Compact):
+	-- header 36, the + left of the title, no description. Cards are 72 and 44 with the 8 px foot.
+	function view:ApplyLayout()
+		local compact = layout.Compact == true
+		header.Size = UDim2.new(1, 0, 0, compact and 36 or 64)
+		description.Visible = not compact
+		local left = (compact and view.HasOptions) and theme.Inset + 28 or theme.Inset
+		nameRow.Position = UDim2.fromOffset(left, 12)
+		nameRow.Size = UDim2.new(1, -(left + theme.Inset + 48), 0, 20)
+		if compact then
+			-- Only the square's column takes the press, so the title, badge and switch keep theirs.
+			expand.Position = UDim2.fromOffset(theme.Inset, 4)
+			expand.Size = UDim2.fromOffset(28, 32)
+		else
+			expand.Position = UDim2.fromOffset(theme.Inset, 32)
+			expand.Size = UDim2.new(1, -theme.Inset * 2, 0, 32)
+		end
+		-- A change of layout is not animated: every card is at its new height at once.
+		view:Retarget(true)
 	end
 
 	-- Watches an Options table: the first option registered shows the square.
@@ -8373,6 +10070,8 @@ function ui.card(props)
 		addTooltip(description, props.Tooltip)
 	end
 
+	layout.CardViews[view] = true
+	view:ApplyLayout()
 	return view
 end
 
@@ -8408,11 +10107,10 @@ components.Bind = function(props, children, api)
 		return 'Click to bind, click again to clear\nShift-click to switch toggle/hold\n'..holdText
 	end)
 
-	--[[ Under the pointer the badge's text lights up, as Slinky's does: NONE and PRESS A KEY... go
-	white, a bound key's accent goes most of the way there. animate is for those hover changes; a
-	state change paints at once. ]]
+	--[[ Under the pointer the badge's text lights up at once, as Slinky's does: NONE, PRESS A KEY...
+	and a bound key's accent all go white, on the badge's unchanged background. ]]
 	local hovered = false
-	local function paint(animate)
+	local function paint()
 		local text
 		if component.Binding then
 			bind.Text = 'PRESS A KEY...'
@@ -8421,32 +10119,29 @@ components.Bind = function(props, children, api)
 		elseif #component.Keys > 0 then
 			bind.Text = ui.keyText(component.Keys)..(component.Hold and '  HOLD' or '')
 			local accent = theme.Accent()
-			text = hovered and accent:Lerp(theme.Lit, 0.45) or accent
+			text = hovered and theme.Lit or accent
 			bind.BackgroundColor3 = theme.Tint(accent, 0.15)
 		else
 			bind.Text = component.Hold and 'NONE  HOLD' or 'NONE'
 			text = hovered and theme.Lit or theme.SubText
 			bind.BackgroundColor3 = theme.Badge
 		end
-		if animate then
-			tween:Tween(bind, theme.HoverTween, {TextColor3 = text})
-		else
-			tween:Cancel(bind)
-			bind.TextColor3 = text
-		end
+		tween:Cancel(bind)
+		bind.TextColor3 = text
 	end
 	local function restBadge()
 		if hovered then
 			hovered = false
-			paint(true)
+			paint()
 		end
 	end
-	-- A tap enters the badge and never leaves it, so a phone gets no hover light.
+	-- A tap enters the badge and never leaves it, so a phone gets no hover light; nor does a badge
+	-- under an open modal's backdrop.
 	bind.MouseEnter:Connect(function()
-		if ui.lastInputTouch() then return end
+		if ui.lastInputTouch() or (ui.modal and ui.modal.Parent) then return end
 		hovered = true
 		ui.hovered[bind] = restBadge
-		paint(true)
+		paint()
 	end)
 	bind.MouseLeave:Connect(function()
 		ui.hovered[bind] = nil
@@ -8719,13 +10414,12 @@ components.Button = function(props, children, api)
 	}})
 	props.Function = props.Function or function() end
 
-	button.MouseEnter:Connect(function()
-		tween:Tween(holder, uipallet.Tween, {BackgroundColor3 = theme.Raised})
+	-- Under the pointer at once, and never on a touch screen (ui.hover).
+	ui.hover(button, function()
+		holder.BackgroundColor3 = theme.Raised
 		stroke.Color = theme.Muted
-	end)
-
-	button.MouseLeave:Connect(function()
-		tween:Tween(holder, uipallet.Tween, {BackgroundColor3 = theme.Card})
+	end, function()
+		holder.BackgroundColor3 = theme.Card
 		stroke.Color = theme.Outline
 	end)
 
@@ -8979,6 +10673,8 @@ components.CategoryList = function(props, children, api)
 		-- The entry box: type a name and press Enter or the plus.
 		local addrow = ui.row(listHolder, {LayoutOrder = -1}, 38)
 		local addbkg = ui.pill(addrow, {Class = 'Frame', AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, theme.Inset, 0.5, 0), Size = UDim2.new(1, -theme.Inset * 2, 0, 28)})
+		-- A paste of any size stays inside the box.
+		addbkg.ClipsDescendants = true
 		addvalue = ui.text(addbkg, {Class = 'TextBox', Size = 14, Color = theme.Text, Props = {
 			ClearTextOnFocus = false,
 			PlaceholderColor3 = theme.Muted,
@@ -9047,11 +10743,12 @@ components.CategoryList = function(props, children, api)
 			Position = UDim2.fromOffset(theme.Inset, 12),
 			Size = UDim2.new(1, -150, 0, 20)
 		}, obj)
-		ui.list(nameRow, 4, true)
+		ui.list(nameRow, 5, true)
 		local nameLabel = ui.text(nameRow, {Text = isDefault and 'Default' or name.Name, Size = 16, Weight = 'Medium', Color = theme.Text, Props = {
 			Name = 'Title', AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 1, Size = UDim2.fromOffset(0, 20), TextTruncate = Enum.TextTruncate.AtEnd
 		}})
 		ui.padding(nameLabel, 0, 0, 0, 2)
+		ui.fitTitle(nameRow, nameLabel)
 		if not isDefault or #name.Bind.Keys > 0 then
 			name.Bind:SetParent(nameRow)
 		end
@@ -9084,25 +10781,23 @@ components.CategoryList = function(props, children, api)
 		}, obj)
 		ui.list(icons, 6, true, Enum.HorizontalAlignment.Right)
 		local actions = component.CardActions or {}
-		local function action(iconName, tip, order2, colour, callback)
+		local function action(iconName, tip, order2, colour, callback, greyed)
 			local button = ui.icon(icons, iconName, 20, {Class = 'TextButton', Color = colour or theme.SubText, Props = {LayoutOrder = order2, Size = UDim2.fromOffset(26, 24)}})
-			-- Its hint over it, in the pill every hint uses, kept inside the card.
-			addRowTooltip(button, tip, button, nil, obj)
-			local function rest()
-				tween:Tween(button, theme.HoverTween, {TextColor3 = theme.SubText})
+			--[[ Its hint over it, in the pill every hint uses: centred on the icon and drawn over the card's
+			edge where it is wider, as Slinky's are, kept only to the screen. It shows while the pointer is
+			on the 20x20 round the glyph, Slinky's hit box; the button keeps its 26x24 for clicks. A greyed
+			icon, whose click only refuses, has none. The icon keeps its colour under the pointer, as
+			Slinky's do. ]]
+			if not greyed then
+				local spot = ui.new('Frame', {
+					Name = 'TipSpot',
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					BackgroundTransparency = 1,
+					Position = UDim2.fromScale(0.5, 0.5),
+					Size = UDim2.fromOffset(20, 20)
+				}, button)
+				addRowTooltip(button, tip, button, spot, scaledgui)
 			end
-			button.MouseEnter:Connect(function()
-				if not colour and not ui.lastInputTouch() then
-					ui.hovered[button] = rest
-					tween:Tween(button, theme.HoverTween, {TextColor3 = theme.Lit})
-				end
-			end)
-			button.MouseLeave:Connect(function()
-				if not colour then
-					ui.hovered[button] = nil
-					rest()
-				end
-			end)
 			if callback then
 				button.MouseButton1Click:Connect(callback)
 			end
@@ -9119,7 +10814,8 @@ components.CategoryList = function(props, children, api)
 		Both circles sit RING_STROKE inside the ring's square. A stroke is drawn outside its frame and
 		each half clips to that square, so circles filling it lost the outer edge of their stroke: the
 		accent arc was cut away at the top, bottom and sides and showed only near the diagonals. ]]
-		local loadButton = action('share', 'Hold to load', 0, nil, nil)
+		-- Slinky's export glyph, on our button that loads.
+		local loadButton = action('slinky-export', 'Hold to load', 0, nil, nil)
 		do
 			local HOLD_TIME = 0.6
 			local RING_STROKE = 2
@@ -9169,10 +10865,9 @@ components.CategoryList = function(props, children, api)
 			end
 
 			local holding, progress, stepper = false, 0, nil
-			-- Whether the pointer is on the icon, for the colour it goes back to after a hold.
-			local over = false
+			-- Back to its resting grey after a hold; the icons do not light under the pointer.
 			local function restIcon()
-				tween:Tween(loadButton, theme.HoverTween, {TextColor3 = over and theme.Lit or theme.SubText})
+				tween:Tween(loadButton, theme.HoverTween, {TextColor3 = theme.SubText})
 			end
 			local function stop()
 				if stepper then
@@ -9223,23 +10918,23 @@ components.CategoryList = function(props, children, api)
 					holding = false
 				end
 			end)
-			loadButton.MouseEnter:Connect(function()
-				over = not ui.lastInputTouch()
-			end)
 			loadButton.MouseLeave:Connect(function()
-				over = false
 				holding = false
 			end)
 		end
-		action('import', 'Import into this profile', 2, nil, function()
+		-- Slinky's save glyph, on our button that imports; never greyed.
+		action('slinky-save', 'Click to import', 2, nil, function()
 			if actions.Import then actions.Import(name.Name) end
 		end)
-		action('folder-open', 'Copy folder path', 3, nil, function()
+		action('slinky-folder', 'Click to copy folder path', 3, nil, function()
 			if actions.Folder then actions.Folder(name.Name) end
 		end)
 		-- On every card, as in Slinky. Default and the profile in use refuse: deleting the one in use
-		-- would leave nothing selected and the next autosave would write the file straight back.
-		action('trash-2', 'Delete this profile', 4, theme.Red, function()
+		-- would leave nothing selected and the next autosave would write the file straight back. Where
+		-- it refuses it is greyed to a dark red with no hint, as Slinky greys the icons its Default card
+		-- refuses. The cards are rebuilt whenever the profile in use changes.
+		local refuses = isDefault or name.Enabled
+		action('slinky-trash', 'Click to delete', 4, refuses and theme.TrashOff or theme.Trash, function()
 			if isDefault then
 				vape:CreateNotification('Pistonware', 'The default profile cannot be deleted.', 4, 'warning')
 				return
@@ -9251,7 +10946,7 @@ components.CategoryList = function(props, children, api)
 			ui.confirm("Delete the profile '"..name.Name.."'?", function()
 				component:ChangeValue(name.Name)
 			end, 'Delete')
-		end)
+		end, refuses)
 
 		if name.Enabled then
 			component.Selected = obj
@@ -9278,6 +10973,13 @@ components.CategoryList = function(props, children, api)
 		}, listHolder)
 		ui.corner(obj, 20)
 		local label = ui.text(obj, {Text = 'CREATE NEW PROFILE', Size = 15, Weight = 'Bold', Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {Size = UDim2.fromScale(1, 1)}})
+		--[[ Under the pointer only the label goes white, at once; the see-through card stays as it is, as
+		Slinky's does. Never on a touch screen (ui.hover). ]]
+		ui.hover(obj, function()
+			label.TextColor3 = theme.Lit
+		end, function()
+			label.TextColor3 = theme.Text
+		end)
 		local box = ui.text(obj, {Class = 'TextBox', Size = 15, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
 			ClearTextOnFocus = false,
 			PlaceholderColor3 = theme.Muted,
@@ -9749,6 +11451,8 @@ components.ColorSlider = function(props, children, api)
 		Text = ''
 	}, line)
 	ui.corner(swatch, UDim.new(1, 0))
+	-- Slinky's 1 px ring round the swatch.
+	ui.stroke(swatch, theme.Outline, 1, 0)
 	local swatchGradient = ui.new('UIGradient', {}, swatch)
 	--[[ The Opacity track is for options that use it: those that name a default opacity, and those
 	whose callback takes the fourth (opacity) argument. ]]
@@ -9762,15 +11466,15 @@ components.ColorSlider = function(props, children, api)
 	-- The picker's live pieces while it is open; nil when it is closed.
 	local open
 
-	--[[ The far end of the swatch fades darker, as Slinky's does. A colour already near black fades
-	lighter instead, toward grey: the swatch still reads as black at its start, and as a swatch at
-	all on the dark card, without an outline. ]]
+	--[[ The far end of the swatch fades 73% of the way into the card, as Slinky's does. A colour
+	already near black fades lighter instead, toward grey: the swatch still reads as black at its
+	start, and the picker square that shares this end still shows a ramp. ]]
 	local function swatchEnd(h, s, v)
 		local base = Color3.fromHSV(h, s, v)
 		if v < 0.3 then
 			return base:Lerp(Color3.fromRGB(96, 96, 96), 0.75)
 		end
-		return Color3.fromHSV(h, s, v * 0.35)
+		return base:Lerp(theme.Card, 0.73)
 	end
 
 	--[[ A rainbow shows its whole cycle at its saturation and brightness, from the hue it is on now.
@@ -10170,8 +11874,8 @@ components.Divider = function(props, children, api)
 end
 
 components.Dropdown = function(props, children, api)
-	-- The border of a dropdown's box, closed and open; Slinky's is a hair over a pixel.
-	local DROPDOWN_STROKE = 1.5
+	-- The border of a dropdown's box, closed and open: 2 px, as Slinky's.
+	local DROPDOWN_STROKE = 2
 	local component = {
 		Index = 0,
 		Type = 'Dropdown',
@@ -10191,9 +11895,16 @@ components.Dropdown = function(props, children, api)
 	ui.rowLabel(line, props)
 	addTooltip(line, props.Tooltip or props.Name)
 	--[[ The pill carries its own text, so nothing here is shaped like a button to autoexec/mcp.lua.
-	Drawn as Slinky's dropdown box -- 8 px corners and a thin border -- 22 px tall over its border
-	like the pill it replaces, so the row keeps its height. ]]
-	local button = ui.pill(line, {Radius = UDim.new(0, 8), Thickness = DROPDOWN_STROKE, Size = UDim2.new(0.5, -14, 0, 22 - DROPDOWN_STROKE * 2)})
+	Drawn as Slinky's dropdown box: round, its border outside, so it is 22 px tall and half the card
+	less 10 wide over the border, 11 px in from the card's right edge, centred on the row. Its top is
+	held 3 px down the row so that it opens downward; the row keeps its height. ]]
+	local button = ui.pill(line, {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -13, 0, 3 + DROPDOWN_STROKE),
+		Radius = UDim.new(0, 9),
+		Thickness = DROPDOWN_STROKE,
+		Size = UDim2.new(0.5, -14, 0, 22 - DROPDOWN_STROKE * 2)
+	})
 	button.Name = 'Value'
 	local title = ui.text(button, {Text = component.Value, Size = 15, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
 		Position = UDim2.fromOffset(12, 0),
@@ -10202,109 +11913,105 @@ components.Dropdown = function(props, children, api)
 	}})
 	props.Function = props.Function or function() end
 
-	--[[ The list opens over the rows below it rather than pushing them down: Slinky's box laid on the
-	menu itself, its top on the closed box's top and as wide, the choices 30 px apart with a rule
-	between each and the one in use in the accent. Picking one, a click anywhere else or closing the
-	menu closes it. ]]
-	local ENTRY_HEIGHT = 30
-	local blocker, hideConnection
-	local function closeList()
-		if hideConnection then
-			hideConnection:Disconnect()
-			hideConnection = nil
+	--[[ Open, the box grows downward where it is and pushes the rows under it down by as much, as
+	Slinky's does (ANIM_SPEC 3): the spacer under the row is the box's extra height, so the card's
+	height follows it (ui.card). The choices are 28 px apart, a 26 px band and a 2 px divider, inside
+	the 2 px border with 11 px outer corners, and the one in use is in the accent. They are placed by
+	fractions of the box, so they ride its growth with nothing written per frame: all drawn from the
+	first frame, cut only by the card. Closing, only the value is drawn in the shrinking box. The
+	box's height follows at 10.75 a second; past eight choices the list scrolls in a box eight tall.
+	A press anywhere off the box closes it, and still reaches what it pressed. ]]
+	local push = ui.new('Frame', {
+		Name = 'Push',
+		BackgroundTransparency = 1,
+		LayoutOrder = 2,
+		Size = UDim2.new(1, 0, 0, 0),
+		Visible = false
+	}, dropdown)
+	local options = ui.new('Frame', {
+		Name = 'Options',
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Visible = false
+	}, button)
+	-- The box's motion and state, and the driver's entry for it (ui.anim).
+	local box = {Owner = button, Height = 22, Open = false}
+	local function boxTarget()
+		return box.Open and math.max(math.min(#props.List, 8) * 28 + 2, 22) or 22
+	end
+	local function drawBox(height)
+		local rounded = math.floor(height + 0.5)
+		if rounded == box.Drawn then return end
+		box.Drawn = rounded
+		button.Size = UDim2.new(0.5, -14, 0, rounded - DROPDOWN_STROKE * 2)
+		push.Size = UDim2.new(1, 0, 0, math.max(rounded - 22, 0))
+		push.Visible = rounded > 22
+	end
+	function box.Step(dt)
+		local target = boxTarget()
+		box.Height = ui.anim.follow(box.Height, target, theme.FollowDrop, dt)
+		if math.abs(target - box.Height) < 0.01 then
+			box.Height = target
 		end
-		if blocker then
-			if layout.ListOpen == blocker then
-				layout.ListOpen = nil
-			end
-			blocker:Destroy()
-			blocker = nil
+		drawBox(box.Height)
+		return box.Height == target
+	end
+	function box.Finish()
+		box.Height = boxTarget()
+		drawBox(box.Height)
+	end
+	local function animate()
+		if ui.anim.onScreen(button) then
+			ui.anim.play(button, box)
+		else
+			ui.anim.stop(button)
+			box.Finish()
 		end
 	end
 
-	local function openList()
-		closeList()
-		if not (clickgui and clickgui.Visible and button.AbsoluteSize.X > 0) then return end
-		local s = math.max(scale.Scale, 0.05)
-		local zoom = layout and layout.Zoom or 1
-		blocker = ui.new('TextButton', {
-			Name = 'DropdownList',
-			AutoButtonColor = false,
-			BackgroundTransparency = 1,
-			Size = UDim2.fromScale(1, 1),
-			Text = '',
-			ZIndex = 18
-		}, clickgui)
-		--[[ The rows under the list still get their hover events, so their value bubbles and help
-		pills are held back while it is open, and any already showing are put away. ]]
-		layout.ListOpen = blocker
-		tooltip.Visible = false
-		for _, child in clickgui:GetChildren() do
-			if child.Name == 'SliderBubble' then
-				child.Visible = false
-			end
+	local function buildOptions()
+		options:ClearAllChildren()
+		local count = #props.List
+		local scrolls = count > 8
+		local holder = options
+		if scrolls then
+			holder = ui.new('ScrollingFrame', {
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				CanvasSize = UDim2.fromOffset(0, count * 28 - 2),
+				ScrollBarThickness = 0,
+				ScrollingDirection = Enum.ScrollingDirection.Y,
+				Size = UDim2.fromScale(1, 1)
+			}, options)
 		end
-		blocker.MouseButton1Click:Connect(closeList)
-		blocker.MouseButton2Click:Connect(closeList)
-		hideConnection = clickgui:GetPropertyChangedSignal('Visible'):Connect(closeList)
-
-		local height = math.min(#props.List, 8) * ENTRY_HEIGHT
-		local box = ui.new('Frame', {
-			BackgroundColor3 = theme.Card,
-			BorderSizePixel = 0,
-			Size = UDim2.fromOffset(button.AbsoluteSize.X / (s * zoom), height),
-			ZIndex = 18
-		}, blocker)
-		ui.corner(box, 8)
-		ui.stroke(box, theme.Outline, DROPDOWN_STROKE, 0)
-		ui.new('UIScale', {Scale = zoom}, box)
-		-- On the closed box's top, as Slinky opens it; kept on screen near the bottom.
-		local origin = blocker.AbsolutePosition
-		local top = button.AbsolutePosition.Y
-		local limit = origin.Y + blocker.AbsoluteSize.Y - 8
-		if top + height * s * zoom > limit then
-			top = math.max(origin.Y + 8, limit - height * s * zoom)
-		end
-		box.Position = UDim2.fromOffset((button.AbsolutePosition.X - origin.X) / s, (top - origin.Y) / s)
-
-		local list = ui.new('ScrollingFrame', {
-			BackgroundTransparency = 1,
-			BorderSizePixel = 0,
-			CanvasSize = UDim2.fromOffset(0, #props.List * ENTRY_HEIGHT),
-			ScrollBarThickness = 0,
-			ScrollingDirection = Enum.ScrollingDirection.Y,
-			Size = UDim2.fromScale(1, 1),
-			ZIndex = 18
-		}, box)
-		ui.list(list, 0)
 		for index, v in props.List do
 			local selected = v == component.Value
-			local entry = ui.text(list, {Class = 'TextButton', Text = v, Size = 15, Color = selected and theme.Accent() or theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
+			local entry = ui.text(holder, {Class = 'TextButton', Text = v, Size = 15, Color = selected and theme.Accent() or theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
+				Name = 'Option',
+				AnchorPoint = Vector2.new(0.5, 0.5),
 				LayoutOrder = index,
-				Size = UDim2.new(1, 0, 0, ENTRY_HEIGHT),
-				TextTruncate = Enum.TextTruncate.AtEnd,
-				ZIndex = 19
+				Position = scrolls and UDim2.new(0.5, 0, 0, (index - 1) * 28 + 13) or UDim2.new(0.5, 0, (index - 0.5) / count, 0),
+				Size = UDim2.new(1, -16, 0, 26),
+				TextTruncate = Enum.TextTruncate.AtEnd
 			}})
-			ui.padding(entry, 8, 8, 0, 0)
-			--[[ The rule over every choice but the first, in the border's colour: edge to edge, unless
-			the list scrolls -- a rule scrolled to the top would cross the box's rounded corners, so
+			--[[ The divider under every choice but the last, the border's colour at half strength: edge to
+			edge, unless the list scrolls -- one scrolled to the top would cross the rounded corners, so
 			there it keeps to the text's width. ]]
-			if index > 1 then
-				local edge = #props.List <= 8
+			if index < count then
 				ui.new('Frame', {
 					BackgroundColor3 = theme.Outline,
+					BackgroundTransparency = 0.5,
 					BorderSizePixel = 0,
-					Position = UDim2.fromOffset(edge and -8 or 0, 0),
-					Size = UDim2.new(1, edge and 16 or 0, 0, 1),
-					ZIndex = 19
-				}, entry)
+					Position = scrolls and UDim2.new(0, 8, 0, index * 28 - 2) or UDim2.new(0, 0, index / count, -1),
+					Size = UDim2.new(1, scrolls and -16 or 0, 0, 2)
+				}, holder)
 			end
+			-- Under the pointer a choice goes white, at once; the one in use keeps the accent.
 			if not selected then
-				entry.MouseEnter:Connect(function()
-					tween:Tween(entry, theme.HoverTween, {TextColor3 = theme.Lit})
-				end)
-				entry.MouseLeave:Connect(function()
-					tween:Tween(entry, theme.HoverTween, {TextColor3 = theme.Text})
+				ui.hover(entry, function()
+					entry.TextColor3 = theme.Lit
+				end, function()
+					entry.TextColor3 = theme.Text
 				end)
 			end
 			entry.MouseButton1Click:Connect(function()
@@ -10313,12 +12020,62 @@ components.Dropdown = function(props, children, api)
 		end
 	end
 
+	-- The menu shutting closes a list left open: one hook for every dropdown.
+	if not layout.OpenLists then
+		layout.OpenLists = {}
+		ui.whenShut(function()
+			for close in table.clone(layout.OpenLists) do
+				pcall(close)
+			end
+		end)
+	end
+
+	local closeList
+	local function openList()
+		if box.Open or #props.List == 0 or not ui.anim.onScreen(button) then return end
+		box.Open = true
+		buildOptions()
+		options.Visible = true
+		title.Visible = false
+		layout.OpenLists[closeList] = true
+		box.Watch = inputService.InputBegan:Connect(function(input)
+			if not (isPress(input) or input.UserInputType == Enum.UserInputType.MouseButton2) then return end
+			--[[ An InputObject's position is measured under Roblox's top bar, and this ScreenGui ignores
+			the inset, so the box's is from the top of the screen: the press is moved down by the bar
+			first, as the drag handlers do. Unmoved, a press on the top of an open list (36 or 58 px of
+			it) counted as outside, closed it and took the choice away before its click. ]]
+			local inset = 0
+			pcall(function()
+				inset = guiService:GetGuiInset().Y
+			end)
+			if not ui.within(Vector2.new(input.Position.X, input.Position.Y + inset), button.AbsolutePosition, button.AbsoluteSize) then
+				closeList()
+			end
+		end)
+		animate()
+	end
+	function closeList()
+		if box.Watch then
+			box.Watch:Disconnect()
+			box.Watch = nil
+		end
+		layout.OpenLists[closeList] = nil
+		if not box.Open then return end
+		box.Open = false
+		options.Visible = false
+		options:ClearAllChildren()
+		title.Visible = true
+		animate()
+	end
+
 	function component:Change(list)
 		props.List = list or {}
 		if not table.find(props.List, self.Value) then
 			self:SetValue(self.Value)
-		elseif blocker then
-			openList()
+		elseif box.Open then
+			-- Open: the new choices, and the box follows to their height.
+			buildOptions()
+			animate()
 		end
 	end
 
@@ -10344,26 +12101,18 @@ components.Dropdown = function(props, children, api)
 	end
 
 	button.MouseButton1Click:Connect(function()
-		if blocker then
+		if box.Open then
 			closeList()
 		else
 			openList()
 		end
 	end)
 
-	-- Only the text lights up under the pointer; the box itself stays as it is.
-	local function restTitle()
-		tween:Tween(title, theme.HoverTween, {TextColor3 = theme.Text})
-	end
-	button.MouseEnter:Connect(function()
-		if ui.lastInputTouch() then return end
-		ui.hovered[title] = restTitle
-		tween:Tween(title, theme.HoverTween, {TextColor3 = theme.Lit})
-	end)
-
-	button.MouseLeave:Connect(function()
-		ui.hovered[title] = nil
-		restTitle()
+	-- Only the value lights up under the pointer, at once; the box itself stays as it is.
+	ui.hover(button, function()
+		title.TextColor3 = theme.Lit
+	end, function()
+		title.TextColor3 = theme.Text
 	end)
 
 	api.Options[props.Name] = component
@@ -10441,8 +12190,8 @@ end
 the Notifications card its own. A pane a game adds lands in the GUI card under its name. ]]
 local settingsHosts = {}
 local PANE_HOSTS = {Notifications = 'Notifications'}
-local PANE_ORDER = {Settings = 1, GUI = 2, General = 3, Modules = 4, Notifications = 1}
-local PANE_TITLES = {Settings = 'Main', GUI = 'Interface', General = 'General', Modules = 'Modules', Notifications = false}
+local PANE_ORDER = {Settings = 1, Layout = 2, GUI = 3, General = 4, Modules = 5, Notifications = 1}
+local PANE_TITLES = {Settings = 'Main', Layout = 'Layout', GUI = 'Interface', General = 'General', Modules = 'Modules', Notifications = false}
 
 local TAB_ORDER = {'Combat', 'Move', 'Visual', 'Utility', 'Kits', 'FFlags', 'Profiles', 'Unload'}
 
@@ -10483,9 +12232,7 @@ components.GUI = function(props, children, api)
 		Visible = clickgui.Visible,
 		ZIndex = 0
 	}, scaledgui)
-	clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
-		dim.Visible = clickgui.Visible
-	end)
+	-- Shown and hidden with the menu by layout.MenuShown, from the menu's deferred Visible watcher.
 	-- Tabs the layout left marked while the menu was shut are placed as it opens. Only a request:
 	-- nothing is written inside the property change.
 	clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
@@ -10514,8 +12261,8 @@ components.GUI = function(props, children, api)
 		BorderSizePixel = 0,
 		Size = UDim2.new(1, 0, 0, 42)
 	}, window)
-	ui.corner(bar, UDim.new(1, 0))
-	-- Equal slots from the bar's left edge; the last 42 px hold the search button.
+	ui.corner(bar, UDim.new(0, 20))
+	-- N equal slots across the bar: one per visible tab, and the last for the search magnifier.
 	local tabsFrame = ui.new('Frame', {
 		Name = 'Tabs',
 		BackgroundTransparency = 1,
@@ -10529,14 +12276,18 @@ components.GUI = function(props, children, api)
 		Position = UDim2.new(0, 6, 0.5, 0),
 		Size = UDim2.new(1 / #TAB_ORDER, -12, 0, 30)
 	}, tabsFrame)
-	ui.corner(activePill, UDim.new(1, 0))
+	ui.corner(activePill, UDim.new(0, 14))
 	local tabButtons = {}
 	for index, name in TAB_ORDER do
+		--[[ A tab takes presses on its slot's pill rect only, 6 px in from the slot's edges as the pill
+		is, so the gaps between the pills and the bar's margins are dead, as Slinky's are. Its name sits
+		centred in the slot, a pixel up. layoutTabs places them. ]]
 		tabButtons[name] = ui.text(tabsFrame, {Class = 'TextButton', Text = name, Size = 16, Weight = 'Medium',
 			Color = name == 'Unload' and theme.Red or theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
 				Name = name,
-				Position = UDim2.new((index - 1) / #TAB_ORDER, 0, 0, -1),
-				Size = UDim2.fromScale(1 / #TAB_ORDER, 1)
+				AnchorPoint = Vector2.new(0, 0.5),
+				Position = UDim2.new((index - 1) / #TAB_ORDER, 6, 0.5, -1),
+				Size = UDim2.new(1 / #TAB_ORDER, -12, 0, 30)
 			}})
 	end
 
@@ -10547,6 +12298,13 @@ components.GUI = function(props, children, api)
 		Position = UDim2.fromOffset(0, 50),
 		Size = UDim2.new(1, 0, 1, -50)
 	}, window)
+	--[[ The page a tab switch brings in fades up as it slides (ANIM_SPEC 1), and the page showing fades
+	up with the menu's open: each through its own cards' properties (ui.fade), the cards on screen
+	only, for the third of a second it lasts. Never through a CanvasGroup, which drew the whole page
+	into one texture, soft past the texture limit, and drew it again every frame. Not on a phone,
+	where the page only slides, cut at the pages' edges. Off a phone nothing cuts it: wherever it is
+	more than 96 px from its place, nothing of it shows. ]]
+	layout.FadePages = not isMobile()
 
 	local function makePage(name)
 		local page = ui.new('ScrollingFrame', {
@@ -10561,26 +12319,25 @@ components.GUI = function(props, children, api)
 			Size = UDim2.fromScale(1, 1),
 			Visible = false
 		}, pagesFrame)
-		local left = ui.new('Frame', {
-			Name = 'Left',
-			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
-			Size = UDim2.new(0.5, -theme.Gap / 2, 0, 0)
-		}, page)
-		ui.list(left, theme.Gap)
-		local right = ui.new('Frame', {
-			Name = 'Right',
-			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
-			Position = UDim2.new(0.5, theme.Gap / 2, 0, 0),
-			Size = UDim2.new(0.5, -theme.Gap / 2, 0, 0)
-		}, page)
-		ui.list(right, theme.Gap)
+		-- Left and Right, and Mid between them for Layout > Wide's third column (layout.place sizes them).
+		local function column(frameName)
+			local frame = ui.new('Frame', {
+				Name = frameName,
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(0.5, -theme.Gap / 2, 0, 0),
+				Visible = frameName ~= 'Mid'
+			}, page)
+			ui.list(frame, theme.Gap)
+			return frame
+		end
+		local left, mid, right = column('Left'), column('Mid'), column('Right')
+		right.Position = UDim2.new(0.5, theme.Gap / 2, 0, 0)
 		local empty = ui.text(page, {Text = name == 'Search' and 'No modules match.' or 'Nothing in this tab here.', Size = 15, Color = theme.Muted, AlignX = Enum.TextXAlignment.Center, Props = {
 			Size = UDim2.new(1, 0, 0, 60),
 			Visible = false
 		}})
-		layout.Pages[name] = {Frame = page, Left = left, Right = right, Empty = empty}
+		layout.Pages[name] = {Frame = page, Left = left, Mid = mid, Right = right, Empty = empty}
 	end
 	for _, name in TABS do
 		makePage(name)
@@ -10622,6 +12379,193 @@ components.GUI = function(props, children, api)
 		end
 	end
 
+	--[[ A tab switch, as Slinky's (ANIM_SPEC 1). The old page goes at once. The pill follows to the new
+	slot at 21.9 a second, its width kept, and the new page slides in from the side the pill left:
+	1.536 px for every pixel the pill still has to go, invisible until it is within 96 px (faded card
+	by card, ui.fade, off a phone). The page is placed off the pill each frame, so a click mid-way
+	simply carries on from where the pill is. X and Target are the pill's offset from the bar's left
+	in its own units, less the 6 px inset. Unload asks first, and the pill stays. ]]
+	layout.TabMotion = {Owner = activePill, X = 0, Target = 0, Index = 1, Slots = 1}
+	do
+		local motion = layout.TabMotion
+		-- The pill at its slot as a fraction of the bar, which keeps it right through a resize.
+		function motion.Rest()
+			activePill.Position = UDim2.new((motion.Index - 1) / math.max(motion.Slots, 1), 6, 0.5, 0)
+		end
+		-- Each frame of a switch, in whole units; a value that has not moved is not written again.
+		function motion.Draw()
+			local pillX = 6 + math.floor(motion.X + 0.5)
+			if pillX ~= motion.PillX then
+				motion.PillX = pillX
+				activePill.Position = UDim2.new(0, pillX, 0.5, 0)
+			end
+			local page = motion.Page
+			if page then
+				local offset = (motion.X - motion.Target) * 1.536
+				local pageX = math.floor(offset + 0.5)
+				if pageX ~= motion.PageX then
+					motion.PageX = pageX
+					page.Position = UDim2.fromOffset(pageX, 0)
+				end
+				local parts = motion.Parts
+				if parts then
+					local shown = 1 - math.clamp(math.abs(offset) / 96, 0, 1)
+					-- A switch made part way into the menu's open fades in with what is left of it too.
+					local open = layout.OpenMotion
+					if open and ui.anim.playing(window) then
+						shown *= open.P or 1
+					end
+					ui.fade.draw(parts, 1 - shown)
+				end
+			end
+		end
+		function motion.Step(dt)
+			motion.X = ui.anim.follow(motion.X, motion.Target, theme.FollowFast, dt)
+			if math.abs(motion.Target - motion.X) < 0.01 then
+				motion.Finish()
+				return true
+			end
+			motion.Draw()
+		end
+		-- The end state, or a switch cut short: the pill in its slot, the page in its place, and every
+		-- card it faded at its rest.
+		function motion.Finish()
+			motion.X = motion.Target
+			motion.PillX, motion.PageX = nil, nil
+			motion.Rest()
+			local page, parts = motion.Page, motion.Parts
+			motion.Page, motion.Parts = nil, nil
+			if page then
+				page.Position = UDim2.new()
+			end
+			if parts then
+				ui.fade.finish(parts)
+			end
+			pagesFrame.ClipsDescendants = false
+		end
+	end
+	--[[ Ends a switch still moving: before the bar is re-spaced, as the search opens or closes, and as
+	the menu shuts. An open still coming in ends with it there, as the bar is about to change under it.
+	A tab click (keepOpen) lets the open carry on, as Slinky's is one tween a click does not cut short:
+	the open lets go of the page it was fading, and the switch fades its own in with it (selectTab). ]]
+	function layout.FinishTabMotion(keepOpen)
+		if not keepOpen and layout.FinishOpenMotion then
+			layout.FinishOpenMotion()
+		end
+		ui.anim.stop(activePill, true)
+	end
+	ui.whenShut(layout.FinishTabMotion)
+
+	--[[ The menu coming in, as Slinky's (measured off its recording): one 0.3 s Quint Out from the
+	moment it opens, the window dropping the last 50 px (in the window's own zoom) as it fades up from
+	nothing, and the screen behind greying out with it to the dim's 0.75. It goes at once, window and
+	dim in the same frame. Started from the menu's deferred Visible watcher (layout.MenuShown), never
+	inside the change. The fade (ui.fade): the tab bar, the key footer and the cards on screen in the
+	page showing, part by part, for a third of a second. On a phone the window only slides, under the
+	dim. Not while the HUD is being moved. ]]
+	layout.OpenMotion = {Owner = window, T = 0}
+	do
+		local motion = layout.OpenMotion
+		-- One frame at progress p, 0 to 1: the window up by what is left of the 50 px, in whole units.
+		function motion.Draw(p)
+			motion.P = p
+			local at = UDim2.new(0.5, 0, 0, (layout.Top or 12) - math.floor(50 * (layout.Zoom or 1) * (1 - p) + 0.5))
+			if window.Position ~= at then
+				window.Position = at
+			end
+			dim.BackgroundTransparency = 1 - 0.75 * p
+			if motion.Parts then
+				ui.fade.draw(motion.Parts, 1 - p)
+			end
+			if motion.PageParts then
+				ui.fade.draw(motion.PageParts, 1 - p)
+			end
+		end
+		function motion.Step(dt)
+			motion.T += dt
+			local duration = theme.ModalInfo.Time
+			if motion.T >= duration then
+				motion.Finish()
+				return true
+			end
+			motion.Draw(ui.anim.quintOut(motion.T / duration))
+			motion.Tips()
+		end
+		-- A hint that comes up part way in rides along with the window, rather than waiting for the next check.
+		function motion.Tips()
+			if ui.tooltipShown then
+				pcall(ui.refreshTooltip)
+			end
+			pcall(ui.placeTips)
+		end
+		-- The page's cards back at their rest. A tab clicked part way in hides that page and fades its
+		-- own in with what is left of the open (TabMotion); the rest of the open carries on.
+		function motion.Release()
+			local parts = motion.PageParts
+			motion.PageParts = nil
+			if parts then
+				ui.fade.finish(parts)
+			end
+		end
+		-- The end state, or an open cut short: the window at rest, the dim at its 0.75, and every part
+		-- it faded at its rest.
+		function motion.Finish()
+			local parts = motion.Parts
+			motion.Parts, motion.P = nil, 1
+			window.Position = UDim2.new(0.5, 0, 0, layout.Top or 12)
+			dim.BackgroundTransparency = 0.25
+			motion.Release()
+			if parts then
+				ui.fade.finish(parts)
+			end
+			motion.Tips()
+		end
+		-- From the first frame: nothing of the window showing yet, 50 px up, and no dim.
+		function motion.Start()
+			ui.anim.stop(window, true)
+			motion.T = 0
+			if layout.FadePages then
+				-- Everything showing outside the pages, whole: the tab bar and the key footer.
+				local parts = ui.fade.new()
+				for _, child in window:GetChildren() do
+					if child ~= pagesFrame then
+						ui.fade.add(parts, child)
+					end
+				end
+				motion.Parts = parts
+				-- The page showing, unless a switch is fading it in already (with the open, as it is).
+				local switching = layout.TabMotion.Parts and layout.TabMotion.Page
+				for _, info in layout.Pages do
+					local page = info.Frame
+					if page.Visible and page ~= switching then
+						local pageParts = ui.fade.new()
+						ui.fade.page(pageParts, page)
+						motion.PageParts = pageParts
+						break
+					end
+				end
+			end
+			motion.Draw(0)
+			ui.anim.play(window, motion)
+		end
+	end
+	function layout.FinishOpenMotion()
+		ui.anim.stop(window, true)
+	end
+	-- The menu opened or shut: called from its deferred Visible watcher only. Owns the dim's Visible.
+	function layout.MenuShown(open)
+		local shown = open == true and not layout.MovingHud
+		dim.Visible = shown
+		if shown then
+			layout.OpenMotion.Start()
+			if layout.CheckFits then
+				layout.CheckFits()
+			end
+		else
+			layout.FinishOpenMotion()
+		end
+	end
+
 	local function selectTab(name)
 		if name == 'Unload' then
 			ui.confirm('Unload Pistonware from this game?', function()
@@ -10629,33 +12573,70 @@ components.GUI = function(props, children, api)
 			end, 'Unload')
 			return
 		end
+		local motion = layout.TabMotion
+		local visible = visibleTabs()
+		-- One slot in the bar's units; the pill now, mid-switch or in the old tab's slot.
+		local slot = tabsFrame.AbsoluteSize.X / (math.max(scale.Scale, 0.05) * (layout.Zoom or 1)) / math.max(#visible, 1)
+		local from = ui.anim.playing(activePill) and motion.X or ((table.find(visible, currentTab) or 1) - 1) * slot
+		layout.FinishTabMotion(true)
 		currentTab = name
 		showPages()
-		local visible = visibleTabs()
-		local index = table.find(visible, name) or 1
-		tween:Tween(activePill, uipallet.Tween, {
-			Position = UDim2.new((index - 1) / #visible, 6, 0.5, 0)
-		})
-		layout.request(name)
+		-- What the tab does as it opens (the FFlags list expanding) comes first, so it fades in with the page.
 		if layout.TabShown[name] then
 			task.spawn(layout.TabShown[name])
 		end
+		local index = table.find(visible, name) or 1
+		local info = layout.Pages[name]
+		motion.Index, motion.Slots = index, #visible
+		motion.X, motion.Target = from, (index - 1) * slot
+		if not (info and slot > 0 and ui.anim.onScreen(activePill)) or math.abs(motion.Target - from) < 0.5 then
+			-- The menu shut, the search open, the same tab: straight there.
+			motion.Finish()
+		else
+			local page = info.Frame
+			motion.Page = page
+			if layout.FadePages then
+				-- An open still coming in lets go of the page it was fading, hidden now.
+				if layout.OpenMotion then
+					layout.OpenMotion.Release()
+				end
+				motion.Parts = ui.fade.new()
+				ui.fade.page(motion.Parts, page)
+			else
+				pagesFrame.ClipsDescendants = true
+			end
+			motion.Draw()
+			ui.anim.play(activePill, motion)
+		end
+		layout.request(name)
 	end
 	component.SelectTab = selectTab
 
 	-- Re-spaces the bar over the tabs that are showing, and moves the pill with them.
 	local function layoutTabs()
+		-- A switch still moving ends first: the slots are about to change under it.
+		layout.FinishTabMotion()
 		local visible = visibleTabs()
+		local slots = #visible + 1 -- the last slot is the search magnifier's
+		tabsFrame.Size = UDim2.new(#visible / slots, 0, 1, 0)
 		for name, button in tabButtons do
 			local index = table.find(visible, name)
 			button.Visible = index ~= nil
 			if index then
-				button.Position = UDim2.new((index - 1) / #visible, 0, 0, -1)
-				button.Size = UDim2.fromScale(1 / #visible, 1)
+				-- On the slot's pill rect, as the pill is.
+				button.Position = UDim2.new((index - 1) / #visible, 6, 0.5, -1)
+				button.Size = UDim2.new(1 / #visible, -12, 0, 30)
 			end
 		end
 		activePill.Size = UDim2.new(1 / #visible, -12, 0, 30)
 		activePill.Position = UDim2.new(((table.find(visible, currentTab) or 1) - 1) / #visible, 6, 0.5, 0)
+		if layout.SearchButton then
+			layout.SearchButton.Position = UDim2.new((slots - 0.5) / slots, 0, 0.5, 0)
+			layout.SearchButton.Size = UDim2.new(1 / slots, -12, 0, 30)
+		end
+		if layout.SearchField then
+			layout.SearchField.Size = UDim2.new(#visible / slots, 0, 1, 0)
+		end
 	end
 
 	function layout.SetTabHidden(name, hidden)
@@ -10673,6 +12654,14 @@ components.GUI = function(props, children, api)
 		button.MouseButton1Click:Connect(function()
 			selectTab(name)
 		end)
+		--[[ Under the pointer a tab's name goes white, and Unload's red a lighter red (#EE5758), at
+		once; nothing is drawn behind it, as Slinky's. Never on a touch screen (ui.hover). ]]
+		local unload = name == 'Unload'
+		ui.hover(button, function()
+			button.TextColor3 = unload and theme.RedHover or theme.Lit
+		end, function()
+			button.TextColor3 = unload and theme.Red or theme.Text
+		end)
 	end
 
 	--[[ Search: the magnifier at the right of the bar swaps the tabs for a field;
@@ -10683,6 +12672,7 @@ components.GUI = function(props, children, api)
 		for the cross, the shape is built from frames on Lucide's 24-unit grid: a phone has no icon
 		files, and these must never fall back to a text character. ]]
 		local SEARCH_IMAGE = 'rbxassetid://70621958076101'
+		-- Returns the glyph's frame, and a function that paints every part of it one colour.
 		local function glyph(parent, size, cross)
 			local k = size / 24
 			local holder = ui.new('Frame', {
@@ -10692,6 +12682,7 @@ components.GUI = function(props, children, api)
 				Position = UDim2.fromScale(0.5, 0.5),
 				Size = UDim2.fromOffset(size, size)
 			}, parent)
+			local parts = {}
 			local function stroke(cx, cy, length, rotation)
 				local piece = ui.new('Frame', {
 					AnchorPoint = Vector2.new(0.5, 0.5),
@@ -10702,19 +12693,20 @@ components.GUI = function(props, children, api)
 					Size = UDim2.fromOffset(length * k, 2 * k)
 				}, holder)
 				ui.corner(piece, UDim.new(1, 0))
+				table.insert(parts, piece)
 			end
 			if cross then
 				-- Two strokes corner to corner, from (6, 6) to (18, 18), with their round caps.
 				stroke(12, 12, 18.97, 45)
 				stroke(12, 12, 18.97, -45)
 			elseif SEARCH_IMAGE ~= '' then
-				ui.new('ImageLabel', {
+				table.insert(parts, ui.new('ImageLabel', {
 					Name = 'Glyph',
 					BackgroundTransparency = 1,
 					Image = SEARCH_IMAGE,
 					ImageColor3 = theme.Text,
 					Size = UDim2.fromScale(1, 1)
-				}, holder)
+				}, holder))
 			else
 				-- The lens: a ring of radius 8 about (11, 11), 2 thick. A stroke draws outside its frame,
 				-- so the frame is the ring's inside.
@@ -10724,38 +12716,51 @@ components.GUI = function(props, children, api)
 					Size = UDim2.fromOffset(14 * k, 14 * k)
 				}, holder)
 				ui.corner(ring, UDim.new(1, 0))
-				ui.new('UIStroke', {
+				table.insert(parts, ui.new('UIStroke', {
 					ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 					Color = theme.Text,
 					Thickness = 2 * k
-				}, ring)
+				}, ring))
 				-- The handle, from (16.7, 16.7) to (21, 21).
 				stroke(18.85, 18.85, 8.08, 45)
 			end
-			return holder
+			local function paint(value)
+				for _, part in parts do
+					if part:IsA('ImageLabel') then
+						part.ImageColor3 = value
+					elseif part:IsA('UIStroke') then
+						part.Color = value
+					else
+						part.BackgroundColor3 = value
+					end
+				end
+			end
+			return holder, paint
 		end
 
+		-- The bar's last slot, the size of a tab's pill rect; layoutTabs sizes and places it.
 		local searchButton = ui.new('TextButton', {
 			Name = 'Search',
-			AnchorPoint = Vector2.new(1, 0.5),
+			AnchorPoint = Vector2.new(0.5, 0.5),
 			AutoButtonColor = false,
 			BackgroundColor3 = theme.Pill,
 			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
-			Position = UDim2.new(1, -6, 0.5, 0),
-			Size = UDim2.fromOffset(30, 30),
 			Text = ''
 		}, bar)
-		ui.corner(searchButton, UDim.new(1, 0))
+		ui.corner(searchButton, UDim.new(0, 14))
 		-- Both drawn 16 across, dead centre in the button.
-		local magnifier = glyph(searchButton, 16)
-		local cross = glyph(searchButton, 16, true)
+		local magnifier, paintMagnifier = glyph(searchButton, 16)
+		local cross, paintCross = glyph(searchButton, 16, true)
 		cross.Visible = false
-		searchButton.MouseEnter:Connect(function()
-			searchButton.BackgroundTransparency = 0
-		end)
-		searchButton.MouseLeave:Connect(function()
-			searchButton.BackgroundTransparency = 1
+		--[[ The search slot follows the tabs' hover: under the pointer the magnifier or the cross goes
+		white, at once, with nothing drawn behind it, and never on a touch screen (ui.hover). ]]
+		ui.hover(searchButton, function()
+			paintMagnifier(theme.Lit)
+			paintCross(theme.Lit)
+		end, function()
+			paintMagnifier(theme.Text)
+			paintCross(theme.Text)
 		end)
 		layout.SearchButton = searchButton
 
@@ -10765,7 +12770,9 @@ components.GUI = function(props, children, api)
 			Size = UDim2.new(1, -42, 1, 0),
 			Visible = false
 		}, bar)
-		-- Its centre as far in from the left as the button's is from the right: 21, the bar's half height.
+		-- Over the tabs' slots while it is open (layoutTabs sizes it).
+		layout.SearchField = searchField
+		-- Its centre 21 in from the left, the bar's half height.
 		local fieldIcon = glyph(searchField, 16)
 		fieldIcon.Position = UDim2.new(0, 21, 0.5, 0)
 		local searchBox = ui.text(searchField, {Class = 'TextBox', Size = 16, Color = theme.Text, Props = {
@@ -10794,6 +12801,7 @@ components.GUI = function(props, children, api)
 		-- Until when (os.clock) the open's focus run takes back a focus the box lost on its own.
 		local focusUntil = 0
 		local function closeSearch()
+			layout.FinishTabMotion()
 			focusToken += 1
 			focusUntil = 0
 			searchBox.Text = ''
@@ -10821,6 +12829,8 @@ components.GUI = function(props, children, api)
 		it is taken back the next frame, up to eight times; one the user took away ends the run
 		(FocusLost below). A newer open or a close ends an older run. ]]
 		local function openSearch()
+			-- A tab switch still moving ends before its page gives way to the search's.
+			layout.FinishTabMotion()
 			searchField.Visible = true
 			layout.SearchOpen = true
 			showPages()
@@ -10896,13 +12906,18 @@ components.GUI = function(props, children, api)
 			end
 		end))
 	end
+	-- The search button and field exist now: into their slots.
+	layoutTabs()
 
-	--[[ Two columns when they fit, one on a narrow screen. The window is in GUI units, which the
-	UIScale shrinks with the screen. With Auto rescale on, the window also gets a zoom of its own:
+	--[[ Two columns when they fit, one on a narrow screen, and three with Layout > Wide on a screen
+	wide enough. The window is in GUI units, which the UIScale shrinks with the screen. With Auto
+	rescale on, the window also gets a zoom of its own:
 	the rescale that keeps the HUD in proportion would leave the menu under half a phone wide with
 	7px text. It is sized to the screen instead, up to 0.85, and never below the HUD's scale. The
 	manual Scale slider is left exactly as set. ]]
 	local zoom = ui.new('UIScale', {Scale = 1}, window)
+	-- The window's width: Slinky's two columns, or its Wide layout's three.
+	local NARROW, WIDE = 876, 1476
 	local function resize()
 		if not window.Parent then return end
 		local s = math.max(scale.Scale, 0.05)
@@ -10910,9 +12925,13 @@ components.GUI = function(props, children, api)
 		local pxWidth = viewportWidth()
 		local pxHeight = camera and camera.ViewportSize.Y or 0
 		local avail = pxWidth - 16
-		local width, factor = math.floor(math.min(876, math.max(pxWidth / s - 16, 320))), 1
-		if vape.Scale and vape.Scale.Enabled and pxHeight > 0 and avail > 0 then
-			local target = avail / 876 < 0.55 and theme.CardWidth + 8 or 876
+		local autoOn = vape.Scale and vape.Scale.Enabled and pxHeight > 0 and avail > 0
+		-- Wide only where its window stays readable: an Auto zoom of at least 0.7.
+		local useWide = layout.Wide and not (autoOn and avail / WIDE < 0.7)
+		local maxWidth = useWide and WIDE or NARROW
+		local width, factor = math.floor(math.min(maxWidth, math.max(pxWidth / s - 16, 320))), 1
+		if autoOn then
+			local target = useWide and WIDE or (avail / NARROW < 0.55 and theme.CardWidth + 8 or NARROW)
 			if target * s <= avail then
 				width = target
 				factor = math.max(s, math.min(avail / width, 0.85)) / s
@@ -10943,19 +12962,20 @@ components.GUI = function(props, children, api)
 		else
 			window.Size = UDim2.new(0, width, 1, -24)
 		end
-		-- Seven tabs have to share a single-column bar, less the search button's 42.
-		local tabSize = math.clamp(math.floor(((width - 42) / #visibleTabs() - 6) / 4.6), 10, 16)
+		-- The visible tabs and the search magnifier share the bar in equal slots: 16 em px at 876 and
+		-- 1476 wide, 10 on the single-column bar.
+		local tabSize = theme.em(math.clamp(math.floor((width / (#visibleTabs() + 1) - 6) / 4.6), 10, 16))
 		for _, button in tabButtons do
 			button.TextSize = tabSize
 		end
-		local columns = width >= 700 and 2 or 1
+		local columns = width >= 1100 and 3 or (width >= 700 and 2 or 1)
 		if columns ~= layout.Columns then
 			layout.Columns = columns
 			layout.request('*')
 		end
 		local profiles = vape.Categories.Profiles
 		if profiles and profiles.Grid then
-			profiles.Grid.CellSize = columns == 2 and UDim2.new(0.5, -theme.Gap / 2, 0, 72) or UDim2.new(1, 0, 0, 72)
+			profiles.Grid.CellSize = UDim2.new(1 / columns, -theme.Gap * (columns - 1) / columns, 0, 72)
 		end
 	end
 	component.Resize = resize
@@ -11112,6 +13132,8 @@ components.GUISlider = function(props, children, api)
 		Text = ''
 	}, line)
 	ui.corner(swatch, UDim.new(1, 0))
+	-- Slinky's 1 px ring round the swatch.
+	ui.stroke(swatch, theme.Outline, 1, 0)
 	local swatchGradient = ui.new('UIGradient', {}, swatch)
 	addTooltip(line, 'The colour switches, sliders and highlights use')
 
@@ -11157,9 +13179,10 @@ components.GUISlider = function(props, children, api)
 	reset.MouseButton1Click:Connect(function()
 		component:SetValue(nil, nil, nil, 2)
 	end)
-	-- COPY puts the accent's hex code on the clipboard, and says so for a moment.
+	-- COPY puts the accent's hex code on the clipboard, and says so for a moment. A longer word (NO
+	-- CLIPBOARD) widens it leftward, away from RESET.
 	local copy = ui.text(presets, {Class = 'TextButton', Text = 'COPY', Size = 12, Weight = 'Bold', Color = theme.SubText, AlignX = Enum.TextXAlignment.Center, Props = {
-		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -theme.Inset - 56, 0.5, 0), Size = UDim2.fromOffset(52, 24)
+		AnchorPoint = Vector2.new(1, 0.5), AutomaticSize = Enum.AutomaticSize.X, Position = UDim2.new(1, -theme.Inset - 56, 0.5, 0), Size = UDim2.fromOffset(52, 24)
 	}})
 	local copyStamp = 0
 	copy.MouseButton1Click:Connect(function()
@@ -11178,8 +13201,9 @@ components.GUISlider = function(props, children, api)
 
 	local function pickerTrack(name, gradientColor, value)
 		local row = ui.row(picker, {}, 26)
+		-- As wide as the room left of the track, 8 short of it: the track starts 12 before 40% of the row.
 		ui.text(row, {Text = name, Size = 13, Color = theme.SubText, Props = {
-			Position = UDim2.fromOffset(theme.Inset + 12, 0), Size = UDim2.fromOffset(80, 26)
+			Position = UDim2.fromOffset(theme.Inset + 12, 0), Size = UDim2.new(0.4, -(theme.Inset * 3 + 8), 0, 26)
 		}})
 		local holder = ui.new('Frame', {
 			Name = 'Holder',
@@ -11242,7 +13266,8 @@ components.GUISlider = function(props, children, api)
 		local base = Color3.fromHSV(component.Hue, component.Sat, component.Value)
 		swatchGradient.Color = ColorSequence.new({
 			ColorSequenceKeypoint.new(0, base),
-			ColorSequenceKeypoint.new(1, Color3.fromHSV(component.Hue, component.Sat, component.Value * 0.35))
+			-- Fading 73% of the way into the card, as Slinky's swatch does.
+			ColorSequenceKeypoint.new(1, base:Lerp(theme.Card, 0.73))
 		})
 		for index, preset in presetButtons do
 			preset.Ring.Enabled = not component.Rainbow and not component.CustomColor and component.Notch == index
@@ -11466,10 +13491,11 @@ components.LegitModule = function(props, children, api)
 		objectstroke.Enabled = false
 		objectstroke.Parent = modulechildren
 		component.Children = modulechildren
-		vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
+		-- Outlined while the menu is open: set after the menu's change, never inside it.
+		ui.whenMenu(function()
 			objectstroke.Enabled = clickgui.Visible
 			objectstroke.Color = theme.Accent()
-		end))
+		end)
 	end
 	props.Function = props.Function or function() end
 	addMaid(component)
@@ -11614,7 +13640,8 @@ components.LegitWindow = function(props, children, api)
 		end
 	end
 
-	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(visibleCheck))
+	-- After the menu's change, never inside it.
+	ui.whenMenu(visibleCheck)
 
 	vape.Legit = component
 
@@ -11647,15 +13674,16 @@ components.Module = function(props, children, api)
 	local card = view.Card
 	component.Object = card
 	component.BindParent = view.NameRow
-	-- Resting on the module's name shows its help centred over the whole card, just above it.
-	addRowTooltip(view.Header, props.Tooltip, view.Header, view.Title)
+	-- Resting on the module's name shows its help centred over the whole card, just above it. The
+	-- name keeps its colour meanwhile, as Slinky's does.
+	addRowTooltip(view.Header, props.Tooltip, view.Header, view.Title, nil, true)
 	local modulechildren = view.Body
 	component.Children = modulechildren
 	local expanded = false
 
 	-- Shown while hidden modules are being edited: the eye that hides or shows this card.
 	local edit = ui.icon(view.NameRow, 'eye', 15, {Class = 'TextButton', Color = theme.SubText, Props = {
-		Name = 'Edit', LayoutOrder = 3, Size = UDim2.fromOffset(22, 22), Visible = false
+		Name = 'Edit', LayoutOrder = 3, Size = UDim2.fromOffset(22, 20), Visible = false
 	}})
 	component.Edit = edit
 	props.Function = props.Function or function() end
@@ -12143,9 +14171,10 @@ components.Overlay = function(props, children, api)
 		end
 	end)
 
-	vape:Clean(clickgui:GetPropertyChangedSignal('Visible'):Connect(function()
+	-- Shown and hidden with the menu after its change (ui.whenMenu), never inside the write to Visible.
+	ui.whenMenu(function()
 		component:Update()
-	end))
+	end)
 
 	view.Header.MouseButton1Click:Connect(function()
 		component.Button:Toggle()
@@ -12252,8 +14281,16 @@ components.SettingsPane = function(props, children, api)
 	return component
 end
 
-local function sliderText(value, suffix)
-	return tostring(value)..(suffix and ' '..(type(suffix) == 'function' and suffix(value) or suffix) or '')
+--[[ A slider's value as its hint and its phone label print it: with as many decimals as its step
+has, so 2.70 blocks, 100 ms or 2.0 s, as Slinky prints them. A value off its step (one typed in)
+keeps all its digits. Only what is shown; the saved value is untouched. ]]
+local function sliderText(value, suffix, decimal)
+	local places = math.max(0, math.floor(math.log10(decimal or 1) + 0.5))
+	local text = string.format('%.'..places..'f', value)
+	if tonumber(text) ~= value then
+		text = tostring(value)
+	end
+	return text..(suffix and ' '..(type(suffix) == 'function' and suffix(value) or suffix) or '')
 end
 
 components.Slider = function(props, children, api)
@@ -12273,12 +14310,14 @@ components.Slider = function(props, children, api)
 		Size = UDim2.new(0.5, -theme.Inset, 1, 0)
 	}, slider)
 	ui.list(left, 6, true)
-	ui.text(left, {Text = props.DisplayName or props.Name, Size = 15, Color = theme.Label, Props = {
+	-- A name too long for its half of the row gives way, cut with an ellipsis, rather than run under the
+	-- track; on a phone the value beside it stays whole.
+	ui.fitTitle(left, ui.text(left, {Text = props.DisplayName or props.Name, Size = 15, Color = theme.Label, Props = {
 		Name = 'Label', AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 1, Size = UDim2.fromOffset(0, theme.RowHeight)
-	}})
-	-- Slinky prints no value beside a slider: it shows in a bubble over the knob while the slider is
+	}}))
+	-- Slinky prints no value beside a slider: it shows in a hint over the knob while the track is
 	-- hovered or dragged. On a phone it also sits here, where a tap types one (Ctrl-click on a PC).
-	local valuelabel = ui.text(left, {Class = 'TextButton', Text = sliderText(component.Value, props.Suffix), Size = 13, Color = theme.SubText, Props = {
+	local valuelabel = ui.text(left, {Class = 'TextButton', Text = sliderText(component.Value, props.Suffix, props.Decimal), Size = 13, Color = theme.SubText, Props = {
 		Name = 'Value', AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2, Size = UDim2.fromOffset(0, theme.RowHeight), Visible = isMobile()
 	}})
 	local custombox = ui.text(left, {Class = 'TextBox', Size = 13, Color = theme.Text, Props = {
@@ -12305,7 +14344,7 @@ components.Slider = function(props, children, api)
 		Size = UDim2.fromScale(fraction(component.Value), 1)
 	}, holder)
 	ui.corner(fill, UDim.new(1, 0))
-	-- The knob only moves; the dot inside it grows on hover, so neither animation cancels the other.
+	-- The knob holds the 12 px dot. It moves with the value, at once, and never grows (Slinky's does not).
 	local knob = ui.new('Frame', {
 		Name = 'Knob',
 		AnchorPoint = Vector2.new(0.5, 0.5),
@@ -12322,15 +14361,6 @@ components.Slider = function(props, children, api)
 		Size = UDim2.fromOffset(12, 12)
 	}, knob)
 	ui.corner(dot, UDim.new(1, 0))
-	local bubble = ui.knobBubble(knob)
-	local hovering, dragging = false, false
-	local function showBubble()
-		if hovering or dragging then
-			bubble:Show(sliderText(component.Value, props.Suffix))
-		else
-			bubble:Hide()
-		end
-	end
 	local hit = ui.new('TextButton', {
 		Name = 'Hit',
 		AnchorPoint = Vector2.new(1, 0),
@@ -12339,6 +14369,51 @@ components.Slider = function(props, children, api)
 		Size = UDim2.new(0.5, 0, 1, 0),
 		Text = ''
 	}, slider)
+	--[[ The value shows in a hint over the knob while the track is hovered (with a mouse) or dragged
+	(a finger too), as Slinky's does, in the pill and with the motion every hint has. Built the first
+	time it shows, on the menu's own layer, so a slider at the top of a scrolled page shows it whole. ]]
+	local tip, hoverEntry
+	local hovering, dragging, where = false, false, fraction(component.Value)
+	local function placeTip(appearing)
+		local corner, size = holder.AbsolutePosition, holder.AbsoluteSize
+		local centre = Vector2.new(corner.X + where * size.X, corner.Y + size.Y / 2)
+		-- Only while the knob itself is showing: its row open and on its tab, and inside its page.
+		if not ui.rowShowing(holder, centre) then
+			ui.tipHide(tip)
+			return
+		end
+		local s = math.max(scale.Scale, 0.05)
+		local zoom = layout and layout.Zoom or 1
+		local origin = scaledgui.AbsolutePosition
+		-- Its bottom 10 px over the track's centre line.
+		ui.tipPlace(tip, (centre.X - origin.X) / s, (centre.Y - origin.Y) / s - (10 + 20) * zoom, 20, appearing)
+	end
+	local function showTip()
+		if hovering or dragging then
+			if not tip then
+				tip = ui.newTip('SliderTip', true)
+				-- Asked again when the page scrolls under a still pointer (ui.placeTips).
+				tip.Place = function()
+					if hoverEntry then
+						local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
+						hoverEntry.Check(ui.within(point, hit.AbsolutePosition, hit.AbsoluteSize))
+					end
+					if tip.Label.Visible then
+						placeTip(false)
+					end
+				end
+				pcall(function()
+					holder.Destroying:Connect(function()
+						tip.Label:Destroy()
+					end)
+				end)
+			end
+			tip.Label.Text = sliderText(component.Value, props.Suffix, props.Decimal)
+			placeTip(not tip.Label.Visible)
+		elseif tip then
+			ui.tipHide(tip)
+		end
+	end
 	props.Function = props.Function or function() end
 	props.Decimal = props.Decimal or 1
 
@@ -12371,14 +14446,21 @@ components.Slider = function(props, children, api)
 			return
 		end
 
-		local where = position or fraction(value)
-		tween:Tween(fill, uipallet.Tween, {Size = UDim2.fromScale(where, 1)})
-		tween:Tween(knob, uipallet.Tween, {Position = UDim2.fromScale(where, 0.5)})
+		-- In the frame the value changes, with no easing: the knob follows the pointer 1:1, as Slinky's.
+		where = position or fraction(value)
+		fill.Size = UDim2.fromScale(where, 1)
+		knob.Position = UDim2.fromScale(where, 0.5)
+		-- Its hint follows the knob in the same frame.
+		if tip and tip.Label.Visible then
+			placeTip(false)
+		end
 
 		if self.Value ~= value or wasReleased then
 			self.Value = value
-			valuelabel.Text = sliderText(self.Value, props.Suffix)
-			bubble:SetText(valuelabel.Text)
+			valuelabel.Text = sliderText(self.Value, props.Suffix, props.Decimal)
+			if tip then
+				tip.Label.Text = valuelabel.Text
+			end
 			props.Function(value, wasReleased)
 			vape:RequestSave()
 		end
@@ -12399,26 +14481,28 @@ components.Slider = function(props, children, api)
 			return
 		end
 		dragging = true
-		showBubble()
+		showTip()
 		trackDrag(input, holder, function(position)
 			component:SetValue(math.floor((props.Min + (props.Max - props.Min) * position) * props.Decimal) / props.Decimal, position)
 		end, function(position)
 			component:SetValue(component.Value, position, true)
 			dragging = false
-			showBubble()
+			showTip()
 		end)
 	end)
 
-	hit.MouseEnter:Connect(function()
+	-- The hint's hover zone: the track's length, 10.5 px either side of its centre line, wherever the
+	-- knob is. The press still takes the row's right half; the knob does not grow (Slinky's does not).
+	hoverEntry = ui.hover(hit, function()
 		hovering = true
-		showBubble()
-		tween:Tween(dot, uipallet.Tween, {Size = UDim2.fromOffset(14, 14)})
-	end)
-
-	hit.MouseLeave:Connect(function()
+		showTip()
+	end, function()
 		hovering = false
-		showBubble()
-		tween:Tween(dot, uipallet.Tween, {Size = UDim2.fromOffset(12, 12)})
+		showTip()
+	end, function(point)
+		local corner, size = holder.AbsolutePosition, holder.AbsoluteSize
+		local middle = corner.Y + size.Y / 2
+		return point.X >= corner.X and point.X <= corner.X + size.X and math.abs(point.Y - middle) <= 10.5 * size.Y / 4
 	end)
 
 	valuelabel.MouseButton1Click:Connect(editValue)
@@ -12630,18 +14714,53 @@ components.TextBox = function(props, children, api)
 	ui.rowLabel(textbox, props)
 	addTooltip(textbox, props.Tooltip)
 	local holder = ui.pill(textbox, {Class = 'Frame'})
+	--[[ Clipped: a pasted blob -- a 20,000-character FFlag list, line breaks and all -- stays inside
+	the pill instead of drawing across the menu. MultiLine and TextWrapped below restate the TextBox
+	defaults (one line, never wrapped), so nothing that styles the box turns them on. ]]
+	holder.ClipsDescendants = true
 	local inputbox = ui.text(holder, {Class = 'TextBox', Size = 14, Color = theme.Text, Props = {
 		ClearTextOnFocus = false,
+		MultiLine = false,
 		PlaceholderColor3 = theme.Muted,
 		PlaceholderText = props.Placeholder or 'Click to set',
 		Position = UDim2.fromOffset(12, 0),
 		Size = UDim2.new(1, -24, 1, 0),
 		Text = props.Default or '',
-		TextTruncate = Enum.TextTruncate.AtEnd
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextWrapped = false
 	}})
 	props.Function = props.Function or function() end
 
+	--[[ What the box owes since its text last settled: one Function call and one save, however the
+	text came in -- a keystroke, a burst of them, one paste of any size -- run deferred, once the
+	signal that brought it has returned. `enter` is FocusLost's, carried into that one call. ]]
+	local owed, owedEnter = false, nil
+	local function settle()
+		if not owed then return end
+		owed = false
+		local enter = owedEnter
+		owedEnter = nil
+		--[[ Unloaded since the text changed or the box lost focus: loopClean has stripped vape bare,
+		and there is nothing left to run or save. ]]
+		if vape.Loaded == nil then return end
+		props.Function(enter)
+		vape:RequestSave()
+	end
+	local function owe(enter)
+		if enter ~= nil then
+			owedEnter = enter
+		end
+		if not owed then
+			owed = true
+			task.defer(settle)
+		end
+	end
+
 	function component:Load(data)
+		--[[ Transient (the import boxes): input that is used and emptied, never restored. A paste an
+		older build saved -- twenty thousand characters of FFlags in gui.txt -- is dropped here, and
+		the next save writes the box back empty. ]]
+		if props.Transient then return end
 		if self.Value ~= data.Value then
 			self:SetValue(data.Value)
 		end
@@ -12649,11 +14768,13 @@ components.TextBox = function(props, children, api)
 
 	function component:Save(data)
 		data[props.Name] = {
-			Value = self.Value
+			Value = props.Transient and '' or self.Value
 		}
 	end
 
 	function component:SetValue(val, enter)
+		-- This call carries any change still owed.
+		owed, owedEnter = false, nil
 		self.Value = val
 		inputbox.Text = val
 		props.Function(enter)
@@ -12661,13 +14782,19 @@ components.TextBox = function(props, children, api)
 	end
 
 	inputbox.FocusLost:Connect(function(enter)
-		component:SetValue(inputbox.Text, enter)
+		component.Value = inputbox.Text
+		owe(enter == true)
 	end)
 
+	--[[ Records the text, and nothing else: this is a property-changed handler, which BedWars fires
+	immediately. Writing the box back from here (SetValue did) and running Function and a save on
+	every keystroke and on a paste is the pattern that crashed clients. ]]
 	inputbox:GetPropertyChangedSignal('Text'):Connect(function()
+		local text = inputbox.Text
 		-- SetValue writes the text this listens to; that echo carries nothing new.
-		if inputbox.Text == component.Value then return end
-		component:SetValue(inputbox.Text)
+		if text == component.Value then return end
+		component.Value = text
+		owe()
 	end)
 
 	api.Options[props.Name] = component
@@ -12939,7 +15066,6 @@ components.Toggle = function(props, children, api)
 end
 
 components.TwoSlider = function(props, children, api)
-	local knobTween = TweenInfo.new(0.1)
 	local component = {
 		Index = getTableSize(api.Options),
 		Max = props.Max,
@@ -12957,10 +15083,11 @@ components.TwoSlider = function(props, children, api)
 		Size = UDim2.new(0.5, -theme.Inset, 1, 0)
 	}, twoslider)
 	ui.list(left, 6, true)
-	ui.text(left, {Text = props.DisplayName or props.Name, Size = 15, Color = theme.Label, Props = {
+	-- As the plain slider's: a long name gives way to the track and, on a phone, to the two ends.
+	ui.fitTitle(left, ui.text(left, {Text = props.DisplayName or props.Name, Size = 15, Color = theme.Label, Props = {
 		Name = 'Label', AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 1, Size = UDim2.fromOffset(0, theme.RowHeight)
-	}})
-	-- No min and max text at rest, as in Slinky: each knob gets a value bubble while the slider is
+	}}))
+	-- No min and max text at rest, as in Slinky: each knob gets a value hint while the slider is
 	-- hovered or dragged. On a phone the two ends also sit here, where a tap types one.
 	local minvalue = ui.text(left, {Class = 'TextButton', Text = tostring(component.ValueMin), Size = 13, Color = theme.SubText, Props = {
 		Name = 'Min', AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2, Size = UDim2.fromOffset(0, theme.RowHeight), Visible = isMobile()
@@ -12988,6 +15115,8 @@ components.TwoSlider = function(props, children, api)
 		local low = props.Min or 0
 		return math.clamp((value - low) / math.max(props.Max - low, 1e-9), 0, 1)
 	end
+	-- Where each knob is drawn along the bar: its value's place, or the pointer's while it is dragged.
+	local drawn = {Min = sliderFraction(component.ValueMin), Max = sliderFraction(component.ValueMax)}
 	local fill = ui.new('Frame', {
 		BackgroundColor3 = theme.Accent(),
 		BorderSizePixel = 0,
@@ -13010,17 +15139,6 @@ components.TwoSlider = function(props, children, api)
 		Size = UDim2.fromOffset(12, 12)
 	}, holder)
 	ui.corner(knobmax, UDim.new(1, 0))
-	local bubbleMin, bubbleMax = ui.knobBubble(knob), ui.knobBubble(knobmax)
-	local hovering, dragging = false, false
-	local function showBubbles()
-		if hovering or dragging then
-			bubbleMin:Show(tostring(component.ValueMin))
-			bubbleMax:Show(tostring(component.ValueMax))
-		else
-			bubbleMin:Hide()
-			bubbleMax:Hide()
-		end
-	end
 	local hit = ui.new('TextButton', {
 		Name = 'Hit',
 		AnchorPoint = Vector2.new(1, 0),
@@ -13029,6 +15147,60 @@ components.TwoSlider = function(props, children, api)
 		Size = UDim2.new(0.5, 0, 1, 0),
 		Text = ''
 	}, twoslider)
+	--[[ Each knob's value in a hint over it while the track is hovered (with a mouse) or dragged (a
+	finger too), as the plain slider's: built the first time they show. ]]
+	local tipMin, tipMax, hoverEntry
+	local hovering, dragging = false, false
+	local function placeTip(tip, value, appearing)
+		local corner, size = holder.AbsolutePosition, holder.AbsoluteSize
+		-- Over its knob, wherever that is drawn.
+		local where = tip == tipMax and drawn.Max or tip == tipMin and drawn.Min or sliderFraction(value)
+		local centre = Vector2.new(corner.X + where * size.X, corner.Y + size.Y / 2)
+		-- Only while the knob itself is showing: its row open and on its tab, and inside its page.
+		if not ui.rowShowing(holder, centre) then
+			ui.tipHide(tip)
+			return
+		end
+		local s = math.max(scale.Scale, 0.05)
+		local zoom = layout and layout.Zoom or 1
+		local origin = scaledgui.AbsolutePosition
+		-- Its bottom 10 px over the track's centre line.
+		ui.tipPlace(tip, (centre.X - origin.X) / s, (centre.Y - origin.Y) / s - (10 + 20) * zoom, 20, appearing)
+	end
+	local function showTips()
+		if hovering or dragging then
+			if not tipMin then
+				tipMin, tipMax = ui.newTip('SliderTip', true), ui.newTip('SliderTip', true)
+				-- Asked again when the page scrolls under a still pointer (ui.placeTips), once for both.
+				local function place()
+					if hoverEntry then
+						local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
+						hoverEntry.Check(ui.within(point, hit.AbsolutePosition, hit.AbsoluteSize))
+					end
+					if tipMin.Label.Visible then
+						placeTip(tipMin, component.ValueMin, false)
+					end
+					if tipMax.Label.Visible then
+						placeTip(tipMax, component.ValueMax, false)
+					end
+				end
+				tipMin.Place, tipMax.Place = place, place
+				pcall(function()
+					holder.Destroying:Connect(function()
+						tipMin.Label:Destroy()
+						tipMax.Label:Destroy()
+					end)
+				end)
+			end
+			tipMin.Label.Text = sliderText(component.ValueMin, props.Suffix, props.Decimal)
+			tipMax.Label.Text = sliderText(component.ValueMax, props.Suffix, props.Decimal)
+			placeTip(tipMin, component.ValueMin, not tipMin.Label.Visible)
+			placeTip(tipMax, component.ValueMax, not tipMax.Label.Visible)
+		elseif tipMin then
+			ui.tipHide(tipMin)
+			ui.tipHide(tipMax)
+		end
+	end
 	props.Function = props.Function or function() end
 	props.Decimal = props.Decimal or 1
 	local random = Random.new()
@@ -13077,7 +15249,23 @@ components.TwoSlider = function(props, children, api)
 		}
 	end
 
-	function component:SetValue(isMax, value)
+	--[[ Slinky moves a knob in the frame its value changes, with no easing; one being dragged is drawn
+	under the pointer, 1:1 as the plain slider's, whatever step its value is on. ]]
+	local function drawKnob(isMax, where)
+		drawn[isMax and 'Max' or 'Min'] = where
+		local low, high = drawn.Min, drawn.Max
+		fill.Position = UDim2.fromScale(math.min(low, high), 0)
+		fill.Size = UDim2.fromScale(math.abs(high - low), 1)
+		knob.Position = UDim2.fromScale(low, 0.5)
+		knobmax.Position = UDim2.fromScale(high, 0.5)
+		-- The hints follow the knobs in the same frame.
+		if tipMin and (tipMin.Label.Visible or tipMax.Label.Visible) then
+			showTips()
+		end
+	end
+
+	-- position: where along the bar the pointer dragging this knob is; otherwise the value's place.
+	function component:SetValue(isMax, value, position)
 		if not isFiniteNumber(value) then
 			return
 		end
@@ -13086,15 +15274,7 @@ components.TwoSlider = function(props, children, api)
 		maxvalue.Text = tostring(self.ValueMax)
 		minvalue.Text = tostring(self.ValueMin)
 
-		local low, high = sliderFraction(self.ValueMin), sliderFraction(self.ValueMax)
-		tween:Tween(fill, knobTween, {
-			Position = UDim2.fromScale(math.min(low, high), 0),
-			Size = UDim2.fromScale(math.abs(high - low), 1)
-		})
-		tween:Tween(knob, knobTween, {Position = UDim2.fromScale(low, 0.5)})
-		tween:Tween(knobmax, knobTween, {Position = UDim2.fromScale(high, 0.5)})
-		bubbleMin:SetText(tostring(self.ValueMin))
-		bubbleMax:SetText(tostring(self.ValueMax))
+		drawKnob(isMax, type(position) == 'number' and math.clamp(position, 0, 1) or sliderFraction(value))
 
 		props.Function(self.ValueMin, self.ValueMax, isMax)
 		vape:RequestSave()
@@ -13113,25 +15293,31 @@ components.TwoSlider = function(props, children, api)
 			return
 		end
 		dragging = true
-		showBubbles()
+		showTips()
 		trackDrag(input, holder, function(position)
 			local value = math.floor((props.Min + (props.Max - props.Min) * position) * props.Decimal) / props.Decimal
-			-- Every pointer move lands here; one that leaves the value on the same step changes nothing.
+			-- Every pointer move lands here: the knob goes under it, and only a new step is a new value.
 			if value ~= component[maxCheck and 'ValueMax' or 'ValueMin'] then
-				component:SetValue(maxCheck, value)
+				component:SetValue(maxCheck, value, position)
+			else
+				drawKnob(maxCheck, position)
 			end
 		end, function()
 			dragging = false
-			showBubbles()
+			showTips()
 		end)
 	end)
-	hit.MouseEnter:Connect(function()
+	-- The hints' hover zone: the track's length, 10.5 px either side of its centre line.
+	hoverEntry = ui.hover(hit, function()
 		hovering = true
-		showBubbles()
-	end)
-	hit.MouseLeave:Connect(function()
+		showTips()
+	end, function()
 		hovering = false
-		showBubbles()
+		showTips()
+	end, function(point)
+		local corner, size = holder.AbsolutePosition, holder.AbsoluteSize
+		local middle = corner.Y + size.Y / 2
+		return point.X >= corner.X and point.X <= corner.X + size.X and math.abs(point.Y - middle) <= 10.5 * size.Y / 4
 	end)
 
 	maxvalue.MouseButton1Click:Connect(function()
