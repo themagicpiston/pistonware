@@ -12040,15 +12040,13 @@ components.Dropdown = function(props, children, api)
 		layout.OpenLists[closeList] = true
 		box.Watch = inputService.InputBegan:Connect(function(input)
 			if not (isPress(input) or input.UserInputType == Enum.UserInputType.MouseButton2) then return end
-			--[[ An InputObject's position is measured under Roblox's top bar, and this ScreenGui ignores
-			the inset, so the box's is from the top of the screen: the press is moved down by the bar
-			first, as the drag handlers do. Unmoved, a press on the top of an open list (36 or 58 px of
-			it) counted as outside, closed it and took the choice away before its click. ]]
-			local inset = 0
-			pcall(function()
-				inset = guiService:GetGuiInset().Y
-			end)
-			if not ui.within(Vector2.new(input.Position.X, input.Position.Y + inset), button.AbsolutePosition, button.AbsoluteSize) then
+			--[[ An InputObject's position and a GuiObject's AbsolutePosition are both measured under
+			Roblox's top bar, whether or not the ScreenGui ignores the inset (in game, a frame drawn 4 px
+			from the top of this one reads AbsolutePosition.Y -54), so they are compared as they are. The
+			drag handlers add the inset because they turn a press into an offset, which is in screen
+			pixels here. Moved down by the bar, every press below the list's first ~28 px counted as
+			outside: it closed the list and took the choice away before its click. ]]
+			if not ui.within(Vector2.new(input.Position.X, input.Position.Y), button.AbsolutePosition, button.AbsoluteSize) then
 				closeList()
 			end
 		end)
