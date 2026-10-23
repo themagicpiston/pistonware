@@ -2490,7 +2490,7 @@ else
 	return
 end
 do
-	local unsupported = {'xeno', 'solara'}
+	local unsupported = {'xeno'}
 	local executorName = ''
 	pcall(function()
 		executorName = identifyexecutor and identifyexecutor() or ''
