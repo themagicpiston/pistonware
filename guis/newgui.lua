@@ -14291,6 +14291,28 @@ local function sliderText(value, suffix, decimal)
 	return text..(suffix and ' '..(type(suffix) == 'function' and suffix(value) or suffix) or '')
 end
 
+--[[ A value typed into a slider's box, by a tap on its number or a Ctrl-click: the first number in the
+text, so a phone keyboard's stray letters do not throw it away and a comma works as the point, on the
+slider's own step and kept to its range. nil when the text holds no number: the value stays as it was. ]]
+function ui.sliderTyped(text, props, low, high)
+	text = tostring(text or ''):gsub(',', '.')
+	local found = text:match('%-?%d*%.?%d+')
+	local number = tonumber(text) or (found and tonumber(found))
+	if not isFiniteNumber(number) then
+		return nil
+	end
+	local step = props.Decimal or 1
+	return math.clamp(math.floor(number * step + 0.5) / step, low, high)
+end
+
+--[[ The box opens empty with the value it would replace as its placeholder: what is typed is the new
+value, not more digits after the old one, and closing it untouched changes nothing. ]]
+function ui.startSliderEdit(box, value)
+	box.PlaceholderText = tostring(value)
+	box.Text = ''
+	box:CaptureFocus()
+end
+
 components.Slider = function(props, children, api)
 	local component = {
 		Index = getTableSize(api.Options),
@@ -14467,8 +14489,7 @@ components.Slider = function(props, children, api)
 	local function editValue()
 		custombox.Visible = true
 		valuelabel.Visible = false
-		custombox.Text = tostring(component.Value)
-		custombox:CaptureFocus()
+		ui.startSliderEdit(custombox, component.Value)
 	end
 
 	hit.InputBegan:Connect(function(input)
@@ -14510,9 +14531,9 @@ components.Slider = function(props, children, api)
 		valuelabel.Visible = isMobile()
 
 		-- A phone's keyboard is usually closed by tapping away, not by Return. Kept to the range, as Load keeps it.
-		local typed = (enter or isMobile()) and tonumber(custombox.Text)
-		if isFiniteNumber(typed) then
-			component:SetValue(math.clamp(typed, props.Min or 0, component.Max), nil, true)
+		local typed = (enter or isMobile()) and ui.sliderTyped(custombox.Text, props, props.Min or 0, component.Max)
+		if typed then
+			component:SetValue(typed, nil, true)
 		end
 	end)
 
@@ -15286,8 +15307,7 @@ components.TwoSlider = function(props, children, api)
 		if inputService:IsKeyDown(Enum.KeyCode.LeftControl) or inputService:IsKeyDown(Enum.KeyCode.RightControl) then
 			local box = maxCheck and custommax or custommin
 			box.Visible = true
-			box.Text = tostring(maxCheck and component.ValueMax or component.ValueMin)
-			box:CaptureFocus()
+			ui.startSliderEdit(box, maxCheck and component.ValueMax or component.ValueMin)
 			return
 		end
 		dragging = true
@@ -15321,25 +15341,27 @@ components.TwoSlider = function(props, children, api)
 	maxvalue.MouseButton1Click:Connect(function()
 		maxvalue.Visible = false
 		custommax.Visible = true
-		custommax.Text = tostring(component.ValueMax)
-		custommax:CaptureFocus()
+		ui.startSliderEdit(custommax, component.ValueMax)
 	end)
 
 	minvalue.MouseButton1Click:Connect(function()
 		minvalue.Visible = false
 		custommin.Visible = true
-		custommin.Text = tostring(component.ValueMin)
-		custommin:CaptureFocus()
+		ui.startSliderEdit(custommin, component.ValueMin)
 	end)
 
 	custommax.FocusLost:Connect(function(enter)
 		custommax.Visible = false
 		maxvalue.Visible = isMobile()
 
-		-- Kept to the range, as Load keeps it.
-		local typed = (enter or isMobile()) and tonumber(custommax.Text)
-		if isFiniteNumber(typed) then
-			component:SetValue(true, math.clamp(typed, props.Min or 0, component.Max))
+		--[[ Kept to the range, as Load keeps it, and in order: a max typed under the min brings the min
+		down with it, as a min typed over the max takes the max up, instead of reversing the range. ]]
+		local typed = (enter or isMobile()) and ui.sliderTyped(custommax.Text, props, props.Min or 0, component.Max)
+		if typed then
+			if typed < component.ValueMin then
+				component:SetValue(false, typed)
+			end
+			component:SetValue(true, typed)
 		end
 	end)
 
@@ -15347,9 +15369,12 @@ components.TwoSlider = function(props, children, api)
 		custommin.Visible = false
 		minvalue.Visible = isMobile()
 
-		local typed = (enter or isMobile()) and tonumber(custommin.Text)
-		if isFiniteNumber(typed) then
-			component:SetValue(false, math.clamp(typed, props.Min or 0, component.Max))
+		local typed = (enter or isMobile()) and ui.sliderTyped(custommin.Text, props, props.Min or 0, component.Max)
+		if typed then
+			if typed > component.ValueMax then
+				component:SetValue(true, typed)
+			end
+			component:SetValue(false, typed)
 		end
 	end)
 
