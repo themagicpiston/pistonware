@@ -17,6 +17,330 @@ if not shared.PistonwareAuthenticated then
 	return
 end
 
+-- Solara and Xeno support. Approach credit: stxvv (gitlab.com/stxvv/bedwarsdeps).
+-- Written for pistonware from BedWars' own modules; no code from that project is included.
+local exec = shared.PistonwareExec
+if not (type(exec) == 'table' and type(exec.hide) == 'function') then
+	local function probeExecutor()
+		local exec = {}
+		local function present(value)
+			return type(value) == 'function'
+		end
+		local function passes(check)
+			local ok, result = pcall(check)
+			return ok and result == true
+		end
+		--[[ Solara's require runs a module's code again instead of handing back the game's copy, and when
+		that code errors (KnitClient does) the thread that called require is left at identity 2 without its
+		executor capabilities: file calls, gethui and CoreGui all refuse it from then on, and pcall does not
+		prevent it. A require made in a thread of its own costs only that thread, so the probe requires
+		through here, and so can any later require that may fail (exec.isolatedRequire). Returns what pcall
+		would; a require still running when the timeout ends counts as failed, with no error value. ]]
+		local function isolatedRequire(module, timeout)
+			local finished, ok, result = false, false, nil
+			task.spawn(function()
+				ok, result = pcall(require, module)
+				finished = true
+			end)
+			local deadline = os.clock() + (timeout or 10)
+			while not finished and os.clock() < deadline do
+				task.wait()
+			end
+			if not finished then return false, nil end
+			return ok, result
+		end
+		exec.isolatedRequire = isolatedRequire
+		--[[ Roblox's own require is a C function. Solara's is written in Lua (its init script): it runs a
+		module's code again instead of handing back the game's copy, and Knit's code fails there with its
+		error printed to the console. Where there is no debug library to reach Knit by either, nothing
+		tries KnitClient through such a require: not the Live check below, not the BedWars files. ]]
+		exec.NativeRequire = passes(function()
+			return debug.info(require, 's') == '[C]'
+		end)
+
+		local named, name = pcall(function()
+			return identifyexecutor and ({identifyexecutor()})[1] or nil
+		end)
+		exec.Name = (named and type(name) == 'string') and name or ''
+
+		--[[ Roblox's own require exists everywhere: what counts is whether it hands back a game module.
+		It is tried only on modules whose bodies just build a table (PlayerModule's helpers, roblox-ts'
+		RuntimeLib), never on PlayerModule itself: a require that re-ran modules instead of handing back
+		the game's cached ones would build a second camera and control stack from it. Asked twice, the
+		same module has to come back. A place with none of these leaves require untried, which does not
+		count against Full below. ]]
+		local requireTarget
+		pcall(function()
+			local scripts = game:GetService('Players').LocalPlayer:FindFirstChild('PlayerScripts')
+			local playerModule = scripts and scripts:FindFirstChild('PlayerModule')
+			local utils = playerModule and playerModule:FindFirstChild('CommonUtils')
+			local module = utils and (utils:FindFirstChild('FlagUtil') or utils:FindFirstChild('ConnectionUtil'))
+			if not module then
+				local include = game:GetService('ReplicatedStorage'):FindFirstChild('rbxts_include')
+				module = include and include:FindFirstChild('RuntimeLib')
+			end
+			if module and module.ClassName == 'ModuleScript' then
+				requireTarget = module
+			end
+		end)
+		exec.Require = requireTarget ~= nil and passes(function()
+			local loaded, exported = isolatedRequire(requireTarget)
+			if not loaded or type(exported) ~= 'table' then return false end
+			local again, second = isolatedRequire(requireTarget)
+			return again and second == exported
+		end)
+		--[[ Live: require hands back the modules the game itself runs, not fresh copies of them. Only
+		BedWars' Knit can show that from here: the game registers every controller in KnitClient's
+		Controllers table, which a re-run copy holds empty. Everywhere else it stays false. An injection
+		made before the game registered them sees an empty table too, so the BedWars files also set it
+		once Knit has started through require. ]]
+		exec.Live = exec.Require and passes(function()
+			local node = game:GetService('ReplicatedStorage')
+			for _, step in {'rbxts_include', 'node_modules', '@easy-games', 'knit', 'src', 'Knit'} do
+				node = node:FindFirstChild(step)
+				if not node then return false end
+			end
+			local client = node:FindFirstChild('KnitClient')
+			-- KnitClient waits for its Services folder, so without one this would hang
+			if not (client and node:FindFirstChild('Services')) then return false end
+			if not exec.NativeRequire and type(debug.getupvalue) ~= 'function' then return false end
+			local loaded, knit = isolatedRequire(client)
+			return loaded and type(knit) == 'table' and type(knit.Controllers) == 'table' and next(knit.Controllers) ~= nil
+		end)
+		-- Tried in a throwaway thread, so the check cannot leave this one at another identity.
+		exec.Identity = present(setthreadidentity) and passes(function()
+			local thread = coroutine.create(function()
+				local level = 8
+				if present(getthreadidentity) then
+					local got, current = pcall(getthreadidentity)
+					if got and type(current) == 'number' then level = current end
+				end
+				setthreadidentity(level)
+				return true
+			end)
+			local resumed, result = coroutine.resume(thread)
+			return resumed and result == true
+		end)
+		exec.Genv = passes(function()
+			return type(getgenv()) == 'table'
+		end)
+		exec.Rawmeta = present(setreadonly) and passes(function()
+			return type(getrawmetatable(game)) == 'table'
+		end)
+		exec.HookFunction = present(hookfunction)
+		exec.HookMetamethod = present(hookmetamethod)
+
+		--[[ getnamecallmethod is trusted only once something proves it. hookmetamethod is how full
+		executors hook namecalls, and its presence is taken as proof. Without it, a pass-through wrapper
+		goes on the raw __namecall for exactly one call of our own, game:GetService, which has to report
+		'GetService'; the original goes straight back whatever happens. Delta is not tested that way:
+		nothing may be written to its metatable at load (see the Delta notes in 6872274481.lua). ]]
+		exec.Namecall = false
+		if present(getnamecallmethod) then
+			if exec.HookMetamethod then
+				exec.Namecall = true
+			elseif exec.Name:lower():find('delta', 1, true) then
+				exec.Namecall = exec.Rawmeta
+			elseif exec.Rawmeta then
+				exec.Namecall = passes(function()
+					local mt = getrawmetatable(game)
+					local original = rawget(mt, '__namecall')
+					if type(original) ~= 'function' then return false end
+					local readonly = true
+					if present(isreadonly) then
+						local got, value = pcall(isreadonly, mt)
+						if got then readonly = value == true end
+					end
+					local seen
+					local installed = pcall(function()
+						setreadonly(mt, false)
+						rawset(mt, '__namecall', function(self, ...)
+							if seen == nil then
+								local got, method = pcall(getnamecallmethod)
+								seen = got and method or false
+							end
+							return original(self, ...)
+						end)
+					end)
+					if installed then
+						pcall(function()
+							return game:GetService('Players')
+						end)
+					end
+					pcall(function()
+						setreadonly(mt, false)
+						rawset(mt, '__namecall', original)
+					end)
+					pcall(setreadonly, mt, readonly)
+					return installed and seen == 'GetService' and rawget(mt, '__namecall') == original
+				end)
+			end
+		end
+
+		exec.Connections = present(getconnections) and passes(function()
+			local event = Instance.new('BindableEvent')
+			local connection = event.Event:Connect(function() end)
+			local got, list = pcall(getconnections, event.Event)
+			connection:Disconnect()
+			event:Destroy()
+			return got and type(list) == 'table'
+		end)
+		exec.FireSignal = present(firesignal)
+		exec.Debug = passes(function()
+			local marker = {}
+			local function probeUpvalueHolder()
+				return marker
+			end
+			return debug.getupvalue(probeUpvalueHolder, 1) == marker
+		end)
+		exec.Touch = present(firetouchinterest)
+		exec.Prompt = present(fireproximityprompt)
+		exec.Click = present(fireclickdetector)
+		exec.NetworkOwner = present(isnetworkowner)
+		exec.FpsCap = present(setfpscap)
+		exec.FFlag = present(setfflag)
+		exec.Mouse = present(mouse1click) and present(mouse1press)
+		exec.MouseMove = present(mousemoverel)
+		exec.Hui = present(gethui)
+		exec.Teleport = present(queue_on_teleport)
+		exec.HttpGet = passes(function()
+			return type(game.HttpGet) == 'function'
+		end)
+		-- Everything the scripts were first written against: on such an executor nothing changes.
+		-- A place with no module to try require on (requireTarget nil) does not decide it.
+		exec.Full = (exec.Require or requireTarget == nil) and exec.Identity and exec.Rawmeta
+			and exec.Namecall and exec.HookFunction and exec.Connections and exec.Debug
+
+		-- Takes a module out of the list on this executor and keeps the reason for a later notice.
+		-- Safe before the module exists (only the reason is kept) and after it was created.
+		function exec.hide(moduleName, reason)
+			if type(moduleName) ~= 'string' then return end
+			local hidden = shared.PistonwareHidden
+			if type(hidden) ~= 'table' then
+				hidden = {}
+				shared.PistonwareHidden = hidden
+			end
+			hidden[moduleName] = reason or 'not supported on this executor'
+			local vape = shared.vape
+			if type(vape) == 'table' and type(vape.Modules) == 'table' and vape.Modules[moduleName] ~= nil then
+				pcall(vape.Remove, vape, moduleName)
+			end
+		end
+		return exec
+	end
+	exec = probeExecutor()
+	shared.PistonwareExec = exec
+end
+
+--[[ Solara and Xeno, told apart by the name identifyexecutor() gives (exec.Name, asked again here
+if that is empty) and matched by how it starts, in any case. A module listed for the executor in
+use is never built there: its run block returns first, and exec.hide keeps the reason. A listed
+option ('Module/Option') is made hidden instead, and whatever a profile saved for it is kept.
+Neither executor can load BedWars' Knit, so the list is the same for both, and every module on it
+can be remade for both. Every other executor gets no list: exec.skip answers false there and
+nothing changes. ]]
+do
+	if type(exec.skip) ~= 'function' or type(exec.addSkips) ~= 'function' then
+		local executor
+		-- 'solara', 'xeno', or false for every other executor.
+		local function executorKey()
+			if executor == nil then
+				local name = exec.Name
+				if type(name) ~= 'string' or name == '' then
+					local ok, result = pcall(function()
+						return identifyexecutor and ({identifyexecutor()})[1] or nil
+					end)
+					name = (ok and type(result) == 'string') and result or ''
+				end
+				name = name:lower()
+				executor = (name:sub(1, 6) == 'solara' and 'solara') or (name:sub(1, 4) == 'xeno' and 'xeno') or false
+			end
+			return executor
+		end
+		-- lists.both, then lists.solara or lists.xeno: a module or 'Module/Option' name, and why.
+		function exec.addSkips(lists)
+			local key = executorKey()
+			if not key then return end
+			local skipped = type(exec.Skipped) == 'table' and exec.Skipped or {}
+			exec.Skipped = skipped
+			for _, list in {lists.both or {}, lists[key] or {}} do
+				for name, reason in list do
+					skipped[name] = reason
+				end
+			end
+		end
+		-- True when the executor in use lists this module or option; the reason goes to exec.hide.
+		function exec.skip(name)
+			local skipped = exec.Skipped
+			local reason = type(skipped) == 'table' and skipped[name] or nil
+			if type(reason) ~= 'string' then return false end
+			exec.hide(name, reason)
+			return true
+		end
+	end
+	exec.addSkips({both = {
+		-- Modules
+		NoClickDelay = "changes the game's own click limiter, which Solara and Xeno cannot reach (being rebuilt)",
+		Reach = "changes the game's own combat constants, which Solara and Xeno cannot reach (being rebuilt)",
+		FastBreak = "changes the game's own block breaker, which Solara and Xeno cannot reach (being rebuilt)",
+		AutoZephyr = "needs the game's own Zephyr controller, which Solara and Xeno cannot reach (being rebuilt)",
+		HitBoxes = "needs the game's own sword code, which Solara and Xeno cannot reach (being rebuilt)",
+		KeepSprint = "changes the game's own sprint code, which Solara and Xeno cannot reach (being rebuilt)",
+		SafeWalk = "needs the game's movement controls, which Solara and Xeno cannot reach (being rebuilt)",
+		NoSlowdown = "changes the game's own movement modifiers, which Solara and Xeno cannot reach (being rebuilt)",
+		AutoKit = "needs the game's own kit controllers, which Solara and Xeno cannot reach (being rebuilt)",
+		TrapDisabler = "needs the game's own remotes client, which Solara and Xeno cannot reach (being rebuilt)",
+		AutoTool = "needs the game's own block breaker, which Solara and Xeno cannot reach (being rebuilt)",
+		ArmorSwitch = "cannot equip armor through the server inventory on this executor yet (being rebuilt)",
+		AutoHotbar = "cannot sort the server inventory on this executor yet (being rebuilt)",
+		['Bed Break Effect'] = "needs the game's own effect controllers, which Solara and Xeno cannot reach (being rebuilt)",
+		Crosshair = "changes the game's own viewmodel code, which Solara and Xeno cannot reach (being rebuilt)",
+		HitFix = "not enabled on this executor yet (being rebuilt)",
+		Interface = "changes the game's own hotbar code, which Solara and Xeno cannot reach (being rebuilt)",
+		SoundChanger = "needs the game's own audio manager, which Solara and Xeno cannot reach (being rebuilt)",
+		WinEffect = "needs the game's own effect controllers, which Solara and Xeno cannot reach (being rebuilt)",
+		-- Options
+		['Speed/Pause on Lagback'] = "needs isnetworkowner, which Solara and Xeno do not have (being rebuilt)",
+		['NameTags/Show Rank'] = "rank data is not available on this executor yet",
+		['FPS Boost/Kill Effects'] = "changes the game's own kill effect controller, which this executor cannot reach (being rebuilt)",
+		['FPS Boost/Visualizer'] = "needs the game's live visualizer module, which this executor cannot reach",
+	}})
+end
+
+--[[ game:HttpGet, called as before wherever the executor has it: what it returns or raises comes
+back unchanged. request() stands in only where HttpGet is missing or refused to this thread (Xeno
+has none), and there only a 2xx answer with a body counts, so an error page never comes back as
+the file. ]]
+local function httpGet(url, ...)
+	local ok, body = pcall(function(...)
+		return game:HttpGet(url, ...)
+	end, ...)
+	if ok then return body end
+	local reason = tostring(body):lower()
+	local refused = false
+	for _, hint in {'not a valid member', 'lacking capability', 'lacking permission', 'cannot call'} do
+		if reason:find(hint, 1, true) then
+			refused = true
+			break
+		end
+	end
+	if not refused then
+		local indexed, method = pcall(function()
+			return game.HttpGet
+		end)
+		refused = not indexed or type(method) ~= 'function'
+	end
+	local send = type(request) == 'function' and request or type(http_request) == 'function' and http_request or nil
+	if not (refused and send) then error(body, 0) end
+	local response = send({Url = url, Method = 'GET'})
+	local status = type(response) == 'table' and tonumber(response.StatusCode) or nil
+	if type(response) ~= 'table' or response.Success == false or (status and (status < 200 or status > 299))
+		or type(response.Body) ~= 'string' or response.Body == '' then
+		error('GET '..tostring(url)..' failed'..(status and ' (HTTP '..status..')' or ''), 0)
+	end
+	return response.Body
+end
+
 local function errorTrace(err)
 	local traceback
 	pcall(function()
@@ -103,12 +427,23 @@ local textChatService = cloneref(game:GetService('TextChatService'))
 local collectionService = cloneref(game:GetService('CollectionService'))
 local contextActionService = cloneref(game:GetService('ContextActionService'))
 local guiService = cloneref(game:GetService('GuiService'))
-local coreGui = cloneref(game:GetService('CoreGui'))
+-- Guarded: at a low identity these may not come back, and this is file scope.
+local coreGui = (function()
+	local ok, service = pcall(function()
+		return cloneref(game:GetService('CoreGui'))
+	end)
+	return ok and service or nil
+end)()
 local starterGui = cloneref(game:GetService('StarterGui'))
 local lightingService = cloneref(game:GetService('Lighting'))
 local teleportService = cloneref(game:GetService("TeleportService"))
 local pathfindingService = cloneref(game:GetService('PathfindingService'))
-local virtualInputManager = cloneref(game:GetService('VirtualInputManager'))
+local virtualInputManager = (function()
+	local ok, service = pcall(function()
+		return cloneref(game:GetService('VirtualInputManager'))
+	end)
+	return ok and service or nil
+end)()
 
 --[[ identifyexecutor exists but THROWS on several mobile executors, and this runs at the top
 level of the file -- so an unguarded call here does not degrade one feature, it kills the
@@ -207,8 +542,8 @@ if not shared.PistonwareDeveloper then
 	task.spawn(function()
 		fetch.ok, fetch.body = pcall(function()
 			local protectedUrl = shared.PistonwareProtectedRawUrl
-			return type(protectedUrl) == 'function' and game:HttpGet(protectedUrl(), true)
-				or game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
+			return type(protectedUrl) == 'function' and httpGet(protectedUrl(), true)
+				or httpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
 		end)
 		fetch.done = true
 	end)
@@ -527,6 +862,85 @@ local function getRoactRender(func)
 	return debug.getupvalue(debug.getupvalue(debug.getupvalue(func, 3).render, 2).render, 1)
 end
 
+--[[ Several modules below change a game function's constants with debug.setconstant, which needs
+the debug library. Solara and Xeno leave that library out. fieldPatch.constants says whether it is
+there; where it is not, those modules get the same effect by replacing a field of the game's
+controller or component table instead (fieldPatch.wrap), which needs only require.
+
+fieldPatch.wrap(tbl, key, build): build(current) is handed the function now in tbl[key] and returns
+the replacement, which goes into tbl[key]. The handle's remove() puts the previous value back while
+the replacement is still the one there. If something wrapped it since, it stays in that chain and
+just passes calls through, so the wrapper on top keeps working; it is taken out of the chain when
+the one above it goes. nil when tbl[key] is no function. ]]
+local fieldPatch = {
+	constants = exec.Debug and type(debug.getconstant) == 'function' and type(debug.setconstant) == 'function',
+	hooks = setmetatable({}, {__mode = 'k'})
+}
+function fieldPatch.wrap(tbl, key, build)
+	-- Only on the game's own tables (exec.Live): on copies a re-running require made, nothing changes.
+	if not exec.Live or type(tbl) ~= 'table' then return nil end
+	local current = tbl[key]
+	if type(current) ~= 'function' then return nil end
+	local own = rawget(tbl, key)
+	local replacement = build(current)
+	if type(replacement) ~= 'function' then return nil end
+	local handle = {Active = true, Own = own}
+	handle.Hook = function(...)
+		if handle.Active then
+			return replacement(...)
+		end
+		return current(...)
+	end
+	fieldPatch.hooks[handle.Hook] = handle
+	tbl[key] = handle.Hook
+	function handle.remove()
+		if not handle.Active then return end
+		handle.Active = false
+		if rawget(tbl, key) == handle.Hook then
+			local value = own
+			local below = fieldPatch.hooks[value]
+			while below and not below.Active do
+				value = below.Own
+				below = fieldPatch.hooks[value]
+			end
+			tbl[key] = value
+		end
+	end
+	return handle
+end
+
+--[[ For the HUD modules, which change what the game's Roact components render. A Roact element is
+a plain table {component = ..., props = {...}} with its children in props[Roact.Children]; a
+fragment keeps its elements in .elements. fieldPatch.render wraps component[key] (render by
+default) so that style(self, element) can change the element it returns; a failing style is
+skipped and the element is returned either way. ]]
+function fieldPatch.children(element)
+	local props = type(element) == 'table' and element.props
+	local roact = bedwars.Roact
+	if type(props) ~= 'table' or roact == nil then return nil end
+	local children = props[roact.Children]
+	return type(children) == 'table' and children or nil
+end
+
+function fieldPatch.child(children, component)
+	if type(children) ~= 'table' then return nil end
+	for _, child in children do
+		if type(child) == 'table' and child.component == component and type(child.props) == 'table' then
+			return child
+		end
+	end
+end
+
+function fieldPatch.render(component, style, key)
+	return fieldPatch.wrap(component, key or 'render', function(render)
+		return function(self, ...)
+			local element = render(self, ...)
+			pcall(style, self, element)
+			return element
+		end
+	end)
+end
+
 local function getSword()
 	local best, slot, maxDmg = nil, nil, 0
 	for i, item in store.inventory.inventory.items do
@@ -791,13 +1205,42 @@ local function ensureSessionInfo()
 	return sessioninfo
 end
 
+--[[ A drink's hold on the hand (knitless.holdHand). Since the game's 10-24 update the server times a
+drink from StartConsume and refuses the ConsumeItem when the hand was swapped in between. The
+game's own client never sends one after a swap: its ConsumeController is a HandKnitController, and
+any item switch ends the drink there. While a hold is up, switchItem and hotbarSwitch
+here and every module's own swap path leave the hand alone, the item being drunk excepted. A hold
+ends at its deadline whatever happens to the drink, so a release that never runs cannot keep the
+hand. It also ends the moment an owner that ranks above the drink (LongJump, AutoPearl's void
+save, a manual claim) takes the hand from it (lock.owned), so their swaps go through. On store, as
+hasKit is, so every file reads the same one. ]]
+store.handHeld = function(tool)
+	local lock = store.handLock
+	return lock ~= nil and os.clock() < lock.deadline and (tool == nil or tool ~= lock.item)
+		and (lock.owned == nil or lock.owned())
+end
+
 local function hotbarSwitch(slot)
+	-- Not while a drink holds the hand (store.handHeld).
+	if store.handHeld() then return false end
 	if slot and store.inventory.hotbarSlot ~= slot then
 		bedwars.Store:dispatch({
 			type = 'InventorySelectHotbarSlot',
 			slot = slot
 		})
-		vapeEvents.InventoryChanged.Event:Wait()
+		if exec.Knitless then
+			-- Bounded without Knit: a selection the stand-in store turns down (a slot it does not have,
+			-- a dispatch that failed) changes nothing, so the change waited for never comes.
+			local changed = false
+			local connection = vapeEvents.InventoryChanged.Event:Once(function()
+				changed = true
+			end)
+			local deadline = os.clock() + 1
+			repeat task.wait() until changed or os.clock() > deadline
+			connection:Disconnect()
+		else
+			vapeEvents.InventoryChanged.Event:Wait()
+		end
 		return true
 	end
 	return false
@@ -823,6 +1266,9 @@ only counts when the mouse actually moved -- InputChanged also fires with a zero
 local AFK_SECONDS = 30
 store.lastInput = tick()
 local function markInput(input)
+	-- A number key the knitless hotbar pressed itself (shared.PistonwareSyntheticKeys) is not yours.
+	local synthetic = shared.PistonwareSyntheticKeys
+	if type(synthetic) == 'table' and (tonumber(synthetic[input.KeyCode]) or 0) > os.clock() then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseMovement or input.Delta.Magnitude > 0 then
 		store.lastInput = tick()
 	end
@@ -921,6 +1367,8 @@ end
 
 local function switchItem(tool, delayTime)
 	delayTime = delayTime or 0.05
+	-- Not while a drink holds the hand (store.handHeld). Every swap through here stops at once.
+	if store.handHeld(tool) then return false end
 	local check = lplr.Character and lplr.Character:FindFirstChild('HandInvItem') or nil
 	if check and check.Value ~= tool and tool.Parent ~= nil then
 		if shared.PistonwareDeveloper then
@@ -1536,7 +1984,17 @@ entitylib.start()
 
 --[[ pistonware funcs ]]
 
-local genv = getgenv()
+--[[ getgenv() where it works. Elsewhere (Xeno has none) one plain table stands in, kept on shared
+so every file that runs this session shares the same one. ]]
+local genv
+if exec.Genv then
+	local ok, env = pcall(getgenv)
+	genv = ok and env or nil
+end
+if type(genv) ~= 'table' then
+	genv = type(shared.PistonwareGenv) == 'table' and shared.PistonwareGenv or {}
+	shared.PistonwareGenv = genv
+end
 --[[ Idempotent shared-state defaults: fill a key only if a previous execution
 hasn't already set it. Add new flags here instead of another line below.
 (== nil, not `or`, so a stored `false` is never clobbered back to default.) ]]
@@ -1690,6 +2148,13 @@ function namecallGuard.unobserve(token)
     return false
 end
 
+--[[ The raw hook only goes in where the executor probe proved getnamecallmethod and found the raw
+metatable writable. Solara has getrawmetatable and setreadonly but not a getnamecallmethod that can
+be trusted: installed there, this hook would put every namecall in the game through a broken
+function. Without it, see the block after this one. ]]
+namecallGuard.supported = exec.Namecall and exec.Rawmeta
+namecallGuard.mode = namecallGuard.supported and 'namecall' or nil
+if namecallGuard.supported then
 local getnamecallmethod = getnamecallmethod
 local mt = getrawmetatable(game)
 -- Delta: nothing is written at load; see the Delta block after the hook.
@@ -1922,6 +2387,195 @@ vape:Clean(function()
     end
     -- PistonwareOldNamecall stays: the next install chains to it while Rest is still in place.
 end)
+end
+end
+
+--[[ No trustworthy namecall hook here (Solara, Xeno). The guard keeps its whole API: watch and
+block answer false and observe nil, which every caller already treats as unsupported. The one
+exception is the game's own sends through @rbxts/net on an executor with require (Solara): every
+net client object inherits SendToServer / CallServer / CallServerAsync from a class table shared by
+all of them, including the ones controllers cached at start, so replacing those methods -- keyed on
+the remote each object wraps -- shows those sends to the same handlers, with the same contract
+(true or a truthy result swallows, a table replaces the arguments). That covers every remote under
+both _NetManaged folders (the main copy and block-engine's), and watch/observe accept exactly
+those. It does not see a remote fired directly with :FireServer (a plain RemoteEvent, or a send of
+our own made that way), Zap buffers, or the GetPrimaryPartCFrame fallback the hook adds. The
+methods are only replaced once something registers, and only where exec.Live shows that require
+hands back the game's own classes rather than copies; they are put back on uninject. ]]
+if not namecallGuard.supported then
+	local netGuard
+	if exec.Require then
+		local function dispatch(inst, method, ...)
+			-- the hook's order: observers first (they never change the call), then the watch entry
+			local observerMethods = namecallObservers[inst]
+			local observers = observerMethods and observerMethods[method]
+			if observers then
+				for _, token in observers do
+					pcall(token.handler, inst, ...)
+				end
+			end
+			local entry = namecallWatch[inst]
+			local handler = entry and entry[method]
+			if handler == nil then return nil end
+			if handler == true then return true end
+			local ok, result = pcall(handler, inst, ...)
+			if not ok or result == nil or result == false then return nil end
+			if type(result) == 'table' then return false, result end
+			return true
+		end
+
+		local built, guard = pcall(function()
+			local outs = {}
+			pcall(function()
+				table.insert(outs, replicatedStorage.rbxts_include.node_modules['@rbxts'].net.out)
+			end)
+			pcall(function()
+				table.insert(outs, replicatedStorage.rbxts_include.node_modules['@easy-games']['block-engine'].node_modules['@rbxts'].net.out)
+			end)
+			-- The game's promise library, for what a swallowed async call hands back.
+			local promise
+			pcall(function()
+				local library = require(replicatedStorage.rbxts_include.Promise)
+				if type(library) == 'table' and type(library.resolve) == 'function' and type(library.reject) == 'function' then
+					promise = library
+				end
+			end)
+			local folders, classes = {}, {}
+			for _, out in outs do
+				local folder, client = out:FindFirstChild('_NetManaged'), out:FindFirstChild('client')
+				if folder and client then
+					table.insert(folders, folder)
+					for kind, moduleName in {Event = 'ClientEvent', Function = 'ClientFunction', AsyncFunction = 'ClientAsyncFunction'} do
+						local module = client:FindFirstChild(moduleName)
+						local exported = module and require(module)
+						-- the same table twice, so require caches it; whether it is the game's own
+						-- copy is exec.Live, checked before anything is replaced
+						if type(exported) == 'table' and type(exported.default) == 'table' and require(module) == exported then
+							table.insert(classes, {kind = kind, class = exported.default})
+						end
+					end
+				end
+			end
+			assert(#folders > 0 and #classes > 0, 'the @rbxts/net client classes are unavailable')
+			-- How each method reaches the server, and what the caller gets when the send is swallowed:
+			-- nothing for a send or a blocking call, as from a swallowed namecall; a promise for the
+			-- async forms, which their callers chain on.
+			local specs = {
+				Event = {{key = 'SendToServer', method = 'FireServer', swallowed = function() return nil end}},
+				Function = {
+					{key = 'CallServer', method = 'InvokeServer', swallowed = function() return nil end},
+					{key = 'CallServerAsync', method = 'InvokeServer', swallowed = function() return promise.resolve(nil) end}
+				},
+				-- sent as FireServer(requestId, {arguments}); the id is made inside, so handlers get ''
+				AsyncFunction = {{key = 'CallServerAsync', method = 'FireServer', packed = true,
+					swallowed = function() return promise.reject('the request was not sent') end}}
+			}
+			local state = shared.PistonwareNetGuard
+			if type(state) ~= 'table' then
+				state = {wrappers = setmetatable({}, {__mode = 'k'})}
+				shared.PistonwareNetGuard = state
+			end
+			local patches, installed, closed = {}, false, false
+
+			local function wrap(original, spec)
+				return function(self, ...)
+					local inst = type(self) == 'table' and rawget(self, 'instance') or nil
+					if inst == nil then return original(self, ...) end
+					local action, replacement
+					if spec.packed then
+						action, replacement = dispatch(inst, spec.method, '', {...})
+					else
+						action, replacement = dispatch(inst, spec.method, ...)
+					end
+					if action == true then return spec.swallowed() end
+					if action == false then
+						local args = replacement
+						if spec.packed then args = type(replacement[2]) == 'table' and replacement[2] or {} end
+						return original(self, table.unpack(args, 1, args.n or #args))
+					end
+					return original(self, ...)
+				end
+			end
+
+			local api = {}
+			function api.covers(inst, method)
+				if method ~= 'FireServer' and method ~= 'InvokeServer' then return false end
+				if typeof(inst) ~= 'Instance' then return false end
+				local ok, parent = pcall(function() return inst.Parent end)
+				if not ok then return false end
+				for _, folder in folders do
+					if parent == folder then return true end
+				end
+				return false
+			end
+			function api.restore()
+				closed = true
+				for index = #patches, 1, -1 do
+					local patch = patches[index]
+					pcall(function()
+						if patch.class[patch.key] == patch.wrapper then
+							patch.class[patch.key] = patch.original
+						end
+					end)
+					state.wrappers[patch.wrapper] = nil
+				end
+				table.clear(patches)
+				installed = false
+			end
+			function api.install()
+				if installed then return true end
+				if closed then return false end
+				-- copies of the classes would leave every send unseen while the watch reported success
+				if not exec.Live then return false end
+				local ok = pcall(function()
+					for _, item in classes do
+						for _, spec in specs[item.kind] do
+							local current = item.class[spec.key]
+							-- the async forms only with a promise to hand back when swallowed
+							if type(current) == 'function' and (spec.key ~= 'CallServerAsync' or promise) then
+								-- an injection that was never cleaned up: chain to its original, not its wrapper
+								local original = state.wrappers[current] or current
+								local wrapper = wrap(original, spec)
+								item.class[spec.key] = wrapper
+								state.wrappers[wrapper] = original
+								table.insert(patches, {class = item.class, key = spec.key, wrapper = wrapper, original = original})
+							end
+						end
+					end
+				end)
+				if not ok then
+					api.restore()
+					closed = false
+					return false
+				end
+				installed = true
+				return true
+			end
+			return api
+		end)
+		if built then
+			netGuard = guard
+		else
+			bufferCall('error', 'bedwars.netguard', guard)
+		end
+	end
+
+	namecallGuard.mode = netGuard and 'net' or nil
+	namecallGuard.rewrites = netGuard ~= nil
+	local baseWatch, baseObserve = namecallGuard.watch, namecallGuard.observe
+	function namecallGuard.watch(inst, method, handler)
+		if not (netGuard and netGuard.covers(inst, method) and netGuard.install()) then return false end
+		return baseWatch(inst, method, handler)
+	end
+	function namecallGuard.observe(inst, method, handler)
+		if not (netGuard and netGuard.covers(inst, method) and netGuard.install()) then return nil end
+		return baseObserve(inst, method, handler)
+	end
+	vape:Clean(function()
+		table.clear(namecallWatch)
+		table.clear(namecallObservers)
+		if netGuard then netGuard.restore() end
+	end)
 end
 
 local blankFunction = function(...) return ... end
@@ -2717,7 +3371,8 @@ costs nothing but the sound.
 routesToAudioManager tells SoundChanger these already reach its AudioManager hook, so it
 leaves playSound alone rather than scaling them twice. Every other method is still a
 no-op, and without an AudioManager this is the plain stub. ]]
-local function resolveSoundManager()
+-- require is the caller's: the bootstrap's own, which is knitless.require when Knit is out of reach.
+local function resolveSoundManager(require)
     local ok, res = pcall(function()
         return require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).SoundManager
     end)
@@ -2749,14 +3404,7491 @@ end
 --[[ pistonware funcs ]]
 
 do
+--[[ Knit out of reach (Solara, Xeno). The bootstrap below then runs as it is, on stand-ins built
+from the game's own instances: Knit is knitless.Knit, whose Controllers are the stand-in
+controllers, and require inside the bootstrap is knitless.require, which hands back the stand-in
+export registered for a module's path. The sections build them from remotes found by name,
+attributes, CollectionService tags and games/bedwars-data.json; nothing in them requires a game
+module or needs the debug library or a hook. One local, scoped to this block, so the main chunk
+stays clear of Luau's 200-local limit. ]]
+local knitless = {empty = {}}
+
+--[[ Registry slice of the knitless layer: the export table each module the bootstrap requires would
+hand back, for every module the store, blocks and controllers slices do not own. Data comes from the
+dump (ctx.data), behaviour from instances, attributes, tags and the remotes clients. Nothing here
+requires a game module. Where the game keeps client-only state this layer cannot see, the function
+says what it does instead. ]]
+
+--[[ The instance under root at a dotted path of child names, or nil. ]]
+function knitless.registryFind(root, path)
+	local node = root
+	for name in string.gmatch(path, '[^%.]+') do
+		node = node and node:FindFirstChild(name)
+	end
+	return node
+end
+
+--[[ A deep copy, as object-utils' deepCopy: tables copied, everything else shared. ]]
+function knitless.registryCopy(value)
+	if type(value) ~= 'table' then return value end
+	local copy = {}
+	for key, item in value do
+		copy[key] = knitless.registryCopy(item)
+	end
+	return copy
+end
+
+--[[ roblox-ts enums answer both ways, name to value and value to name. The dump keeps the forward
+half; the reverse half goes behind __index, so iterating an enum still sees the names only. ]]
+function knitless.registryEnum(forward)
+	if type(forward) ~= 'table' or getmetatable(forward) ~= nil then return forward end
+	local reverse = {}
+	for key, value in forward do
+		if type(value) == 'string' or type(value) == 'number' then
+			reverse[value] = key
+		end
+	end
+	return setmetatable(forward, {__index = reverse})
+end
+
+--[[ ConstantManager.registerConstants keeps each constant as a ConstantManager_<key> attribute on its
+module and copies any change of it into the live table. This reads the same attributes into a table
+of our own and follows them; it never writes them, since the game would copy that into its own. ]]
+function knitless.registryConstants(ctx, module, defaults)
+	local constants = table.clone(type(defaults) == 'table' and defaults or {})
+	if typeof(module) ~= 'Instance' then return constants end
+	for key in constants do
+		local attribute = 'ConstantManager_'..key
+		local function read()
+			local value = module:GetAttribute(attribute)
+			if value ~= nil then constants[key] = value end
+		end
+		read()
+		ctx.clean(module:GetAttributeChangedSignal(attribute):Connect(read))
+	end
+	return constants
+end
+
+--[[ item-meta's projectileSource.projectileType(ammo) is a function, so the dump leaves it out.
+With projectileTypeByAmmo in the dump ({[''] = default, [ammo] = projectile}) it is rebuilt exactly.
+Without it the name is guessed from the item and ammo names, and only a name ProjectileMeta has is
+taken: wood_crossbow + firework_arrow is crossbow_firework_arrow, golden_bow + arrow is
+golden_arrow, an iron arrow is <that arrow>_iron. A guess can miss (glitch_wood_bow shoots
+glitch_arrow, this says arrow). multiProjectileSource entries are keyed by their projectile. ]]
+function knitless.registryProjectileTypes(items, projectiles)
+	if type(items) ~= 'table' or type(projectiles) ~= 'table' then return end
+	local function guess(itemType, ammo, source)
+		local stem = string.gsub(itemType, '_bow$', '')
+		local family = string.match(itemType, '(%a+)$') or itemType
+		if ammo == nil then
+			if projectiles[itemType] then return itemType end
+			local ammoTypes = source.ammoItemTypes
+			if type(ammoTypes) == 'table' then
+				ammo = table.find(ammoTypes, 'arrow') and 'arrow' or (#ammoTypes == 1 and ammoTypes[1]) or nil
+			end
+			if type(ammo) ~= 'string' then
+				--[[ a launcher with no ammo usually names its projectile after itself ]]
+				for _, name in {itemType..'_projectile', itemType..'_arrow', stem..'_arrow'} do
+					if projectiles[name] then return name end
+				end
+				return nil
+			end
+		end
+		if ammo == 'iron_arrow' then
+			local base = guess(itemType, 'arrow', source)
+			if base and base ~= 'arrow' and projectiles[base..'_iron'] then return base..'_iron' end
+		end
+		for _, name in {itemType..'_'..ammo, stem..'_'..ammo, family..'_'..ammo, ammo} do
+			if projectiles[name] then return name end
+		end
+		return nil
+	end
+
+	for itemType, meta in items do
+		if type(meta) ~= 'table' then continue end
+		local source = meta.projectileSource
+		if type(source) == 'table' and source.projectileType == nil then
+			local byAmmo = type(source.projectileTypeByAmmo) == 'table' and source.projectileTypeByAmmo or nil
+			local guessed = {}
+			source.projectileType = function(ammo)
+				if byAmmo then
+					local name = ammo ~= nil and byAmmo[ammo] or nil
+					if name == nil then name = byAmmo[''] end
+					return name
+				end
+				local key = ammo == nil and '' or tostring(ammo)
+				if guessed[key] == nil then
+					guessed[key] = guess(itemType, ammo, source) or false
+				end
+				return guessed[key] or nil
+			end
+		end
+		if type(meta.multiProjectileSource) == 'table' then
+			for projectile, entry in meta.multiProjectileSource do
+				if type(entry) == 'table' and entry.projectileType == nil then
+					entry.projectileType = function()
+						return projectile
+					end
+				end
+			end
+		end
+	end
+end
+
+--[[ A Zap client event: On(listener) returns the function that disconnects it, as lib.network's do,
+and listeners run on threads of their own, as Zap runs them. fire is ours, for whatever feeds the
+event: the block tags and the Zap decoder below. Until something feeds it, it never fires. ]]
+function knitless.registryZapEvent()
+	local listeners = {}
+	local event = {}
+	function event.On(listener)
+		table.insert(listeners, listener)
+		return function()
+			local index = table.find(listeners, listener)
+			if index then table.remove(listeners, index) end
+		end
+	end
+	function event.fire(...)
+		for _, listener in table.clone(listeners) do
+			task.spawn(listener, ...)
+		end
+	end
+	return event
+end
+
+--[[ PlayerScripts.TS.lib.network with every client event it has. Placed and broken blocks also show
+as the 'block' tag coming and going, so PlaceBlockEventZap and BreakBlockEventZap are fed from it in
+Zap's argument order, the block's cell then its type. Who broke a block, and the hit data a break
+carries, are not known here and stay nil. Blocks the map streams in fire a place as well. The
+other events come from knitless.registryZapDecoder. ]]
+function knitless.registryZap(ctx)
+	local zap = {}
+	for _, name in {
+		'EntityDamageEventZap', 'PickupItemEventZap', 'ProjectileLaunchZap', 'ProjectileImpactZap',
+		'UpdateMapDataZap', 'PlaceBlockEventZap', 'BreakBlockEventZap', 'EntityHealEventZap',
+		'AddMatchEventCountdownZap', 'KitsUpdateEventZap'
+	} do
+		zap[name] = knitless.registryZapEvent()
+	end
+
+	local collectionService = ctx.services.CollectionService
+	local function cell(part)
+		local position = part.Position / 3
+		return Vector3.new(math.round(position.X) + 0, math.round(position.Y) + 0, math.round(position.Z) + 0)
+	end
+	ctx.clean(collectionService:GetInstanceAddedSignal('block'):Connect(function(block)
+		if block:IsA('BasePart') then
+			zap.PlaceBlockEventZap.fire(cell(block), block.Name)
+		end
+	end))
+	ctx.clean(collectionService:GetInstanceRemovedSignal('block'):Connect(function(block)
+		if block:IsA('BasePart') then
+			zap.BreakBlockEventZap.fire(cell(block), block.Name)
+		end
+	end))
+	local ok, err = pcall(knitless.registryZapDecoder, ctx, zap)
+	if not ok then
+		ctx.log('zap decoder: '..tostring(err))
+	end
+	return zap
+end
+
+--[[ Feeds the events above from ReplicatedStorage.ZAP.ZAP_RELIABLE, read the way lib.network's own
+decoder reads it; nothing is ever sent. A packet is a buffer and an array of instances: events back
+to back, each a u8 id and then its fields, the instances taken from the array in order. Every
+layout is walked, since each event starts where the one before it ends, and each event fires with
+the arguments lib.network passes, except place and break, which the block tags above feed. A packet
+is read whole, in a pcall, before any of it fires. An instance that did not replicate drops the
+rest of its packet, as it does in the game. A read past the end, an unknown id or any other error
+means the layout has changed: decoding stops for the match with one log line. zap.decoding is true
+while it runs, and zap.packets counts what it has read. ]]
+function knitless.registryZapDecoder(ctx, zap)
+	zap.decoding, zap.packets = false, 0
+	local PAST_END, MISSING = {}, {}
+	local data, size, at, instances, taken = nil, 0, 0, nil, 0
+
+	local function skip(count)
+		if at + count > size then error(PAST_END, 0) end
+		local start = at
+		at += count
+		return start
+	end
+	local function u8() return buffer.readu8(data, skip(1)) end
+	local function u16() return buffer.readu16(data, skip(2)) end
+	local function f32() return buffer.readf32(data, skip(4)) end
+	local function f64() return buffer.readf64(data, skip(8)) end
+	local function bool() return u8() == 1 end
+	local function text(length) return buffer.readstring(data, skip(length), length) end
+	local function text16() return text(u16()) end
+	local function text8() return text(8) end
+	-- Read in order, one statement each: every read moves the cursor.
+	local function vector32()
+		local x = f32()
+		local y = f32()
+		return Vector3.new(x, y, f32())
+	end
+	local function vector16()
+		local x = u16()
+		local y = u16()
+		return Vector3.new(x, y, u16())
+	end
+	local function vector8()
+		local x = u8()
+		local y = u8()
+		return Vector3.new(x, y, u8())
+	end
+	local function rgb()
+		local r = u8()
+		local g = u8()
+		return Color3.fromRGB(r, g, u8())
+	end
+	--[[ An optional field: a u8 1 and then the value; anything else is nil. ]]
+	local function maybe(read)
+		if u8() ~= 1 then return nil end
+		return read()
+	end
+	--[[ The next instance in the array, which the game asserts is there and of its class. ]]
+	local function instance(class)
+		taken += 1
+		local value = instances[taken]
+		if value == nil or not value:IsA(class) then error(MISSING, 0) end
+		return value
+	end
+	--[[ An optional one: nil when flagged absent, or flagged but not replicated. ]]
+	local function maybeInstance(class)
+		if u8() ~= 1 then return nil end
+		taken += 1
+		local value = instances[taken]
+		if value ~= nil and class and not value:IsA(class) then error(MISSING, 0) end
+		return value
+	end
+
+	local function list16()
+		local list = {}
+		for index = 1, u16() do
+			list[index] = u16()
+		end
+		return list
+	end
+	local function regions()
+		local list = {}
+		for index = 1, u16() do
+			local region = {}
+			region.center = vector16()
+			local x = u8()
+			region.radius = Vector3.new(x, u8(), 0)
+			region.box = bool()
+			region.whiteListTeamId = maybe(text16)
+			list[index] = region
+		end
+		return list
+	end
+	local function knockback()
+		local value = {}
+		value.horizontal = maybe(f64)
+		value.vertical = maybe(f64)
+		value.disabled = maybe(bool)
+		return value
+	end
+	local function projectileData()
+		local value = {}
+		value.projectileType = u16()
+		value.projectileModel = instance('Model')
+		return value
+	end
+	local ATTACK = {
+		{'itemUsed', text16}, {'swingTimeRatio', f32}, {'projectileData', projectileData}, {'guidedProjectile', u8},
+		{'paintBlast', bool}, {'pyroBrittleAttack', bool}, {'chargeRatio', f32}, {'isVoidAttack', bool},
+		{'isDoubleHit', bool}, {'halloweenEventFog', bool}, {'halloweenLaser', bool}, {'seahorseAttack', bool},
+		{'headshot', bool}, {'damageOverTime', bool}, {'ignorePurgatoryDisable', bool}, {'spiderKill', bool}
+	}
+	local function attackData()
+		local value = {}
+		for _, field in ATTACK do
+			value[field[1]] = maybe(field[2])
+		end
+		return value
+	end
+	local function launchOptions()
+		local value = {}
+		value.drawDurationSec = maybe(f32)
+		value.shotId = maybe(text8)
+		return value
+	end
+	local function hitOptions()
+		local value = {}
+		value.detectHitTerrain = maybe(bool)
+		return value
+	end
+	local function countdownOptions()
+		local value = {}
+		value.shouldDisplay = bool()
+		value.permanentDisplay = maybe(bool)
+		return value
+	end
+
+	--[[ By id, in lib.network's order. read returns the arguments as table.pack does; an entry
+	with no name is walked and not fired. ]]
+	local EVENTS = {
+		[0] = {name = 'EntityDamageEventZap', read = function()
+			local entity = instance('Model')
+			local damage = f64()
+			local damageType = u8()
+			local fromPosition = maybe(vector32)
+			local fromEntity = maybeInstance('Model')
+			local multiplier = maybe(knockback)
+			local knockbackId = maybe(u16)
+			local attack = maybe(attackData)
+			local flag9 = maybe(bool)
+			local sound = maybe(u16)
+			local sounds = maybe(list16)
+			local flag12 = maybe(bool)
+			local flag13 = maybe(bool)
+			return table.pack(entity, damage, damageType, fromPosition, fromEntity, multiplier, knockbackId,
+				attack, flag9, sound, sounds, flag12, flag13, maybe(u8))
+		end},
+		[1] = {name = 'PickupItemEventZap', read = function()
+			local item = u16()
+			return table.pack(item, vector32())
+		end},
+		[2] = {name = 'ProjectileLaunchZap', read = function()
+			local source = maybeInstance(nil)
+			local origin = vector32()
+			local projectile = instance('Model')
+			local shot = text8()
+			local accessory = maybeInstance('Accessory')
+			local part = maybeInstance('BasePart')
+			local shooter = maybeInstance('Model')
+			local options = maybe(launchOptions)
+			local flag9 = maybe(bool)
+			local flag10 = maybe(bool)
+			return table.pack(source, origin, projectile, shot, accessory, part, shooter, options, flag9, flag10,
+				maybe(hitOptions))
+		end},
+		[3] = {name = 'ProjectileImpactZap', read = function()
+			local position = vector32()
+			local kind = u8()
+			local projectile = instance('Model')
+			local accessory = maybeInstance('Accessory')
+			local part = maybeInstance('BasePart')
+			local player = maybeInstance('Player')
+			local model = maybeInstance('Model')
+			return table.pack(position, kind, projectile, accessory, part, player, model, maybe(bool))
+		end},
+		[4] = {name = 'UpdateMapDataZap', read = function()
+			local list = regions()
+			return table.pack(list, bool())
+		end},
+		[5] = {read = function()
+			vector16()
+			text16()
+		end},
+		[6] = {read = function()
+			vector16()
+			text16()
+			vector32()
+			maybe(vector8)
+			maybeInstance('Player')
+		end},
+		[7] = {name = 'EntityHealEventZap', read = function()
+			local entity = instance('Model')
+			local amount = f64()
+			local source = maybe(text16)
+			return table.pack(entity, amount, source, maybe(bool))
+		end},
+		[8] = {name = 'AddMatchEventCountdownZap', read = function()
+			local first = text16()
+			local second = text16()
+			local third = text16()
+			local number = f64()
+			local options = countdownOptions()
+			local color = maybe(rgb)
+			local color2 = maybe(rgb)
+			return table.pack(first, second, third, number, options, color, color2, maybe(f32))
+		end},
+		[9] = {name = 'KitsUpdateEventZap', read = function()
+			local number = f64()
+			return table.pack(number, text16())
+		end},
+		-- The reply to a FetchMapDataFuncZap call, which this layer never makes: a call id and regions.
+		[10] = {read = function()
+			u8()
+			regions()
+		end}
+	}
+
+	local fired
+	local function walk()
+		while at < size do
+			local id = u8()
+			local event = EVENTS[id]
+			if not event then error('unknown event id '..id, 0) end
+			local args = event.read()
+			if event.name then
+				table.insert(fired, {event.name, args})
+			end
+		end
+	end
+
+	local connection, stopped, dropped, seenOnYou
+	local function stop(why)
+		stopped = true
+		zap.decoding = false
+		if connection then connection:Disconnect() end
+		ctx.log('Zap decoder stopped ('..why..'): damage, launch and the other Zap events stay silent')
+	end
+	local function onPacket(packet, list)
+		if stopped or type(packet) ~= 'buffer' then return end
+		data, size, at, taken = packet, buffer.len(packet), 0, 0
+		instances = type(list) == 'table' and list or {}
+		fired = {}
+		local ok, err = pcall(walk)
+		local events = fired
+		data, instances, fired = nil, nil, nil
+		zap.packets += 1
+		if not ok then
+			if err ~= MISSING then
+				stop(err == PAST_END and 'a read past the end of a packet' or tostring(err))
+				return
+			end
+			if not dropped then
+				dropped = true
+				ctx.log('Zap decoder: a packet named an instance that had not replicated; the rest of it is dropped, as the game drops it')
+			end
+		end
+		if not seenOnYou and shared.PistonwareDeveloper == true then
+			local character = ctx.lplr.Character
+			for _, event in events do
+				if event[1] == 'EntityDamageEventZap' and character and event[2][1] == character then
+					seenOnYou = true
+					ctx.log('Zap decoder: first damage event on you, in packet '..zap.packets)
+					break
+				end
+			end
+		end
+		for _, event in events do
+			zap[event[1]].fire(table.unpack(event[2], 1, event[2].n))
+		end
+	end
+
+	task.spawn(function()
+		local services = ctx.services
+		local folder = services.ReplicatedStorage:FindFirstChild('ZAP') or services.ReplicatedStorage:WaitForChild('ZAP', 30)
+		local remote = folder and (folder:FindFirstChild('ZAP_RELIABLE') or folder:WaitForChild('ZAP_RELIABLE', 30))
+		if not (remote and remote:IsA('RemoteEvent')) then
+			stop('no ReplicatedStorage.ZAP.ZAP_RELIABLE')
+			return
+		end
+		connection = remote.OnClientEvent:Connect(onPacket)
+		ctx.clean(connection)
+		zap.decoding = true
+		if shared.PistonwareDeveloper == true then
+			ctx.log('Zap decoder on: reading ReplicatedStorage.ZAP.ZAP_RELIABLE')
+		end
+	end)
+end
+
+--[[ A client sync event shaped like @easy-games/sync-event's SyncEvent: connect(callback, priority)
+returns a connection (Destroy, as the game's EventConnection, plus Disconnect and disconnect),
+setPriority(priority) a builder that connects and fires at that priority, and fire builds an event
+from its arguments, runs every handler on it in priority order and returns it. fireEvent takes an
+event already built. The game's own handlers sit on the game's events, never on these, so these
+carry only what pistonware itself fires. ]]
+function knitless.registrySyncEvent(log)
+	local entries = {}
+	local event = {}
+	function event:connect(callback, priority)
+		local entry = {callback = callback, priority = tonumber(priority) or 200}
+		local index = #entries + 1
+		for i, other in entries do
+			if other.priority > entry.priority then
+				index = i
+				break
+			end
+		end
+		table.insert(entries, index, entry)
+		local function disconnect()
+			local at = table.find(entries, entry)
+			if at then table.remove(entries, at) end
+		end
+		return {Destroy = disconnect, Disconnect = disconnect, disconnect = disconnect}
+	end
+	function event:fireEvent(fired)
+		for _, entry in table.clone(entries) do
+			local ok, err = pcall(entry.callback, fired)
+			if not ok and log then log('sync event handler failed: '..tostring(err)) end
+		end
+		return fired
+	end
+	function event:fire(...)
+		local fired = table.pack(...)
+		function fired:setCancelled(cancelled)
+			self.cancelled = cancelled ~= false
+		end
+		function fired:isCancelled()
+			return self.cancelled == true
+		end
+		return self:fireEvent(fired)
+	end
+	function event:setPriority(priority)
+		local source = self
+		local builder = {}
+		function builder:setPriority(newPriority)
+			priority = newPriority
+			return self
+		end
+		function builder:connect(callback)
+			return source:connect(callback, priority)
+		end
+		function builder:fire(...)
+			return source:fire(...)
+		end
+		return builder
+	end
+	return event
+end
+
+--[[ game-core's AnimationUtil and the game's GameAnimationUtil over it.
+
+playAnimation(target, assetId, options) is game-core's own, without its BeforeAnimationPlayEvent
+(a game-local event): the Animator of a Player's character, a Model or an Animator, LoadAnimation,
+options looped, speed, fadeInTime, restorePreviousTracks and fadeSamePriorityTracks, and the track
+removed when it stops. GameAnimationUtil maps an AnimationType (its number, or its name) to an
+asset id through the dump's Animations table (AnimationType name to ProdAnimations id). Without it,
+only the few animations the scripts play by type are known, ids from prod-animations. ]]
+function knitless.registryAnimation(ctx)
+	local AnimationUtil = {}
+	function AnimationUtil.playAnimation(_, target, assetId, options)
+		options = type(options) == 'table' and options or {}
+		if typeof(target) ~= 'Instance' or type(assetId) ~= 'string' or assetId == '' then return nil end
+		local animator
+		if target:IsA('Player') then
+			local humanoid = target.Character and target.Character:FindFirstChild('Humanoid')
+			animator = humanoid and humanoid:FindFirstChild('Animator')
+		elseif target:IsA('Animator') then
+			animator = target
+		elseif target:IsA('Model') then
+			local humanoid = target:FindFirstChildWhichIsA('Humanoid')
+			animator = humanoid and humanoid:FindFirstChild('Animator')
+			if not animator then
+				local controller = target:FindFirstChildWhichIsA('AnimationController')
+				animator = controller and controller:FindFirstChild('Animator')
+			end
+		end
+		if not (animator and animator:IsDescendantOf(game)) then return nil end
+
+		local animation = Instance.new('Animation')
+		animation.AnimationId = assetId
+		local track = animator:LoadAnimation(animation)
+		if options.looped ~= nil then track.Looped = options.looped end
+		local priority = track.Priority
+		local restore = options.restorePreviousTracks
+		if restore == nil then restore = not track.Looped end
+		if options.fadeSamePriorityTracks ~= false then
+			for _, other in animator:GetPlayingAnimationTracks() do
+				if other.Priority == priority then
+					if not restore then
+						other:Stop(0.1)
+					elseif other:GetAttribute('OriginalWeight') == nil then
+						other:SetAttribute('OriginalWeight', other.WeightTarget)
+						other:AdjustWeight(0.0001, 0.1)
+					end
+				end
+			end
+		end
+		track:Play(options.fadeInTime, nil, options.speed)
+
+		--[[ Per track and gone with it, so not registered for cleanup. ]]
+		local stopped
+		stopped = track.Stopped:Connect(function()
+			stopped:Disconnect()
+			local ownWeight = track:GetAttribute('OriginalWeight')
+			track:Destroy()
+			if not (animator.Parent and restore) or ownWeight ~= nil then return end
+			local last
+			for _, other in animator:GetPlayingAnimationTracks() do
+				if other.Priority == priority and other ~= track then last = other end
+			end
+			local weight = last and last:GetAttribute('OriginalWeight')
+			if weight ~= nil then
+				last:SetAttribute('OriginalWeight', nil)
+				last:AdjustWeight(weight, 0.1)
+			end
+		end)
+		return track
+	end
+
+	local types = knitless.registryEnum(ctx.data('AnimationType'))
+	local assets = ctx.data('Animations')
+	if type(assets) ~= 'table' then
+		ctx.log('registry: no Animations in the data file; GameAnimationUtil knows only the animations the scripts play')
+		assets = {}
+	end
+	local known = {
+		PUNCH = 'rbxassetid://4866397461',
+		SWORD_SWING = 'rbxassetid://4947108314',
+		FP_USE_ITEM = 'rbxassetid://8089691925',
+		FP_SWING_SWORD = 'rbxassetid://8089691925',
+		FP_WALK = 'rbxassetid://8091867276',
+		BUILDER_HAMMER_HIT = 'rbxassetid://6955840280',
+		WIZARD_BALL_CAST = 'rbxassetid://7265176148',
+		NET_CATCH = 'rbxassetid://7377150622',
+		JADE_HAMMER_SLAM = 'rbxassetid://79601612304177',
+		MINER_MINE_STONE = 'rbxassetid://8934264605',
+		SHOVEL_DIG = 'rbxassetid://9378575104',
+		TINKER_ATTACK = 'rbxassetid://16992948586'
+	}
+
+	local GameAnimationUtil = {}
+	function GameAnimationUtil.getAssetId(_, animationType)
+		local name = animationType
+		if type(animationType) == 'number' then
+			if assets[animationType] then return assets[animationType] end
+			name = type(types) == 'table' and types[animationType] or nil
+		end
+		if type(name) ~= 'string' then return nil end
+		return assets[name] or known[name]
+	end
+	function GameAnimationUtil.getAnimation(_, animationType)
+		local animation = Instance.new('Animation')
+		animation.AnimationId = GameAnimationUtil:getAssetId(animationType) or ''
+		return animation
+	end
+	function GameAnimationUtil.playAnimation(_, target, animationType, options)
+		return AnimationUtil:playAnimation(target, GameAnimationUtil:getAssetId(animationType), options)
+	end
+
+	return AnimationUtil, GameAnimationUtil, types
+end
+
+--[[ game-core's AudioManager, playing plain Sounds: the game's own buses, pooled AudioPlayers and
+per-sound registered volumes are its own, so a Sound at its default volume stands in. The config
+keys are the game's: position (a hidden part there), parent, looped, volumeMultiplier,
+playbackSpeedMultiplier and the roll-off distances. playAudio goes through internalPlayAudio, as the
+game's does, so a hook there sees these sounds too. A sound of ours is removed when it ends, or 10 s
+on when it never loaded. ]]
+function knitless.registryAudio(ctx)
+	local workspace = ctx.services.Workspace
+	local soundService = ctx.services.SoundService or game:GetService('SoundService')
+	local AudioManager = {audioAssetConfigs = {}}
+
+	function AudioManager:internalPlayAudio(asset, config)
+		config = type(config) == 'table' and config or {}
+		local sound, owned
+		if typeof(asset) == 'Instance' then
+			if not asset:IsA('Sound') then return nil end
+			sound = asset
+		elseif type(asset) == 'string' and asset ~= '' then
+			sound, owned = Instance.new('Sound'), true
+			sound.SoundId = asset
+			if type(config.volumeMultiplier) == 'number' then sound.Volume *= config.volumeMultiplier end
+			if type(config.playbackSpeedMultiplier) == 'number' then sound.PlaybackSpeed *= config.playbackSpeedMultiplier end
+			sound.RollOffMaxDistance = tonumber(config.rollOffMaxDistance) or 60
+			sound.RollOffMinDistance = tonumber(config.rollOffMinDistance) or 10
+		else
+			return nil
+		end
+		if config.looped == true then sound.Looped = true end
+
+		local parent, spatial = typeof(config.parent) == 'Instance' and config.parent or nil, nil
+		if not parent and typeof(config.position) == 'Vector3' then
+			spatial = Instance.new('Part')
+			spatial.Size = Vector3.one
+			spatial.Anchored = true
+			spatial.CanCollide = false
+			spatial.CanQuery = false
+			spatial.CanTouch = false
+			spatial.Transparency = 1
+			spatial.CFrame = CFrame.new(config.position)
+			spatial:SetAttribute('gamecore_GameQueryIgnore', true)
+			spatial.Parent = workspace
+			parent = spatial
+		end
+		sound.Parent = parent or soundService
+		sound:Play()
+
+		local entry = {player = sound, released = false}
+		function entry.release()
+			if entry.released then return end
+			entry.released = true
+			if spatial then
+				spatial:Destroy()
+			elseif owned then
+				sound:Destroy()
+			end
+		end
+		if owned or spatial then
+			if not sound.Looped then sound.Ended:Once(entry.release) end
+			task.delay(10, function()
+				if not sound.IsLoaded then entry.release() end
+			end)
+		end
+		return entry
+	end
+
+	--[[ The game's AudioPlayback handle: Stop, Destroy, getAudioPlayer, setProperty. ]]
+	function AudioManager:playAudio(asset, config)
+		local entry = self:internalPlayAudio(asset, config or {})
+		if type(entry) ~= 'table' then return nil end
+		local playback = {}
+		function playback:getAudioPlayer()
+			return entry.player
+		end
+		function playback:setProperty(name, value)
+			pcall(function()
+				entry.player[name] = value
+			end)
+		end
+		function playback:Stop()
+			pcall(function()
+				entry.player:Stop()
+			end)
+			if entry.release then entry.release() end
+		end
+		playback.Destroy = playback.Stop
+		return playback
+	end
+
+	function AudioManager:playRandomAudio(list, config)
+		if type(list) ~= 'table' or #list == 0 then return nil end
+		return self:playAudio(list[math.random(#list)], config)
+	end
+
+	function AudioManager:playAudioPlayer(asset, config)
+		local entry = self:internalPlayAudio(asset, config or {})
+		return type(entry) == 'table' and entry.player or nil
+	end
+
+	return AudioManager
+end
+
+--[[ game-core's GameQueryUtil. The ignore mark is the gamecore_GameQueryIgnore attribute, the one the
+game's own targeting reads. raycast is the game's: a hit on a marked part (or one options.ignorePart
+turns down) is taken out of the params and the cast is made again, so the params passed in are
+changed as the game changes them. ]]
+function knitless.registryQueryUtil(ctx)
+	local workspace = ctx.services.Workspace
+	local ATTRIBUTE = 'gamecore_GameQueryIgnore'
+	local QueryUtil = {ADJUST_CAN_QUERY = false}
+
+	function QueryUtil.isQueryIgnored(_, part)
+		if typeof(part) ~= 'Instance' or not part:IsA('BasePart') then return false end
+		return part:GetAttribute(ATTRIBUTE) == true
+	end
+
+	function QueryUtil.setQueryIgnored(_, part, ignored)
+		if ignored == nil then ignored = true end
+		if typeof(part) ~= 'Instance' or not part:IsA('BasePart') then return nil end
+		part:SetAttribute(ATTRIBUTE, ignored and true or nil)
+	end
+
+	function QueryUtil.raycast(self, origin, direction, params, options)
+		params = params or RaycastParams.new()
+		local world = type(options) == 'table' and options.world or workspace
+		local ignorePart = type(options) == 'table' and options.ignorePart or nil
+		local included
+		while true do
+			local result = world:Raycast(origin, direction, params)
+			if not result then return nil end
+			local hit = result.Instance
+			if not (self:isQueryIgnored(hit) or (ignorePart and ignorePart(hit))) then return result end
+			if params.FilterType ~= Enum.RaycastFilterType.Include then
+				params:AddToFilter(hit)
+			else
+				included = included or table.clone(params.FilterDescendantsInstances)
+				local found
+				for index, root in included do
+					if hit == root or hit:IsDescendantOf(root) then
+						found = index
+						break
+					end
+				end
+				if not found then return nil end
+				table.remove(included, found)
+				params.FilterDescendantsInstances = included
+			end
+		end
+	end
+
+	return QueryUtil
+end
+
+--[[ game-core's AppController, read off PlayerGui: an app the game opens is mounted there as a
+ScreenGui named by its app id, and closing it removes that. isLayerOpen asks whether any app the
+game opens on that layer is up, from the dump's AppLayers ({layer = {appId, ...}}) or else the MAIN
+apps the game registers (ui/apps and the game-core settings app). closeApp disables the ScreenGui
+rather than destroying it: the game's own Roact tree still owns it and unmounts it later. openApp
+needs the game's components and is not offered. ]]
+function knitless.registryAppController(ctx)
+	local layers = ctx.data('AppLayers')
+	if type(layers) ~= 'table' then
+		layers = {MAIN = {
+			'InventoryApp', 'TeamUpgradeApp', 'BedwarsItemShopApp', 'KitShopApp', 'WeaponSelectionApp',
+			'KitDetailsApp', 'LockerApp', 'MissionsApp', 'BattlePassApp', 'CustomMatchesApp', 'FlamethrowerApp',
+			'FrostyHammerApp', 'GiftingApp', 'GiftedApp', 'SocialConnectionsApp', 'GameUpdatesApp', 'ChestApp',
+			'EnchantTable', 'QueueSelection', 'CustomMatchHostPanel', 'ClanCreateForm', 'ClanProfile', 'EventApp',
+			'FriendsList', 'MilestonesApp', 'ScriptEditor', 'NewsApp', 'LoreApp', 'KitContractApp',
+			'CreativeGadgetMenu', 'WorldGuardMenu', 'AfkApp', 'TrainingRoomCommandsListApp', 'CommandMenuApp',
+			'TrainingRoomKitSelectionApp', 'LassoWarsUpgradeShopApp', 'LassoWarsTutorialApp', 'ArmorTrimApp',
+			'StoreMenuApp', 'LobbyPlayMenuApp', 'AllRandomKitDraftApp', 'ClanHQSelectorApp',
+			'ClanLobbySelectorApp', 'PurchaseOptionsScreenApp', 'SettingsApp', 'CreativeInventory',
+			'PlayerProfile', 'CardSelection'
+		}}
+	end
+
+	local function playerGui()
+		return ctx.lplr:FindFirstChildOfClass('PlayerGui')
+	end
+	local function appId(app)
+		if type(app) == 'table' then return app.appId end
+		return app
+	end
+	local function openGui(id)
+		local gui = type(id) == 'string' and playerGui()
+		gui = gui and gui:FindFirstChild(id)
+		if gui and (not gui:IsA('LayerCollector') or gui.Enabled) then return gui end
+		return nil
+	end
+
+	local AppController = {}
+	function AppController.isAppOpen(_, app)
+		return openGui(appId(app)) ~= nil
+	end
+	function AppController.getOpenApps(_)
+		local open = {}
+		local gui = playerGui()
+		for _, child in gui and gui:GetChildren() or {} do
+			if child:IsA('ScreenGui') and child.Enabled then
+				table.insert(open, child.Name)
+			end
+		end
+		return open
+	end
+	function AppController.closeApp(_, app)
+		local gui = openGui(appId(app))
+		if not gui then return end
+		if gui:IsA('LayerCollector') then
+			gui.Enabled = false
+		else
+			gui:Destroy()
+		end
+	end
+	AppController.closeAppById = AppController.closeApp
+	function AppController.isLayerOpen(_, layer)
+		for _, id in layers[layer] or {} do
+			if openGui(id) then return true end
+		end
+		return false
+	end
+	function AppController.closeLayer(self, layer)
+		for _, id in layers[layer] or {} do
+			self:closeApp(id)
+		end
+	end
+	return AppController
+end
+
+--[[ The part of Roact the scripts use for UI of their own: createElement, createFragment, createRef,
+mount, unmount, and the Children, Ref, Event, Change and None keys. Elements are the plain
+{component, props} tables Roact makes, with children in props[Roact.Children]. mount builds host
+elements (class names) and function components into Instances; stateful components, bindings and
+updates are not offered, and the game's own trees are never reached. ]]
+function knitless.registryRoact()
+	local Roact = {}
+	local function symbol(name)
+		return setmetatable({}, {__tostring = function()
+			return 'Symbol('..name..')'
+		end})
+	end
+	local function keys(kind)
+		return setmetatable({}, {__index = function(self, name)
+			local key = {kind = kind, name = name}
+			rawset(self, name, key)
+			return key
+		end})
+	end
+	local Fragment = symbol('Fragment')
+	Roact.Children = symbol('Children')
+	Roact.Ref = symbol('Ref')
+	Roact.None = symbol('None')
+	Roact.Event = keys('Event')
+	Roact.Change = keys('Change')
+
+	function Roact.createElement(component, props, children)
+		local copy = {}
+		for key, value in props or {} do
+			copy[key] = value
+		end
+		if children ~= nil then copy[Roact.Children] = children end
+		return {component = component, props = copy}
+	end
+	function Roact.createFragment(elements)
+		return {component = Fragment, elements = elements}
+	end
+	function Roact.createRef()
+		local ref = {}
+		function ref:getValue()
+			return self.current
+		end
+		return ref
+	end
+
+	local function build(element, parent, name, handle)
+		if type(element) ~= 'table' then return nil end
+		local component = element.component
+		if component == Fragment then
+			for key, child in element.elements or {} do
+				build(child, parent, type(key) == 'string' and key or nil, handle)
+			end
+			return nil
+		end
+		if type(component) == 'function' then
+			return build(component(element.props), parent, name, handle)
+		end
+		if type(component) ~= 'string' then return nil end
+		local instance = Instance.new(component)
+		if name then instance.Name = name end
+		for key, value in element.props do
+			if key == Roact.Ref then
+				value.current = instance
+			elseif type(key) == 'table' and key.kind == 'Event' then
+				table.insert(handle.connections, instance[key.name]:Connect(function(...)
+					value(instance, ...)
+				end))
+			elseif type(key) == 'table' and key.kind == 'Change' then
+				table.insert(handle.connections, instance:GetPropertyChangedSignal(key.name):Connect(function()
+					value(instance)
+				end))
+			elseif type(key) == 'string' and value ~= Roact.None then
+				instance[key] = value
+			end
+		end
+		for key, child in element.props[Roact.Children] or {} do
+			build(child, instance, type(key) == 'string' and key or nil, handle)
+		end
+		instance.Parent = parent
+		return instance
+	end
+
+	function Roact.mount(element, parent, key)
+		local handle = {connections = {}}
+		handle.instance = build(element, parent, key or 'RoactTree', handle)
+		return handle
+	end
+	function Roact.unmount(handle)
+		if type(handle) ~= 'table' then return end
+		for _, connection in handle.connections or {} do
+			connection:Disconnect()
+		end
+		table.clear(handle.connections or {})
+		if handle.instance then
+			handle.instance:Destroy()
+			handle.instance = nil
+		end
+	end
+	return Roact
+end
+
+--[[ The game's WeldUtil for accessories: each Accessory's Handle attachment is welded to the
+character attachment of the same name, a Weld named AccessoryAttachment on the character's part
+(a RigidConstraint for a bone), held items preferring their grip attachments, as the game does. An
+accessory whose handle is already joined to something outside it (the game welded it) is left alone,
+so nothing is welded twice. ]]
+function knitless.registryWeldUtil()
+	local WeldUtil = {}
+
+	local function findAttachment(root, name)
+		for _, child in root:GetChildren() do
+			if child:IsA('Accoutrement') or child:IsA('Tool') then continue end
+			if (child:IsA('Attachment') or child:IsA('Bone')) and child.Name == name
+				and not (string.sub(name, -17) == 'KneeRigAttachment' and string.find(child.Parent.Name, 'Upper', 1, true)) then
+				return child
+			end
+			local found = findAttachment(child, name)
+			if found then return found end
+		end
+		return nil
+	end
+
+	local function joinedOutside(handle, accessory)
+		for _, joint in handle:GetJoints() do
+			local first, second
+			if joint:IsA('JointInstance') or joint:IsA('WeldConstraint') then
+				first, second = joint.Part0, joint.Part1
+			elseif joint:IsA('Constraint') then
+				first = joint.Attachment0 and joint.Attachment0.Parent
+				second = joint.Attachment1 and joint.Attachment1.Parent
+			end
+			for _, part in {first, second} do
+				if typeof(part) == 'Instance' and not part:IsDescendantOf(accessory) then return true end
+			end
+		end
+		return false
+	end
+
+	function WeldUtil.weldParts(_, part0, part1)
+		local weld = Instance.new('WeldConstraint')
+		weld.Name = part1.Name
+		weld.Part0 = part0
+		weld.Part1 = part1
+		weld.Parent = part0
+		return weld
+	end
+
+	function WeldUtil.weldAttachments(_, characterAttachment, accessoryAttachment)
+		local weld = Instance.new('Weld')
+		weld.Name = 'AccessoryAttachment'
+		weld.Part0 = characterAttachment.Parent
+		weld.Part1 = accessoryAttachment.Parent
+		weld.C0 = characterAttachment.CFrame
+		weld.C1 = accessoryAttachment.CFrame
+		weld.Parent = characterAttachment.Parent
+		return weld
+	end
+
+	function WeldUtil.rigidWeldAttachments(_, attachment0, attachment1)
+		local constraint = Instance.new('RigidConstraint')
+		constraint.Name = 'AccessoryRigidConstraint'
+		constraint.Attachment0 = attachment0
+		constraint.Attachment1 = attachment1
+		constraint.Parent = attachment0.Parent
+		return constraint
+	end
+
+	function WeldUtil.weldAccessory(self, character, accessory)
+		if accessory.Parent ~= character then accessory.Parent = character end
+		local handle = accessory:FindFirstChild('Handle')
+		if handle and handle:IsA('BasePart') and not joinedOutside(handle, accessory) then
+			local candidates = handle:GetChildren()
+			if accessory:GetAttribute('InvItem') == true and accessory:GetAttribute('ArmorSlot') == nil
+				and accessory:GetAttribute('IsBackpack') == nil then
+				local grips = {}
+				for _, child in candidates do
+					if child:IsA('Attachment') and (child.Name == 'RightGripAttachment'
+						or child.Name == 'LeftGripAttachment' or child.Name == 'BodyFrontAttachment') then
+						table.insert(grips, child)
+					end
+				end
+				if #grips > 0 then candidates = grips end
+			end
+			for _, attachment in candidates do
+				if attachment:IsA('Attachment') then
+					local target = findAttachment(character, attachment.Name)
+					if target then
+						if target:IsA('Bone') then
+							self:rigidWeldAttachments(attachment, target)
+						else
+							self:weldAttachments(target, attachment)
+						end
+						break
+					end
+				end
+			end
+		end
+		for _, part in accessory:GetDescendants() do
+			if part:IsA('BasePart') then part.CanCollide = false end
+		end
+	end
+
+	function WeldUtil.weldCharacterAccessories(self, character, container)
+		for _, child in (container or character):GetChildren() do
+			if child:IsA('Accessory') then
+				self:weldAccessory(character, child)
+			end
+		end
+	end
+
+	function WeldUtil.weldModel(_, model)
+		local primary = model.PrimaryPart
+		if not primary then return nil end
+		for _, part in primary:GetDescendants() do
+			if part:IsA('BasePart') then
+				local weld = Instance.new('WeldConstraint')
+				weld.Name = 'WeldUtil_WeldModel'
+				weld.Part0 = part
+				weld.Part1 = primary
+				weld.Parent = part
+			end
+		end
+	end
+
+	return WeldUtil
+end
+
+--[[ bedwars-shop's BedwarsShop over the dumped ShopItems. getShopItem(itemType, player, {shopId}) is
+the game's: the item's entry (the last one listed wins, as in the game), a deep copy, and with a
+player the adjusted price. getAdjustedShopPrice is the game's rule: priceMultiplier, the player's
+DisruptionPriceIncrease (none in the 20v20 and 16v16 queues), the iron shop tax and the queue's
+shopPriceModifiers. Not here: each shop's own item list (a shop component), the kit and game mode
+overrides the dump drops, and the tax, which comes from a ShopTaxController stand-in when one is
+there and is 0 otherwise. getTeamWool is getTeamWoolById, the name the scripts call it by. ]]
+function knitless.registryShop(ctx)
+	local items = ctx.data('ShopItems')
+	if type(items) ~= 'table' then
+		ctx.log('registry: no ShopItems in the data file; the shop is unavailable')
+		return nil
+	end
+	local byType = {}
+	for _, item in items do
+		if type(item) == 'table' and item.itemType ~= nil then
+			byType[item.itemType] = item
+		end
+	end
+	local workspace = ctx.services.Workspace
+	local queueMeta = ctx.sharedData('QueueMeta')
+	local noDisruption = {bedwars_20v20_lb = true, bedwars_16v16 = true, bedwars_20v20 = true}
+
+	local Shop = {ShopItems = items}
+
+	function Shop.getAdjustedShopPrice(item, player)
+		if item.disabled then return item.price end
+		local price = item.price
+		if item.priceMultiplier ~= nil then
+			price = math.clamp(math.round(item.price * item.priceMultiplier), 1, item.price)
+		end
+		local queueType = workspace:GetAttribute('QueueType')
+		local disruption = 0
+		if typeof(player) == 'Instance' and not noDisruption[queueType] then
+			disruption = math.ceil(item.price * (player:GetAttribute('DisruptionPriceIncrease') or 0))
+		end
+		local tax = 0
+		local taxController = ctx.controllers and ctx.controllers.ShopTaxController
+		if item.currency == 'iron' and type(taxController) == 'table' and type(taxController.getAddedTax) == 'function' then
+			local ok, added = pcall(taxController.getAddedTax, taxController, item.itemType)
+			tax = ok and tonumber(added) or 0
+		end
+		local total = price + disruption + tax
+		local modifiers = queueType ~= nil and type(queueMeta) == 'table' and type(queueMeta[queueType]) == 'table'
+			and queueMeta[queueType].shopPriceModifiers or nil
+		if type(modifiers) == 'table' then
+			local multiplier = item.currency == 'iron' and modifiers.ironMultiplier
+				or item.currency == 'diamond' and modifiers.diamondMultiplier
+				or item.currency == 'emerald' and modifiers.emeraldMultiplier
+				or nil
+			if multiplier ~= nil then total *= multiplier end
+			local rounding = modifiers.roundingMethod
+			total = rounding == 'up' and math.ceil(total) or rounding == 'down' and math.floor(total) or math.round(total)
+			if modifiers.canGoToZero then return math.max(total, 0) end
+			if total < 1 then total = 1 end
+		end
+		return total
+	end
+
+	function Shop.getShopItemBase(itemType)
+		return knitless.registryCopy(byType[itemType])
+	end
+
+	function Shop.getShopItem(itemType, player)
+		local item = Shop.getShopItemBase(itemType)
+		if item and typeof(player) == 'Instance' then
+			local price = Shop.getAdjustedShopPrice(item, player)
+			if price ~= item.price then item.price = price end
+		end
+		return item
+	end
+
+	function Shop.doesItemRequireKit(itemType, kit)
+		local item = byType[itemType]
+		return type(item) == 'table' and type(item.requiresKit) == 'table' and table.find(item.requiresKit, kit) ~= nil
+	end
+
+	local wools = {'wool_blue', 'wool_orange', 'wool_pink', 'wool_yellow', 'wool_brown', 'wool_white', 'wool_cyan', 'wool_purple'}
+	function Shop.getTeamWoolById(teamId)
+		return wools[tonumber(teamId) or 0] or 'wool_white'
+	end
+	Shop.getTeamWool = Shop.getTeamWoolById
+
+	return Shop
+end
+
+--[[ team-upgrade-meta over the dumped TeamUpgradeMeta ({tables, byQueue, default}). The game picks
+the table by the match's queue type; this takes the queue type passed, else the Workspace's
+QueueType attribute. Without the data it answers an empty table, so the bootstrap still starts and
+AutoBuy simply offers no upgrades. ]]
+function knitless.registryTeamUpgrades(ctx)
+	local meta = ctx.data('TeamUpgradeMeta')
+	if type(meta) ~= 'table' or type(meta.tables) ~= 'table' then
+		ctx.log('registry: no TeamUpgradeMeta in the data file; there are no team upgrades')
+		meta = nil
+	end
+	local function forQueue(queueType)
+		if not meta then return {} end
+		queueType = queueType or ctx.services.Workspace:GetAttribute('QueueType')
+		local index = type(meta.byQueue) == 'table' and queueType ~= nil and meta.byQueue[queueType] or meta.default
+		return meta.tables[index] or meta.tables[meta.default] or meta.tables[1] or {}
+	end
+	return {
+		getTeamUpgradeMetaForQueue = forQueue,
+		getTeamUpgradeDefinition = function(upgrade)
+			return forQueue()[upgrade]
+		end
+	}
+end
+
+--[[ Fills ctx.modules with the export table of every module the bootstrap requires that the store,
+blocks and controllers slices do not own. Each part is built on its own, so one that fails costs
+only its own modules. ]]
+function knitless.buildRegistry(ctx)
+	local modules = ctx.modules
+	local RS = 'ReplicatedStorage.TS.'
+	local NODE = 'ReplicatedStorage.rbxts_include.node_modules.'
+	local CORE = NODE..'@easy-games.game-core.out'
+	local missing, noted = {}, {}
+
+	local function note(name)
+		if noted[name] then return end
+		noted[name] = true
+		table.insert(missing, name)
+	end
+	local function data(name)
+		local ok, value = pcall(ctx.data, name)
+		if ok and value ~= nil then return value end
+		note(name)
+		return nil
+	end
+	local function part(name, build)
+		local ok, err = pcall(build)
+		if not ok then ctx.log('registry: '..name..' failed: '..tostring(err)) end
+	end
+
+	--[[ Tables straight from the dump, as {path, export, data name, is an enum}. ]]
+	part('data', function()
+		for _, entry in {
+			{'games.bedwars.items.frosty-hammer.frosty-hammer-upgrades', 'FrostyHammerUpgradeMeta', 'AdetundeUpgradeMeta'},
+			{'locker.bed-break-effect.bed-break-effect-meta', 'BedBreakEffectMeta', 'BedBreakEffectMeta'},
+			{'games.bedwars.kit.bedwars-kit-meta', 'BedwarsKitMeta', 'BedwarsKitMeta'},
+			{'balance.black-marketeer-balance', 'BlackMarketeerBalance', 'BlackMarketeerBalance'},
+			{'balance.juggernaut-balance-file', 'JuggernautUtil', 'JuggernautUtil'},
+			{'locker.emote.emote-type', 'EmoteType', 'EmoteType', true},
+			{'enchant.enchant-meta', 'EnchantMeta', 'EnchantMeta'},
+			{'games.bedwars.item-skin.item-skin-types', 'ItemSkinType', 'ItemSkinType', true},
+			{'games.bedwars.kit-skin.bedwars-kit-skin', 'BedwarsKitSkin', 'BedwarsKitSkin', true},
+			{'games.bedwars.kit-skin.bedwars-kit-skin-meta', 'BedwarsKitSkinMeta', 'BedwarsKitSkinMeta'},
+			{'locker.kill-effect.kill-effect-meta', 'KillEffectMeta', 'KillEffectMeta'},
+			{'balance.balance-file', 'BalanceFile', 'BalanceFile'},
+			{'games.bedwars.kit.kits.frosty-gun.frosty-gun-util', 'FrostyGunMode', 'FrostyGunMode', true},
+			{'games.bedwars.kit.kits.soul-broker.soul-broker-constants', 'SoulBrokerConstants', 'SoulBrokerConstants'},
+			{'projectile.projectile-meta', 'ProjectileMeta', 'ProjectileMeta'},
+			{'sound.game-sound', 'GameSound', 'GameSound'},
+			{'status-effect.status-effect-type', 'StatusEffectType', 'StatusEffectType', true},
+			{'games.bedwars.kit.kits.summoner.summoner-kit-balance', 'SummonerKitBalance', 'SummonerKitBalance'},
+			{'locker.win-effect.win-effect-meta', 'WinEffectMeta', 'WinEffectMeta'},
+			-- Read by bedwars.lua at module load (LongJump/JadeAura, AutoConqueror, AutoPyro).
+			{'balance.jade-balance', 'JadeBalance', 'JadeBalance'},
+			{'balance.conqueror-balance', 'ConquerorBalance', 'ConquerorBalance'},
+			{'games.bedwars.kit.kits.pyro.flamethrower-upgrade', 'FlamethrowerUpgradeMeta', 'FlamethrowerUpgradeMeta'}
+		} do
+			-- A table missing from the data file stands in empty; ItemMeta (required) is not in this list.
+			local value = data(entry[3]) or {}
+			if entry[4] then value = knitless.registryEnum(value) end
+			local exports = modules[RS..entry[1]] or {}
+			exports[entry[2]] = value
+			modules[RS..entry[1]] = exports
+		end
+		local kitSkins = modules[RS..'games.bedwars.kit-skin.bedwars-kit-skin'].BedwarsKitSkin
+		if type(kitSkins) == 'table' and rawget(kitSkins, 'DEFAULT') == nil then
+			rawset(kitSkins, 'DEFAULT', 'default')
+		end
+	end)
+
+	--[[ item-meta's items, with projectileType rebuilt (registryProjectileTypes). Left nil without the
+	data, so the bootstrap's own check reports it. ]]
+	part('item-meta', function()
+		local items = data('ItemMeta')
+		knitless.registryProjectileTypes(items, data('ProjectileMeta'))
+		modules[RS..'item.item-meta'] = {
+			items = items,
+			getItemMeta = function(itemType)
+				return type(items) == 'table' and items[itemType] or nil
+			end
+		}
+	end)
+
+	part('item-skin-meta', function()
+		local skins = data('ItemSkinMeta') or {}
+		local byItem
+		modules[RS..'games.bedwars.item-skin.item-skin-meta'] = {
+			ItemSkinMeta = skins,
+			getItemSkinMeta = function(skin)
+				return skins[skin]
+			end,
+			getItemSkins = function(itemType)
+				if not byItem then
+					byItem = {}
+					for skin, meta in skins do
+						if type(meta) == 'table' and meta.itemType ~= nil then
+							byItem[meta.itemType] = byItem[meta.itemType] or {}
+							table.insert(byItem[meta.itemType], skin)
+						end
+					end
+					for _, list in byItem do
+						table.sort(list)
+					end
+				end
+				return byItem[itemType] and table.clone(byItem[itemType]) or nil
+			end
+		}
+	end)
+
+	part('combat-constant', function()
+		local swords = knitless.registryConstants(ctx,
+			knitless.registryFind(ctx.services.ReplicatedStorage, 'TS.combat.combat-constant'),
+			data('SwordsConstants') or {swordSwingBufferMultiplier = 0.4})
+		modules[RS..'combat.combat-constant'] = {
+			CombatConstant = table.clone(data('CombatConstant') or {
+				RAYCAST_SWORD_CHARACTER_DISTANCE = 14.4,
+				REGION_SWORD_CHARACTER_DISTANCE = 12.6
+			}),
+			SwordsConstants = swords
+		}
+	end)
+
+	--[[ The game's values (shared-constants), which the dump does not carry. Not required by the
+	bootstrap; the blocks slice reads the place rate from here. ]]
+	modules[RS..'shared-constants'] = {
+		IS_DEV = false,
+		PingConstants = {PING_COOLDOWN = 2, PING_LIFETIME = 6},
+		CpsConstants = {BLOCK_PLACE_CPS = 12}
+	}
+
+	part('queue-meta', function()
+		local queues = ctx.sharedData('QueueMeta')
+		if queues == nil then note('QueueMeta') end
+		modules[RS..'game.queue-meta'] = {
+			QueueMeta = queues,
+			getQueueMeta = function(queueType)
+				return type(queues) == 'table' and queues[queueType] or nil
+			end
+		}
+	end)
+
+	part('frosty-hammer', function()
+		local exports = modules[RS..'games.bedwars.items.frosty-hammer.frosty-hammer-upgrades'] or {}
+		local upgrades = {}
+		for key in type(exports.FrostyHammerUpgradeMeta) == 'table' and exports.FrostyHammerUpgradeMeta or {} do
+			upgrades[string.upper(key)] = key
+		end
+		exports.FrostyHammerUpgrade = knitless.registryEnum(upgrades)
+		modules[RS..'games.bedwars.items.frosty-hammer.frosty-hammer-upgrades'] = exports
+		--[[ Each upgrade's tier is an attribute of that name on what is passed (the scripts pass the player). ]]
+		modules[RS..'games.bedwars.items.frosty-hammer.frosty-hammer-util'] = {FrostyHammerUtil = {
+			getUpgradesFromHammer = function(hammer)
+				local tiers = {}
+				for _, upgrade in upgrades do
+					tiers[upgrade] = typeof(hammer) == 'Instance' and hammer:GetAttribute(upgrade) or 0
+				end
+				return tiers
+			end
+		}}
+	end)
+
+	--[[ taliyah-util's price is the Workspace's ChickenPrice and ChickenCurrency attributes. ]]
+	modules[RS..'games.bedwars.kit.kits.taliyah.taliyah-util'] = {TaliyahUtil = {
+		CHICKEN_BASE_LIFETIME = 75,
+		CHICKEN_BASE_HP = 70,
+		DEFAULT_MAX_CHICKEN = 4,
+		getPrice = function()
+			local workspace = ctx.services.Workspace
+			return {
+				price = workspace:GetAttribute('ChickenPrice') or 30,
+				currency = workspace:GetAttribute('ChickenCurrency') or 'iron'
+			}
+		end
+	}}
+
+	part('team-upgrade-meta', function()
+		modules[RS..'games.bedwars.team-upgrade.team-upgrade-meta'] = knitless.registryTeamUpgrades(ctx)
+	end)
+
+	part('bedwars-shop', function()
+		modules[RS..'games.bedwars.shop.bedwars-shop'] = {BedwarsShop = knitless.registryShop(ctx)}
+	end)
+
+	--[[ The remotes, through the layer's own clients. ]]
+	modules[RS..'remotes'] = {default = {Client = ctx.net}}
+	modules[NODE..'@rbxts.net.out.client'] = {}
+	modules['ReplicatedStorage.rbxts_include.RuntimeLib'] = {
+		Promise = ctx.Promise,
+		--[[ roblox-ts' TS.await: a promise's value, or its rejection thrown. ]]
+		await = function(promise)
+			if type(promise) ~= 'table' or type(promise.await) ~= 'function' then return promise end
+			local results = table.pack(promise:await())
+			if not results[1] then error(results[2], 2) end
+			return table.unpack(results, 2, results.n)
+		end
+	}
+
+	part('animation', function()
+		local AnimationUtil, GameAnimationUtil, types = knitless.registryAnimation(ctx)
+		if types == nil then note('AnimationType') end
+		modules[CORE..'.shared.util.animation-util'] = {AnimationUtil = AnimationUtil}
+		modules[RS..'animation.animation-type'] = {AnimationType = types}
+		modules[RS..'animation.animation-util'] = {
+			GameAnimationUtil = GameAnimationUtil,
+			getAnimation = function(animationType)
+				return GameAnimationUtil:getAnimation(animationType)
+			end,
+			getAnimationFromAssetId = function(assetId)
+				local animation = Instance.new('Animation')
+				animation.AnimationId = assetId
+				return animation
+			end
+		}
+	end)
+
+	part('game-core', function()
+		modules[CORE] = {
+			AudioManager = knitless.registryAudio(ctx),
+			GameQueryUtil = knitless.registryQueryUtil(ctx),
+			UILayers = knitless.registryEnum({MAIN = 'MAIN', OVERLAY = 'OVERLAY', HUD = 'HUD'})
+		}
+	end)
+
+	part('app-controller', function()
+		modules[CORE..'.client.controllers.app-controller'] = {AppController = knitless.registryAppController(ctx)}
+	end)
+
+	part('sync-events', function()
+		local priority = knitless.registryEnum({HIGHEST = 0, HIGH = 100, NORMAL = 200, LOW = 300, LOWEST = 400, MONITOR = 500})
+		modules[NODE..'@easy-games.sync-event.out'] = {
+			SyncEventPriority = priority,
+			SyncEventPriorityOrdered = {0, 100, 200, 300, 400, 500}
+		}
+		local events = {}
+		for _, name in {'SwordSwing', 'ProjectileLaunched', 'StatusEffectAdded', 'AbilityUsed'} do
+			events[name] = knitless.registrySyncEvent(ctx.log)
+		end
+		modules['PlayerScripts.TS.client-sync-events'] = {ClientSyncEvents = events}
+	end)
+
+	part('zap', function()
+		modules['PlayerScripts.TS.lib.network'] = knitless.registryZap(ctx)
+	end)
+
+	part('roact', function()
+		modules[NODE..'@rbxts.roact.src'] = knitless.registryRoact()
+	end)
+
+	part('weld-util', function()
+		modules[RS..'util.weld-util'] = {WeldUtil = knitless.registryWeldUtil()}
+	end)
+
+	--[[ Internals of the game's own UI and effects. The scripts only patch fields on these or walk
+	them, so plain tables are enough, and nothing they put there reaches the game. ]]
+	modules[RS..'util.effect.effect-util'] = {EffectUtil = {}}
+	modules[RS..'games.bedwars.kit.kits.mage.mage-kit-util'] = {MageKitUtil = {}}
+	modules[CORE..'.client.ui.lib.util.click-hold'] = {ClickHold = {}}
+	modules['PlayerScripts.TS.controllers.global.locker.kill-effect.effects.default-kill-effect'] = {}
+	modules['PlayerScripts.TS.controllers.global.top-bar.ui.game.hud-alive-player-counts'] = {HudAlivePlayerCounts = {}}
+	modules['PlayerScripts.TS.controllers.global.queue.ui.queue-card'] = {QueueCard = {}}
+	modules['PlayerScripts.TS.lib.visualizer.visualizer-utils'] = {VisualizerUtils = {}}
+	modules['PlayerScripts.TS.controllers.game.ping.ping-controller'] = {PingController = {}}
+
+	if #missing > 0 then
+		ctx.log('registry: not in the data file: '..table.concat(missing, ', '))
+	end
+end
+
+--[[ Store slice: bedwars.Store and InventoryUtil without Knit.
+
+The store keeps Rodux's contract. getState() returns the current state, which is never edited in
+place: a change gives new tables along its path (state, slice, sub-table) and every other reference
+stays as it was. changed listeners run once on the next Heartbeat with (new, previous), and only
+when something changed, never inside dispatch. The slices are rebuilt from what every client can
+see: the character's inventory ObjectValues and accessories, player and Workspace attributes, and
+the remotes the game's own controllers listen to. ]]
+
+--[[ One inventory accessory, as the game's store and InventoryUtil describe it. ]]
+function knitless.storeItem(tool)
+	return {
+		tool = tool,
+		itemType = tool.Name,
+		amount = tool:GetAttribute('Amount'),
+		addedToBackpackTime = tool:GetAttribute('AddedToBackpackTime'),
+		itemSkin = tool:GetAttribute('ItemSkin')
+	}
+end
+
+--[[ InventoryUtil.getInventory as the game has it (inventory-util), for a Player or a character:
+the InventoryFolder's accessories, the backpack and the hand. armor starts as three 'empty' entries
+and the worn pieces are appended after them, so a helmet is armor[4]. That is the game's own shape,
+and NameTags reads it that way. ]]
+function knitless.storeGetInventory(player)
+	local inventory = {items = {}, armor = {'empty', 'empty', 'empty'}}
+	if typeof(player) ~= 'Instance' then return inventory end
+	local character = if player:IsA('Player') then player.Character else player
+	if not character then return inventory end
+	local function linked(name)
+		local link = character:FindFirstChild(name)
+		return link and link:IsA('ObjectValue') and link.Value or nil
+	end
+	local folder = linked('InventoryFolder')
+	if folder then
+		for _, tool in folder:GetChildren() do
+			table.insert(inventory.items, knitless.storeItem(tool))
+		end
+	end
+	for slot = 0, 2 do
+		local worn = linked('ArmorInvItem_'..slot)
+		if worn then
+			table.insert(inventory.armor, knitless.storeItem(worn))
+		end
+	end
+	local backpack = linked('BedWarsBackpackSlot')
+	if backpack then
+		inventory.backpack = knitless.storeItem(backpack)
+	end
+	local hand = linked('HandInvItem')
+	if hand then
+		inventory.hand = knitless.storeItem(hand)
+	end
+	return inventory
+end
+
+--[[ The InventoryUtil export: getInventory and the three lookups the game builds on it. ]]
+function knitless.storeInventoryUtil()
+	local InventoryUtil = {}
+	function InventoryUtil.getInventory(player)
+		return knitless.storeGetInventory(player)
+	end
+	function InventoryUtil.getToolFromInventory(player, itemType)
+		for _, item in knitless.storeGetInventory(player).items do
+			if item.itemType == itemType then
+				return item
+			end
+		end
+		return nil
+	end
+	function InventoryUtil.getAmount(player, itemType)
+		local total, counted = 0, {}
+		for _, item in knitless.storeGetInventory(player).items do
+			if not counted[item.tool] then
+				counted[item.tool] = true
+				if item.itemType == itemType then
+					total += item.amount or 0
+				end
+			end
+		end
+		return total
+	end
+	function InventoryUtil.hasEnough(player, itemType, amount)
+		if type(amount) ~= 'number' or amount < 0 or amount ~= amount then
+			return false
+		end
+		return amount <= InventoryUtil.getAmount(player, itemType)
+	end
+	return InventoryUtil
+end
+
+--[[ Seconds on a TimerUtil clock ('mm:ss', the minutes not capped at two digits), or nil. ]]
+function knitless.storeTimerSeconds(text)
+	if type(text) ~= 'string' then return nil end
+	local minutes, seconds = text:match('^(%d+):(%d%d)$')
+	if not minutes then return nil end
+	return tonumber(minutes) * 60 + tonumber(seconds)
+end
+
+--[[ The match state a late injection missed, read off the top bar's match timer (hud-match-timer).
+It shows 00:00 until the match runs, then counts up once a second from the start time. Returns 1
+and the elapsed seconds when a clock there advanced within 1.5 s, 0 when the clocks sat at 00:00,
+and nil when there is no clock to read. Yields. ]]
+function knitless.storeReadHudTimer(player)
+	local gui = player:FindFirstChildOfClass('PlayerGui')
+	local topBar = gui and gui:FindFirstChild('TopBarAppGui')
+	if not topBar then return nil end
+	local first = {}
+	local found = false
+	for _, label in topBar:GetDescendants() do
+		if label:IsA('TextLabel') then
+			local seconds = knitless.storeTimerSeconds(label.Text)
+			if seconds then
+				first[label] = seconds
+				found = true
+			end
+		end
+	end
+	if not found then return nil end
+	task.wait(1.5)
+	local stopped = false
+	for label, seconds in first do
+		local now = knitless.storeTimerSeconds(label.Text)
+		if now and now > seconds then
+			return 1, now
+		end
+		if now == 0 and seconds == 0 then
+			stopped = true
+		end
+	end
+	if stopped then return 0 end
+	return nil
+end
+
+--[[ The game's own hotbar selection, without Knit. The number keys are ContextActionService actions,
+priority-keyboard-HotbarSlot1..9, which HotbarController binds through game-core's priority handler.
+Each one dispatches InventorySelectHotbarSlot to the game's own ClientStore, and HotbarController
+follows that store: select_hotbar when the slot changed, equipItem (HandInvItem and SetInvItem) when
+the held tool changed, and the highlight and the first-person item redraw. CallFunction runs that
+same bound function, as the key does, with no input sent: nothing reaches pistonware's own
+number-key binds or a focused text box, the window need not be in front, and a rebound key changes
+nothing, since the action names stay.
+
+  * CallFunction is a RobloxScript member. It is tried once, on the game's own slot-1 action with
+    the Cancel state, which selects nothing (knitless.hotbarProbe), from a thread raised to
+    identity 8 where the executor can raise it and the thread is below it (knitless.hotbarCall).
+    Any error, whatever its words (Solara blocks the call, Xeno lacks the capability), and the
+    number keys are tried instead (below); without them the route is off: the stand-in store
+    selects the way it always did.
+  * The number keys (route.method 'key'), where CallFunction is refused and VirtualInputManager
+    answers a call that sends nothing (knitless.hotbarKeyProbe): SendKeyEvent presses the key the
+    slot's action is bound to and lets it go a frame later, a player's tap (knitless.hotbarKeyPress).
+    It is real input, so no key goes while a text box has focus, Roblox's menu is open, a jade slam
+    holds the hammer or the player holds that key (knitless.hotbarKeySafe); the store then sets the
+    hand alone. The key is marked in shared.PistonwareSyntheticKeys until just after its release,
+    and the menu's binds, the AFK watch and FastDrop pass a marked key by. A key lands a frame
+    after it is sent, where CallFunction selects at once, so its check below waits two frames more.
+  * The real selection is read off the hotbar tiles (knitless.hotbarRealSlot): in
+    PlayerGui.hotbar.1.ItemsHotbar, the tile whose LayoutOrder is the slot and whose button has the
+    white border hotbar-tile draws on the selected one.
+  * No press while the inventory or a chest is open: there the same action moves the hovered item
+    into the slot instead.
+  * The InputObject handed over is the last mouse, touch or keyboard one seen, else a gamepad one.
+    game-core's wrapper reads only its KeyCode, and passes a gamepad one by while the ability key
+    is held.
+  * A press whose highlight has not moved after route.verify seconds and at least three frames is
+    told to the server the old way after all. Two such misses in a row, with the tiles there to
+    read, end the route for the session; a press that errors ends it at once and goes the old way
+    itself. The frames count too, so a lagging client whose frame outlasts the check does not count
+    a press the game took as a miss.
+  * Until that check ends, the store reports the pressed slot (route.want), so a press made before
+    the game has drawn the one before it counts from that one. route.hold is only a backstop. ]]
+function knitless.hotbarRoute(ctx)
+	local route = knitless.hotbarRouteState
+	if route then return route end
+	route = {status = nil, nextProbe = 0, pollAt = 0, seq = 0, misses = 0, want = nil, wantUntil = 0,
+		input = nil, verify = 0.35, hold = 3, method = nil, keyHeld = {}}
+	knitless.hotbarRouteState = route
+	local kinds = {
+		[Enum.UserInputType.MouseMovement] = true, [Enum.UserInputType.MouseButton1] = true,
+		[Enum.UserInputType.MouseButton2] = true, [Enum.UserInputType.MouseButton3] = true,
+		[Enum.UserInputType.MouseWheel] = true, [Enum.UserInputType.Keyboard] = true,
+		[Enum.UserInputType.Touch] = true
+	}
+	local function keep(input)
+		if kinds[input.UserInputType] then
+			route.input = input
+		end
+	end
+	local inputService = ctx.services.UserInputService
+	ctx.clean(inputService.InputBegan:Connect(keep))
+	ctx.clean(inputService.InputChanged:Connect(keep))
+	ctx.clean(function()
+		route.status = 'off'
+		route.input = nil
+		route.want = nil
+		route.seq += 1
+	end)
+	return route
+end
+
+-- The ItemsHotbar frame of the game's hotbar, or nil.
+function knitless.hotbarTiles(ctx)
+	local gui = ctx.lplr:FindFirstChildOfClass('PlayerGui')
+	local hotbar = gui and gui:FindFirstChild('hotbar')
+	hotbar = hotbar and hotbar:FindFirstChild('1')
+	return hotbar and hotbar:FindFirstChild('ItemsHotbar')
+end
+
+--[[ The slot (0 to 8) the game has selected, from the tile it draws as selected, or nil with no
+hotbar to read. ]]
+function knitless.hotbarRealSlot(ctx)
+	local items = knitless.hotbarTiles(ctx)
+	if not items then return nil end
+	local white = Color3.new(1, 1, 1)
+	for _, tile in items:GetChildren() do
+		if tile:IsA('GuiObject') and tile.LayoutOrder >= 0 and tile.LayoutOrder <= 8 then
+			local button = tile:FindFirstChildOfClass('ImageButton')
+			if button and button.BorderColor3 == white then
+				return tile.LayoutOrder
+			end
+		end
+	end
+	return nil
+end
+
+--[[ What the game has selected, from the store: the item in the slot the tiles show
+(knitless.hotbarRealSlot), false for an empty slot, nil with no tiles to read. With Knit the store's
+hand is this item; here the hand is HandInvItem, which every module's swap moves. ]]
+function knitless.hotbarSelectedItem(ctx)
+	local slot = knitless.hotbarRealSlot(ctx)
+	local state = slot and ctx.store and ctx.store:getState()
+	local observed = state and state.Inventory and state.Inventory.observedInventory
+	local entry = observed and observed.hotbar and observed.hotbar[slot + 1]
+	if type(entry) ~= 'table' then return nil end
+	return entry.item or false
+end
+
+-- The inventory or a chest open, which HotbarController asks AppController about before it selects.
+function knitless.hotbarAppOpen(ctx)
+	local gui = ctx.lplr:FindFirstChildOfClass('PlayerGui')
+	for _, id in {'InventoryApp', 'ChestApp'} do
+		local app = gui and gui:FindFirstChild(id)
+		if app and (not app:IsA('LayerCollector') or app.Enabled) then
+			return true
+		end
+	end
+	return false
+end
+
+-- The bound action for a slot (priority-keyboard-HotbarSlot<slot + 1>), found by its name's end.
+function knitless.hotbarAction(slot)
+	local suffix = 'HotbarSlot'..(slot + 1)
+	local ok, bound = pcall(function()
+		return contextActionService:GetAllBoundActionInfo()
+	end)
+	if not (ok and type(bound) == 'table') then return nil end
+	local found
+	for name in bound do
+		if type(name) == 'string' and string.sub(name, -#suffix) == suffix then
+			if string.find(name, 'keyboard', 1, true) then return name end
+			found = found or name
+		end
+	end
+	return found
+end
+
+--[[ CallFunction on an action, in a thread of its own: raised to identity 8 first where the executor
+can raise it and the thread is below it, so the caller's thread keeps its identity. Returns whether
+the call has come back (the game's bound function does not yield) and what pcall gave. ]]
+function knitless.hotbarCall(name, inputState, input)
+	local done, ok, err = false, false, nil
+	task.spawn(function()
+		if exec.Identity and type(getthreadidentity) == 'function' and type(setthreadidentity) == 'function' then
+			local got, level = pcall(getthreadidentity)
+			if got and type(level) == 'number' and level < 8 then
+				pcall(setthreadidentity, 8)
+			end
+		end
+		ok, err = pcall(function()
+			contextActionService:CallFunction(name, inputState, input)
+		end)
+		done = true
+	end)
+	return done, ok, err
+end
+
+-- The calling thread raised to identity 8, where the executor can raise it and the thread is below it.
+function knitless.hotbarRaise()
+	if exec.Identity and type(getthreadidentity) == 'function' and type(setthreadidentity) == 'function' then
+		local got, level = pcall(getthreadidentity)
+		if got and type(level) == 'number' and level < 8 then
+			pcall(setthreadidentity, 8)
+		end
+	end
+end
+
+--[[ The key a slot's action is bound to: the first keyboard KeyCode of its binding
+(GetBoundActionInfo), so a key changed in the game's settings is followed; One to Nine by slot when
+the binding cannot be read or names no keyboard key. ]]
+function knitless.hotbarKey(slot)
+	local name = knitless.hotbarAction(slot) or 'priority-keyboard-HotbarSlot'..(slot + 1)
+	local ok, info = pcall(function()
+		return contextActionService:GetBoundActionInfo(name)
+	end)
+	local inputs = ok and type(info) == 'table' and info.inputTypes
+	for _, input in type(inputs) == 'table' and inputs or {} do
+		if typeof(input) == 'EnumItem' and input.EnumType == Enum.KeyCode and input ~= Enum.KeyCode.Unknown then
+			local keyName = input.Name
+			if not (string.sub(keyName, 1, 6) == 'Button' or string.sub(keyName, 1, 4) == 'DPad'
+				or string.sub(keyName, 1, 10) == 'Thumbstick') then
+				return input
+			end
+		end
+	end
+	local digit = ({'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'})[slot + 1]
+	return digit and Enum.KeyCode[digit] or nil
+end
+
+--[[ Whether a number-key press can go now. It is real input: not while a text box has focus (the key
+would be typed there), while Roblox's menu or emotes menu is open, while a jade slam holds the
+hammer (genv.JadeSlamHold: the game would equip the slot itself, past the hold that keeps the hammer
+in hand where there is no namecall hook), or while the player holds that key. A key still marked as
+our own press (shared.PistonwareSyntheticKeys) is not the player's. The menu checks are optional
+reads: one that errors counts as shut. ]]
+function knitless.hotbarKeySafe(ctx, key)
+	local inputService = ctx.services.UserInputService
+	local function yes(read)
+		local ok, value = pcall(read)
+		return ok and value == true
+	end
+	if yes(function() return inputService:GetFocusedTextBox() ~= nil end) then return false end
+	if yes(function() return guiService.MenuIsOpen end) then return false end
+	if yes(function() return guiService:GetEmotesMenuOpen() end) then return false end
+	local hold = genv.JadeSlamHold
+	if type(hold) == 'table' and os.clock() < (tonumber(hold.expires) or 0) then return false end
+	local marks = shared.PistonwareSyntheticKeys
+	if type(marks) == 'table' and (tonumber(marks[key]) or 0) > os.clock() then return true end
+	return not yes(function() return inputService:IsKeyDown(key) end)
+end
+
+--[[ A number-key tap through VirtualInputManager, in a thread raised as knitless.hotbarCall raises
+one: the key down now, up a frame later. The key is marked in shared.PistonwareSyntheticKeys from
+before the down until half a second after the up, the margin for the release to be delivered, so
+pistonware's own binds pass both by. A key our last press still holds is let go first, so the game
+sees each selection in order. Returns as knitless.hotbarCall does, for the key down. ]]
+function knitless.hotbarKeyPress(route, key)
+	local marks = shared.PistonwareSyntheticKeys
+	if type(marks) ~= 'table' then
+		marks = {}
+		shared.PistonwareSyntheticKeys = marks
+	end
+	local token, previous = {}, marks[key]
+	local done, ok, err = false, false, nil
+	marks[key] = os.clock() + 1
+	task.spawn(function()
+		knitless.hotbarRaise()
+		ok, err = pcall(function()
+			if route.keyHeld[key] then
+				virtualInputManager:SendKeyEvent(false, key, false, game)
+			end
+			route.keyHeld[key] = token
+			virtualInputManager:SendKeyEvent(true, key, false, game)
+		end)
+		done = true
+		if not ok then
+			route.keyHeld[key] = nil
+			marks[key] = previous
+			return
+		end
+		task.wait()
+		-- A later press of this key has taken it over and lets it go itself.
+		if route.keyHeld[key] ~= token then return end
+		route.keyHeld[key] = nil
+		pcall(function()
+			virtualInputManager:SendKeyEvent(false, key, false, game)
+		end)
+		marks[key] = os.clock() + 0.5
+	end)
+	return done, ok, err
+end
+
+-- The InputObject to hand over: the last one kept, else the first gamepad one (there with no pad too).
+function knitless.hotbarInput(ctx, route)
+	if route.input then return route.input end
+	local ok, gamepad = pcall(function()
+		return ctx.services.UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
+	end)
+	return ok and type(gamepad) == 'table' and gamepad[1] or nil
+end
+
+--[[ Once a session: CallFunction on the game's own slot-1 action with the Cancel state, the same call
+a press makes, which the bound function returns from at once (it selects on Begin only). Back with
+no error, the route is on, each press then checked by its highlight. Any error, whatever it says,
+and the number keys are tried instead (knitless.hotbarKeyProbe); without them the route is off.
+Tried again a second later while that action is not bound yet or there is no InputObject to hand
+over. ]]
+function knitless.hotbarProbe(ctx, route)
+	local input = knitless.hotbarInput(ctx, route)
+	local name = input and knitless.hotbarAction(0)
+	if not name then
+		route.nextProbe = os.clock() + 1
+		return
+	end
+	route.status = 'probing'
+	local done, ok, err = knitless.hotbarCall(name, Enum.UserInputState.Cancel, input)
+	if not done then
+		route.status = nil
+		route.nextProbe = os.clock() + 5
+		return
+	end
+	if ok then
+		route.status = 'on'
+		route.method = 'call'
+		ctx.log('hotbar: selecting through the game hotbar (ContextActionService:CallFunction)')
+	elseif not knitless.hotbarKeyProbe(ctx, route, err) then
+		route.status = 'off'
+		ctx.log('hotbar: CallFunction is refused here ('..tostring(err)..'); hotbar selections stay as before')
+	end
+end
+
+--[[ Where CallFunction is refused: whether VirtualInputManager answers a call that sends no input
+(WaitForInputEventsProcessed), from a thread raised as knitless.hotbarCall raises one. Back with no
+error, the route is on and presses the number keys (route.method 'key'); an error, or no answer
+within 3 s, and it is off. While it is out the route is 'probing', which selects the old way. false,
+and nothing done, with no VirtualInputManager at all. ]]
+function knitless.hotbarKeyProbe(ctx, route, refusal)
+	if not virtualInputManager then return false end
+	route.status = 'probing'
+	local settled = false
+	local function settle(ok, err)
+		if settled then return end
+		settled = true
+		-- The session can have ended while the call was out: the route is off then, and stays off.
+		if route.status ~= 'probing' then return end
+		if ok then
+			route.status, route.method = 'on', 'key'
+			ctx.log('hotbar: CallFunction is refused here ('..tostring(refusal)..'); selecting through the game hotbar by its number keys (VirtualInputManager)')
+		else
+			route.status = 'off'
+			ctx.log('hotbar: CallFunction is refused here ('..tostring(refusal)..'), and VirtualInputManager too ('..tostring(err)..'); hotbar selections stay as before')
+		end
+	end
+	task.spawn(function()
+		knitless.hotbarRaise()
+		local ok, err = pcall(function()
+			virtualInputManager:WaitForInputEventsProcessed()
+		end)
+		settle(ok, err)
+	end)
+	if not settled then
+		task.delay(3, settle, false, 'no answer within 3 s')
+	end
+	return true
+end
+
+--[[ What the stand-in store reports as hotbarSlot while the route is on: the slot just pressed, until
+the tiles show it or its check ends (route.hold is a backstop), else the slot the tiles show. nil
+while the route is off or not yet decided, or with no tiles to read: the store then goes by
+HandInvItem, as before. ]]
+function knitless.hotbarFollow(ctx)
+	local route = knitless.hotbarRoute(ctx)
+	if route.status == nil and os.clock() >= route.nextProbe then
+		knitless.hotbarProbe(ctx, route)
+	end
+	if route.status ~= 'on' then return nil end
+	local real = knitless.hotbarRealSlot(ctx)
+	if route.want ~= nil then
+		if real ~= route.want and os.clock() < route.wantUntil then
+			return route.want
+		end
+		route.want = nil
+	end
+	return real
+end
+
+--[[ From the store's Heartbeat, ten times a second: whether the game's selection has moved on its own
+(a number key, a tile, a respawn) away from what the store holds, so the store reads it again. Also
+where an undecided route is probed again. Reads only. ]]
+function knitless.hotbarMoved(ctx, current)
+	local route = knitless.hotbarRouteState
+	if not route or route.status == 'off' or route.status == 'probing' then return false end
+	local now = os.clock()
+	if now < route.pollAt then return false end
+	route.pollAt = now + 0.1
+	local slot = knitless.hotbarFollow(ctx)
+	return slot ~= nil and slot ~= current
+end
+
+--[[ InventorySelectHotbarSlot through the game's own hotbar.
+  nil          the route is off or undecided, there are no tiles to read, or the press errored (the
+               route is then off): the store selects the way it always did.
+  'pressed'    the game was asked to select the slot. Its HotbarController sends SetInvItem and
+               select_hotbar, so the store sends neither; missed() runs if the highlight has not
+               moved within route.verify seconds and three frames (five for a key).
+  'following'  the route is on, but this needs no press (the slot is already the selected one) or
+               cannot have one (the inventory or a chest is open, no such action, no InputObject,
+               a key press not safe just then: knitless.hotbarKeySafe).
+               The store sets the hand alone and sends no select_hotbar: the game's selection, which
+               the store follows, did not move.
+A press made before the game has drawn the one before it counts from that one (route.want): the
+game's store has it already, and redraws only once, for the last. ]]
+function knitless.hotbarPress(ctx, slot, chestOpen, missed)
+	local route = knitless.hotbarRouteState
+	if not (route and route.status == 'on') then return nil end
+	local shown = knitless.hotbarRealSlot(ctx)
+	if shown == nil then return nil end
+	local before = shown
+	if route.want ~= nil and os.clock() < route.wantUntil then
+		before = route.want
+	end
+	if before == slot or chestOpen or knitless.hotbarAppOpen(ctx) then return 'following' end
+	local name, via, done, ok, err
+	if route.method == 'key' then
+		local key = knitless.hotbarKey(slot)
+		if not (key and knitless.hotbarKeySafe(ctx, key)) then return 'following' end
+		name, via = 'key '..key.Name, 'VirtualInputManager'
+		done, ok, err = knitless.hotbarKeyPress(route, key)
+	else
+		name, via = knitless.hotbarAction(slot), 'CallFunction'
+		local input = name and knitless.hotbarInput(ctx, route)
+		if not input then return 'following' end
+		done, ok, err = knitless.hotbarCall(name, Enum.UserInputState.Begin, input)
+	end
+	if done and not ok then
+		-- Whatever the error says, it moved nothing: the route is off for the session, and this
+		-- selection goes the old way (SetInvItem and select_hotbar from the store).
+		route.status = 'off'
+		ctx.log('hotbar: '..via..' is refused here ('..tostring(err)..'); hotbar selections stay as before')
+		return nil
+	end
+	route.seq += 1
+	local seq = route.seq
+	if slot == shown then
+		-- Back to the slot the game still shows, before it drew the press before this one: its store
+		-- ends where it began and equips nothing, so the hand goes to the server from the store.
+		route.want = nil
+		return 'following'
+	end
+	route.want, route.wantUntil = slot, os.clock() + route.hold
+	if shared.PistonwareDeveloper then
+		ctx.log('hotbar: '..name..' (slot '..before..' to '..slot..')')
+	end
+	-- A key lands a frame after it is sent, where CallFunction selects at once: two frames more.
+	local minFrames = route.method == 'key' and 5 or 3
+	task.spawn(function()
+		-- Seconds and frames both: on a lagging client one frame can outlast route.verify.
+		local deadline, frames = os.clock() + route.verify, 0
+		repeat
+			task.wait()
+			frames += 1
+			if route.seq ~= seq or route.status ~= 'on' then return end
+			local now = knitless.hotbarRealSlot(ctx)
+			if now ~= nil and now ~= shown then
+				-- Taken. From here the store follows the tiles (a key of the player's own included).
+				route.misses = 0
+				route.want = nil
+				return
+			end
+		until os.clock() >= deadline and frames >= minFrames
+		route.want = nil
+		if knitless.hotbarRealSlot(ctx) ~= nil then
+			route.misses += 1
+			ctx.log('hotbar: '..name..' did not move the selection; told to the server as before')
+			if route.misses >= 2 then
+				route.status = 'off'
+				ctx.log('hotbar: two presses in a row did not take; hotbar selections stay as before')
+			end
+		end
+		missed()
+	end)
+	return 'pressed'
+end
+
+--[[ Builds the store and InventoryUtil, sets ctx.store and the two module exports.
+
+Slices and where they come from:
+  Inventory  InventoryFolder.Value's accessories (in arrival order), ArmorInvItem_0..2, HandInvItem,
+             BedWarsBackpackSlot; the hotbar from the server's slot snapshot (Inventory/GetSlotState,
+             then Inventory/SlotStateChanged, under the dragging controller's revision rule).
+             hotbarSlot is the slot the game's own hotbar has selected while that can be read and
+             asked (knitless.hotbarFollow), else the hotbar slot holding HandInvItem.Value, else the
+             last one selected.
+  Game       MatchStateEvent (state, customMatch, startTime), MatchEndEvent, QueueTypeEvent and the
+             QueueType attribute, TeamsUpdateEvent and the Team attribute.
+  Bedwars    the PlayingAsKits and PlayerLevel attributes, TeamUpgradePurchased,
+             BulkUpdateTeamUpgrades, SendTablistSnapshot, BulkSendPurchasedItems.
+  Kit        the BloodAssassin contract pushes and the bounty hunter target.
+  Party      the lobby reducer's default (you, solo), then lobby-events partyInfoEvent.
+  Settings   GetSettings, as SettingsController asks for it; fov 80 until it answers. ]]
+function knitless.buildStore(ctx)
+	ctx.modules['ReplicatedStorage.TS.inventory.inventory-util'] = {InventoryUtil = knitless.storeInventoryUtil()}
+
+	local workspace, runService = ctx.services.Workspace, ctx.services.RunService
+	local lplr, net, Promise = ctx.lplr, ctx.net, ctx.Promise
+	local alive = true
+	local listeners = {}
+	local inner = {}
+	ctx.storeInner = inner
+
+	local state, notified
+	local pending, inventoryDirty = false, false
+
+	local function setSlice(name, value)
+		if state[name] == value then return end
+		local nextState = table.clone(state)
+		nextState[name] = value
+		state = nextState
+		pending = true
+	end
+
+	-- A slice is copied only when the value really changes, as a Rodux reducer does.
+	local function patch(name, key, value)
+		local slice = state[name]
+		if slice[key] == value then return end
+		local nextSlice = table.clone(slice)
+		nextSlice[key] = value
+		setSlice(name, nextSlice)
+	end
+
+	local function markInventory()
+		inventoryDirty = true
+	end
+
+	--[[ Inventory. Each accessory keeps one item table until one of its fields changes, so items,
+	hand, armor and hotbar hold the same references for as long as nothing about them moves. ]]
+	local character
+	local itemCache = setmetatable({}, {__mode = 'k'})
+	local arrival = {}
+	local slotSnapshot
+	local selectedSlot = 0
+
+	local function linkValue(name)
+		local link = character and character:FindFirstChild(name)
+		return link and link:IsA('ObjectValue') and link.Value or nil
+	end
+
+	local function itemFor(tool)
+		if typeof(tool) ~= 'Instance' then return nil end
+		local cached = itemCache[tool]
+		local added = tool:GetAttribute('AddedToBackpackTime')
+		if added == nil then
+			-- The reducer stamps the time it first saw the item.
+			added = cached and cached.addedToBackpackTime or workspace:GetServerTimeNow()
+		end
+		if cached and cached.itemType == tool.Name and cached.amount == tool:GetAttribute('Amount')
+			and cached.itemSkin == tool:GetAttribute('ItemSkin') and cached.addedToBackpackTime == added then
+			return cached
+		end
+		local item = knitless.storeItem(tool)
+		item.addedToBackpackTime = added
+		itemCache[tool] = item
+		return item
+	end
+
+	local function sameList(a, b)
+		if #a ~= #b then return false end
+		for index, value in a do
+			if b[index] ~= value then return false end
+		end
+		return true
+	end
+
+	local function findSlot(snapshot, ref)
+		if type(snapshot) ~= 'table' or type(ref) ~= 'table' then return nil end
+		local slots = if ref.container == 'chest' then snapshot.chest and snapshot.chest.slots else snapshot.player and snapshot.player.slots
+		if type(slots) ~= 'table' then return nil end
+		for _, slot in slots do
+			if slot.container == ref.container and slot.index == ref.index then
+				return slot
+			end
+		end
+		return nil
+	end
+
+	--[[ inventory-slot-to-item: the item a snapshot slot holds, matched by tool, then by type. The
+	amount is the accessory's live Amount rather than the snapshot's copy of it. ]]
+	local function slotItem(slot, items)
+		if type(slot) ~= 'table' then return nil end
+		local match
+		for _, item in items do
+			if item.tool == slot.tool then
+				match = item
+				break
+			end
+		end
+		if not match then
+			for _, item in items do
+				if item.itemType == slot.itemType then
+					match = item
+					break
+				end
+			end
+		end
+		local tool = slot.tool or (match and match.tool)
+		if match and match.tool == tool then return match end
+		return itemFor(tool)
+	end
+
+	local function buildHotbar(items, previous)
+		local hotbar = table.create(9)
+		local same = true
+		for index = 1, 9 do
+			local item
+			if slotSnapshot then
+				item = slotItem(findSlot(slotSnapshot, {container = 'hotbar', index = index - 1}), items)
+			else
+				--[[ Until the server's first snapshot: the first nine items, the way
+				InventoryController fills the hotbar at start. ]]
+				item = items[index]
+			end
+			local entry = previous[index]
+			if not entry or entry.item ~= item then
+				entry = if item then {item = item} else {}
+				same = false
+			end
+			hotbar[index] = entry
+		end
+		return if same then previous else hotbar
+	end
+
+	local function rebuildInventory(force)
+		inventoryDirty = false
+		local slice = state.Inventory
+		local observed = slice.observedInventory
+		local old = observed.inventory
+
+		local folder = linkValue('InventoryFolder')
+		local children = if folder then folder:GetChildren() else {}
+		local present, kept, order = {}, {}, {}
+		for _, tool in children do
+			present[tool] = true
+		end
+		for _, tool in arrival do
+			if present[tool] then
+				table.insert(order, tool)
+				kept[tool] = true
+			end
+		end
+		for _, tool in children do
+			if not kept[tool] then
+				table.insert(order, tool)
+			end
+		end
+		arrival = order
+
+		local items = table.create(#order)
+		for index, tool in order do
+			items[index] = itemFor(tool)
+		end
+		if sameList(items, old.items) then items = old.items end
+
+		local armor = table.create(3)
+		for slot = 0, 2 do
+			armor[slot + 1] = itemFor(linkValue('ArmorInvItem_'..slot)) or 'empty'
+		end
+		if sameList(armor, old.armor) then armor = old.armor end
+
+		local handTool = linkValue('HandInvItem')
+		local hand = if handTool and handTool.Parent then itemFor(handTool) else nil
+		local backpack = itemFor(linkValue('BedWarsBackpackSlot'))
+
+		local hotbar = buildHotbar(items, observed.hotbar)
+		--[[ While the game's own hotbar is in use (knitless.hotbarFollow), hotbarSlot is the slot the
+		game has selected, as in the game's store, whatever is in hand. Otherwise it is the slot
+		holding HandInvItem.Value. ]]
+		local followed = knitless.hotbarFollow(ctx)
+		if followed then
+			selectedSlot = followed
+		elseif handTool then
+			for index, entry in hotbar do
+				if entry.item and entry.item.tool == handTool then
+					selectedSlot = index - 1
+					break
+				end
+			end
+		end
+
+		local inventory = old
+		if force or items ~= old.items or armor ~= old.armor or hand ~= old.hand or backpack ~= old.backpack then
+			inventory = {items = items, armor = armor, hand = hand, backpack = backpack}
+		end
+		local nextObserved = observed
+		if force or inventory ~= old or hotbar ~= observed.hotbar or selectedSlot ~= observed.hotbarSlot then
+			nextObserved = {
+				hotbarSlot = selectedSlot,
+				hotbar = hotbar,
+				inventory = inventory,
+				observedChest = observed.observedChest
+			}
+		end
+		if force or nextObserved ~= observed or slotSnapshot ~= slice.slotSnapshot then
+			local nextSlice = table.clone(slice)
+			nextSlice.observedInventory = nextObserved
+			nextSlice.slotSnapshot = slotSnapshot
+			setSlice('Inventory', nextSlice)
+		end
+	end
+
+	--[[ InventoryDraggingController.applySnapshot: an older player revision keeps the player part
+	already held, a chest that is not the one open is dropped, and a snapshot equal to the held one
+	changes nothing. ]]
+	local function acceptSnapshot(snapshot)
+		if type(snapshot) ~= 'table' or type(snapshot.player) ~= 'table' then return false end
+		local current = slotSnapshot
+		if current and (tonumber(snapshot.player.revision) or 0) < (tonumber(current.player.revision) or 0) then
+			snapshot = table.clone(snapshot)
+			snapshot.player = current.player
+		end
+		local chestFolder = linkValue('ObservedChestFolder')
+		if (snapshot.chest and snapshot.chest.chestFolder) ~= chestFolder then
+			snapshot = table.clone(snapshot)
+			local held = current and current.chest
+			snapshot.chest = if held and held.chestFolder == chestFolder then held else nil
+		end
+		local held = current and current.chest
+		if held and snapshot.chest and snapshot.chest.chestFolder == held.chestFolder
+			and (tonumber(snapshot.chest.revision) or 0) < (tonumber(held.revision) or 0) then
+			snapshot = table.clone(snapshot)
+			snapshot.chest = held
+		end
+		if current and current.player.revision == snapshot.player.revision then
+			local a, b = current.chest, snapshot.chest
+			if (a and a.chestFolder) == (b and b.chestFolder) and (a and a.revision) == (b and b.revision)
+				and (a and a.slotCount) == (b and b.slotCount) then
+				return false
+			end
+		end
+		slotSnapshot = snapshot
+		inventoryDirty = true
+		return true
+	end
+
+	local function refreshSlots()
+		local chest = linkValue('ObservedChestFolder')
+		local ok, snapshot = pcall(function()
+			return net:GetNamespace('Inventory'):Get('GetSlotState'):CallServer(chest)
+		end)
+		if not ok then
+			ctx.log('store: Inventory/GetSlotState failed: '..tostring(snapshot))
+			return false
+		end
+		if chest and linkValue('ObservedChestFolder') ~= chest then return false end
+		return acceptSnapshot(snapshot)
+	end
+
+	--[[ InventoryDraggingController.sendTransaction: the request goes up with the open chest and
+	the revisions of the latest snapshot, and the snapshot that comes back is applied. A busy server
+	is retried only for return_cursor, with the game's backoff. A move turned down because the
+	inventory changed meanwhile is sent once more when the slots it names still hold the same thing
+	(a close cut of canRetryTransaction, which also weighs the cursor). ]]
+	local RETRY_OPERATIONS = {pickup = true, place = true, quick_move = true, swap_hotbar = true, collect = true, drop = true}
+
+	local function sameSlot(a, b)
+		if a == b then return true end
+		return a ~= nil and b ~= nil and a.itemType == b.itemType and a.amount == b.amount and a.tool == b.tool
+	end
+
+	local function sendTransaction(request, mayRetry)
+		if not alive then return false end
+		if not slotSnapshot then refreshSlots() end
+		local before = slotSnapshot
+		if not before then return false end
+		local chest = linkValue('ObservedChestFolder')
+		local remote = net:GetNamespace('Inventory'):Get('TransactSlots')
+		local result
+		for attempt = 0, 3 do
+			local latest = slotSnapshot or before
+			local payload = table.clone(request)
+			payload.chestFolder = if request.operation ~= 'return_cursor' then chest else nil
+			payload.expectedPlayerRevision = latest.player.revision
+			payload.expectedChestRevision = latest.chest and latest.chest.revision
+			result = remote:CallServer(payload)
+			if type(result) ~= 'table' then return false end
+			if type(result.state) == 'table' then acceptSnapshot(result.state) end
+			if request.operation ~= 'return_cursor' or result.ok then break end
+			if result.error ~= 'inventory_busy' and result.error ~= 'chest_busy' then break end
+			if attempt < 3 then task.wait(2 ^ attempt * 0.1) end
+		end
+		if not result.ok and mayRetry ~= false and RETRY_OPERATIONS[request.operation]
+			and (result.error == 'player_inventory_changed' or result.error == 'chest_changed')
+			and sameSlot(findSlot(before, request.slot), findSlot(slotSnapshot, request.slot))
+			and sameSlot(findSlot(before, request.target), findSlot(slotSnapshot, request.target)) then
+			return sendTransaction(request, false)
+		end
+		return result.ok == true
+	end
+
+	--[[ One at a time, in order, as the game's transaction queue runs them. Rejections are taken
+	with andThen's second handler: exec.Promise's catch also runs on a resolved promise. ]]
+	local queue = Promise.resolve()
+	local function transact(request)
+		local promise = queue:andThen(function()
+			return sendTransaction(request)
+		end):andThen(function(took)
+			return took
+		end, function(err)
+			ctx.log('store: inventory transaction failed: '..tostring(err))
+			return false
+		end)
+		queue = promise:andThen(function() end)
+		return promise
+	end
+
+	--[[ InventorySelectHotbarSlot. The reducer sets hotbarSlot and hand = that slot's item, always
+	in new tables. Then the game's hotbar controller does the server side: equipItem (HandInvItem set
+	locally, SetInvItem {hand}) when the hand's tool changed, and a select_hotbar transaction when
+	the slot changed and a snapshot is held. The state is current on return; changed fires on the
+	next Heartbeat.
+
+	Where the game's own hotbar can be asked (knitless.hotbarPress), it is: the game then moves its
+	highlight and first-person item and sends SetInvItem and select_hotbar itself, so neither goes
+	from here, unless the press does not take. HandInvItem is still set at once, so a caller sees
+	the tool in hand on return, as before. With the route on and no press (already selected, the
+	inventory or a chest open, a key press not safe just then), only the hand changes. Where
+	CallFunction is refused (Solara, Xeno), the game is asked through its number keys if
+	VirtualInputManager answers; with neither, the game's own hotbar highlight and viewmodel are not
+	told, as before. ]]
+	local function selectHotbarSlot(slot)
+		local observed = state.Inventory.observedInventory
+		local entry = type(slot) == 'number' and observed.hotbar[slot + 1]
+		if not entry then
+			ctx.log('store: InventorySelectHotbarSlot for a slot that does not exist: '..tostring(slot))
+			return
+		end
+		local tool = entry.item and entry.item.tool
+		local previousSlot = observed.hotbarSlot
+		local link = character and character:FindFirstChild('HandInvItem')
+		if not (link and link:IsA('ObjectValue')) then link = nil end
+		local previousTool = link and link.Value
+		selectedSlot = slot
+		local route = knitless.hotbarPress(ctx, slot, linkValue('ObservedChestFolder') ~= nil, function()
+			-- The press did not take: the hand set below goes to the server the old way.
+			if not alive then return end
+			if link and previousTool ~= tool and link.Value == tool then
+				pcall(function()
+					net:Get('SetInvItem'):CallServerAsync({hand = tool or false})
+				end)
+			end
+			markInventory()
+		end)
+		if link and previousTool ~= tool then
+			link.Value = tool
+		end
+		rebuildInventory(true)
+		if route == 'pressed' then return end
+		task.defer(function()
+			if not alive then return end
+			if link and previousTool ~= tool then
+				pcall(function()
+					net:Get('SetInvItem'):CallServerAsync({hand = tool or false})
+				end)
+			end
+			if slot ~= previousSlot and slotSnapshot and route == nil then
+				transact({operation = 'select_hotbar', target = {container = 'hotbar', index = slot}})
+			end
+		end)
+	end
+
+	--[[ InventorySetArmorItem. With the server's snapshot held, the game's hotbar controller puts
+	the snapshot's armor back on, so nothing reaches the server; without one it is equipArmorItem
+	(ArmorInvItem set locally, SetArmorInvItem). Either way a new Inventory goes out, as the reducer
+	makes, so a caller waiting on InventoryChanged is woken. ]]
+	local function setArmorItem(action)
+		local slot = action.armorSlot
+		if type(slot) ~= 'number' or slot < 0 or slot > 2 then return end
+		if not slotSnapshot then
+			local tool = type(action.item) == 'table' and action.item.tool or nil
+			local link = character and character:FindFirstChild('ArmorInvItem_'..slot)
+			if link and link:IsA('ObjectValue') and link.Value ~= tool then
+				link.Value = tool
+				task.defer(function()
+					pcall(function()
+						net:Get('SetArmorInvItem'):CallServerAsync({item = tool or false, armorSlot = slot})
+					end)
+				end)
+			end
+		end
+		rebuildInventory(true)
+	end
+
+	-- A remote by name now, or once it replicates.
+	local function listen(name, callback)
+		local function guarded(...)
+			local ok, err = pcall(callback, ...)
+			if not ok then
+				ctx.log('store: '..name..' handler failed: '..tostring(err))
+			end
+		end
+		local connected = pcall(function()
+			ctx.clean(net:Get(name):Connect(guarded))
+		end)
+		if connected then return end
+		net:WaitFor(name):andThen(function(remote)
+			if not alive then return end
+			local ok, err = pcall(function()
+				ctx.clean(remote:Connect(guarded))
+			end)
+			if not ok then
+				ctx.log('store: cannot listen to '..name..': '..tostring(err))
+			end
+		end, function(err)
+			ctx.log('store: no '..name..' remote: '..tostring(err))
+		end)
+	end
+
+	local function kitList()
+		local kits = {}
+		local value = lplr:GetAttribute('PlayingAsKits')
+		if type(value) == 'string' then
+			for _, kit in string.split(value, ',') do
+				kit = kit:match('^%s*(.-)%s*$')
+				if kit ~= '' then
+					table.insert(kits, kit)
+				end
+			end
+		end
+		return kits
+	end
+
+	-- GameSetTeams picks the team whose id is your Team attribute; missed, it is the id alone.
+	local function myTeam()
+		local id = lplr:GetAttribute('Team')
+		if id == nil then return nil end
+		local gameSlice = state and state.Game
+		if gameSlice then
+			for _, team in gameSlice.teams do
+				if type(team) == 'table' and tostring(team.id) == tostring(id) then
+					return team
+				end
+			end
+			if gameSlice.myTeam and tostring(gameSlice.myTeam.id) == tostring(id) then
+				return gameSlice.myTeam
+			end
+		end
+		return {id = id}
+	end
+
+	local function setTeamUpgrades(teamId, upgrades)
+		if teamId == nil then return end
+		local all = table.clone(state.Bedwars.teamUpgrades)
+		all[tostring(teamId)] = upgrades
+		patch('Bedwars', 'teamUpgrades', all)
+	end
+
+	-- BountyHunterController asks once its kit is active.
+	local bountyAsked = false
+	local function askBountyTarget()
+		if bountyAsked or not table.find(kitList(), 'bounty_hunter') then return end
+		bountyAsked = true
+		net:WaitFor('GetBountyHunterTarget'):andThen(function(remote)
+			return remote:CallServerAsync()
+		end):andThen(function(target)
+			if alive then
+				patch('Kit', 'bountyHunterTarget', target)
+			end
+		end, function(err)
+			ctx.log('store: GetBountyHunterTarget failed: '..tostring(err))
+		end)
+	end
+
+	local LINKS = {
+		InventoryFolder = true,
+		HandInvItem = true,
+		ArmorInvItem_0 = true,
+		ArmorInvItem_1 = true,
+		ArmorInvItem_2 = true,
+		BedWarsBackpackSlot = true,
+		ObservedChestFolder = true
+	}
+	local characterConnections, folderConnections, itemConnections = {}, {}, {}
+
+	local function drop(connections)
+		for key, connection in connections do
+			pcall(function()
+				connection:Disconnect()
+			end)
+			connections[key] = nil
+		end
+	end
+
+	-- Only the attributes an item table carries; an accessory's other attributes change nothing here.
+	local ITEM_ATTRIBUTES = {Amount = true, ItemSkin = true, AddedToBackpackTime = true}
+	local function watchItem(tool)
+		if not itemConnections[tool] then
+			itemConnections[tool] = tool.AttributeChanged:Connect(function(attribute)
+				if ITEM_ATTRIBUTES[attribute] then markInventory() end
+			end)
+		end
+	end
+
+	local function watchFolder()
+		drop(folderConnections)
+		drop(itemConnections)
+		local folder = linkValue('InventoryFolder')
+		if not folder then return end
+		for _, tool in folder:GetChildren() do
+			watchItem(tool)
+		end
+		table.insert(folderConnections, folder.ChildAdded:Connect(function(tool)
+			watchItem(tool)
+			markInventory()
+		end))
+		table.insert(folderConnections, folder.ChildRemoved:Connect(function(tool)
+			local connection = itemConnections[tool]
+			if connection then
+				connection:Disconnect()
+				itemConnections[tool] = nil
+			end
+			markInventory()
+		end))
+	end
+
+	local function watchLink(link)
+		if not (LINKS[link.Name] and link:IsA('ObjectValue')) then return end
+		table.insert(characterConnections, link.Changed:Connect(function()
+			if link.Name == 'InventoryFolder' then watchFolder() end
+			markInventory()
+		end))
+		if link.Name == 'InventoryFolder' then watchFolder() end
+	end
+
+	--[[ The game empties its items when the character goes (each item's maid dispatches
+	InventoryRemoveItem), and fills them again from the new one. ]]
+	local function watchCharacter(newCharacter)
+		drop(characterConnections)
+		drop(folderConnections)
+		drop(itemConnections)
+		character = newCharacter
+		markInventory()
+		if not newCharacter then return end
+		for _, child in newCharacter:GetChildren() do
+			watchLink(child)
+		end
+		table.insert(characterConnections, newCharacter.ChildAdded:Connect(function(child)
+			watchLink(child)
+			if LINKS[child.Name] then markInventory() end
+		end))
+		table.insert(characterConnections, newCharacter.ChildRemoved:Connect(function(child)
+			if LINKS[child.Name] then markInventory() end
+		end))
+	end
+
+	local function flush()
+		if inventoryDirty then
+			local ok, err = pcall(rebuildInventory, false)
+			if not ok then
+				ctx.log('store: inventory rebuild failed: '..tostring(err))
+			end
+		end
+		pending = false
+		local new, old = state, notified
+		if new == old then return end
+		notified = new
+		for _, connection in table.clone(listeners) do
+			if connection.connected then
+				local ok, err = pcall(connection.callback, new, old)
+				if not ok then
+					ctx.log('store: a changed listener failed: '..tostring(err))
+				end
+			end
+		end
+	end
+
+	state = {
+		Inventory = {
+			observedPlayer = lplr,
+			taxState = 0,
+			observedInventory = {
+				hotbarSlot = 0,
+				hotbar = {{}, {}, {}, {}, {}, {}, {}, {}, {}},
+				inventory = {items = {}, armor = {'empty', 'empty', 'empty'}},
+				-- Not mirrored: nothing reads the open chest's items from the store.
+				observedChest = {items = {}}
+			}
+		},
+		Game = {teams = {}, matchState = 0, queueType = workspace:GetAttribute('QueueType'), spectating = false},
+		Bedwars = {
+			kit = kitList()[1] or 'none',
+			kits = {},
+			teamUpgrades = {},
+			myTeamUpgrades = {},
+			itemTiersPurchased = {},
+			playerLevel = tonumber(lplr:GetAttribute('PlayerLevel')) or 0
+		},
+		Kit = {availableContracts = {}},
+		Party = {
+			leader = {userId = lplr.UserId, name = lplr.Name, displayName = lplr.DisplayName},
+			members = {},
+			queueState = 0,
+			outgoingInviteUserIds = {}
+		},
+		Settings = {fov = 80}
+	}
+	state.Game.myTeam = myTeam()
+
+	ctx.clean(function()
+		alive = false
+		table.clear(listeners)
+		drop(characterConnections)
+		drop(folderConnections)
+		drop(itemConnections)
+	end)
+	watchCharacter(lplr.Character)
+	ctx.clean(lplr.CharacterAdded:Connect(watchCharacter))
+	ctx.clean(lplr.CharacterRemoving:Connect(function(old)
+		if old == character then watchCharacter(nil) end
+	end))
+	rebuildInventory(false)
+
+	--[[ MatchStateEvent only fires on a change, so a late injection starts from a guess (running when
+	you have a team and items) and then reads the top bar's clock. ]]
+	local matchStateHeard = false
+	local hasItems = #state.Inventory.observedInventory.inventory.items > 0
+	patch('Game', 'matchState', if lplr:GetAttribute('Team') ~= nil and hasItems then 1 else 0)
+	notified = state
+	pending = false
+
+	listen('Inventory/SlotStateChanged', acceptSnapshot)
+	listen('MatchStateEvent', function(matchState, customMatch, startTime)
+		matchStateHeard = true
+		patch('Game', 'matchState', matchState)
+		if startTime ~= nil then patch('Game', 'startTime', startTime) end
+		if customMatch ~= nil then patch('Game', 'customMatch', customMatch) end
+	end)
+	listen('MatchEndEvent', function()
+		matchStateHeard = true
+		patch('Game', 'matchState', 2)
+	end)
+	listen('QueueTypeEvent', function(queueType)
+		patch('Game', 'queueType', queueType)
+	end)
+	listen('TeamsUpdateEvent', function(data)
+		if type(data) ~= 'table' or type(data.teams) ~= 'table' then return end
+		local teams = {}
+		for _, team in data.teams do
+			table.insert(teams, team)
+		end
+		patch('Game', 'teams', teams)
+		patch('Game', 'myTeam', myTeam())
+	end)
+	listen('TeamUpgradePurchased', function(teamId, upgrades)
+		if teamId ~= nil and tostring(teamId) == tostring(lplr:GetAttribute('Team')) then
+			patch('Bedwars', 'myTeamUpgrades', upgrades)
+		end
+		setTeamUpgrades(teamId, upgrades)
+	end)
+	listen('BulkUpdateTeamUpgrades', function(upgrades)
+		if type(upgrades) == 'table' then
+			patch('Bedwars', 'myTeamUpgrades', upgrades)
+		end
+	end)
+	listen('SendTablistSnapshot', function(snapshot)
+		if type(snapshot) ~= 'table' or type(snapshot.teams) ~= 'table' then return end
+		for teamId, team in snapshot.teams do
+			if type(team) == 'table' and team.teamUpgrades then
+				setTeamUpgrades(teamId, team.teamUpgrades)
+			end
+		end
+	end)
+	listen('BulkSendPurchasedItems', function(data)
+		if type(data) ~= 'table' or type(data.purchasedItems) ~= 'table' then return end
+		local list = if data.reset then {} else table.clone(state.Bedwars.itemTiersPurchased)
+		for _, itemType in data.purchasedItems do
+			table.insert(list, itemType)
+		end
+		patch('Bedwars', 'itemTiersPurchased', list)
+	end)
+	listen('BloodAssassinUpdateAvailableContracts', function(data)
+		if type(data) == 'table' and type(data.contracts) == 'table' then
+			patch('Kit', 'availableContracts', data.contracts)
+		end
+	end)
+	listen('BloodAssassinSetActiveContract', function(data)
+		if type(data) ~= 'table' then return end
+		local contract = data.activeContract
+		if type(contract) == 'table' then
+			local activated = contract.activationTime
+			-- BloodAssassinController stamps a contract that arrives without a start time.
+			if not activated or activated == 0 or activated ~= activated then
+				contract = table.clone(contract)
+				contract.activationTime = workspace:GetServerTimeNow()
+			end
+		end
+		patch('Kit', 'activeContract', contract)
+	end)
+	listen('BountyHunterTargetChanged', function(data)
+		if type(data) == 'table' and data.hunter == lplr then
+			patch('Kit', 'bountyHunterTarget', data.target)
+			patch('Kit', 'bountyHunterReward', data.reward)
+		end
+	end)
+
+	ctx.clean(workspace:GetAttributeChangedSignal('QueueType'):Connect(function()
+		local queueType = workspace:GetAttribute('QueueType')
+		if queueType ~= nil then
+			patch('Game', 'queueType', queueType)
+		end
+	end))
+	ctx.clean(lplr:GetAttributeChangedSignal('Team'):Connect(function()
+		patch('Game', 'myTeam', myTeam())
+	end))
+	ctx.clean(lplr:GetAttributeChangedSignal('PlayingAsKits'):Connect(function()
+		patch('Bedwars', 'kit', kitList()[1] or 'none')
+		askBountyTarget()
+	end))
+	ctx.clean(lplr:GetAttributeChangedSignal('PlayerLevel'):Connect(function()
+		local level = tonumber(lplr:GetAttribute('PlayerLevel'))
+		if level then
+			patch('Bedwars', 'playerLevel', level)
+		end
+	end))
+	askBountyTarget()
+
+	-- The tablist asks for its snapshot once at start; this asks once more for the upgrades in it.
+	pcall(function()
+		net:Get('RequestTablistSnapshot'):SendToServer()
+	end)
+
+	pcall(function()
+		local events = ctx.events('@easy-games/lobby:shared/event/lobby-events@getEvents.Events')
+		local info = events and events:FindFirstChild('partyInfoEvent')
+		if not (info and info:IsA('RemoteEvent')) then return end
+		ctx.clean(info.OnClientEvent:Connect(function(data)
+			if type(data) == 'table' and type(data.party) == 'table' then
+				setSlice('Party', data.party)
+			end
+		end))
+		local request = events:FindFirstChild('requestPartyInfo')
+		if request and request:IsA('RemoteEvent') then
+			request:FireServer()
+		end
+	end)
+
+	net:WaitFor('GetSettings'):andThen(function(remote)
+		return remote:CallServer()
+	end):andThen(function(settings)
+		if not (alive and type(settings) == 'table') then return end
+		local merged = table.clone(state.Settings)
+		for key, value in settings do
+			merged[key] = value
+		end
+		setSlice('Settings', merged)
+	end, function(err)
+		ctx.log('store: GetSettings failed: '..tostring(err))
+	end)
+
+	task.spawn(function()
+		for attempt = 1, 3 do
+			if not alive or slotSnapshot then return end
+			refreshSlots()
+			if slotSnapshot then return end
+			task.wait(2 * attempt)
+		end
+	end)
+
+	task.spawn(function()
+		local inferred, seconds = knitless.storeReadHudTimer(lplr)
+		if not alive or matchStateHeard or inferred == nil then return end
+		patch('Game', 'matchState', inferred)
+		if inferred == 1 and seconds then
+			patch('Game', 'startTime', workspace:GetServerTimeNow() - seconds)
+		end
+	end)
+
+	-- Rodux flushes on Heartbeat; so does this, and only when something is waiting. While the game's
+	-- own hotbar is in use, a selection it made on its own is looked for here (knitless.hotbarMoved).
+	ctx.clean(runService.Heartbeat:Connect(function()
+		if not inventoryDirty and knitless.hotbarMoved(ctx, state.Inventory.observedInventory.hotbarSlot) then
+			inventoryDirty = true
+		end
+		if pending or inventoryDirty then
+			flush()
+		end
+	end))
+
+	local changed = {}
+	function changed:connect(callback)
+		local connection = {connected = true, callback = callback}
+		local function disconnect()
+			connection.connected = false
+			local index = table.find(listeners, connection)
+			if index then
+				table.remove(listeners, index)
+			end
+		end
+		connection.disconnect = disconnect
+		connection.Disconnect = disconnect
+		table.insert(listeners, connection)
+		return connection
+	end
+	changed.Connect = changed.connect
+
+	--[[ The actions pistonware sends. The hotbar edits of the old client (InventoryAddToHotbar,
+	InventoryRemoveFromHotbar, InventorySwapHotbarSlots) leave the state as it is, which is what the
+	reducer does once the server's snapshot is in; any other action is logged once and ignored. ]]
+	local unmirrored = {}
+	local store = {changed = changed}
+	function store:getState()
+		return state
+	end
+	function store:dispatch(action)
+		if type(action) ~= 'table' then return end
+		local kind = action.type
+		local ok, err = pcall(function()
+			if kind == 'InventorySelectHotbarSlot' then
+				selectHotbarSlot(action.slot)
+			elseif kind == 'InventorySetArmorItem' then
+				setArmorItem(action)
+			elseif kind == 'InventorySlotSnapshot' then
+				acceptSnapshot(action.snapshot)
+			elseif kind == 'BedwarsAddItemPurchased' then
+				local list = table.clone(state.Bedwars.itemTiersPurchased)
+				table.insert(list, action.itemType)
+				patch('Bedwars', 'itemTiersPurchased', list)
+			elseif not unmirrored[kind] then
+				unmirrored[kind] = true
+				ctx.log('store: action '..tostring(kind)..' is not mirrored without Knit')
+			end
+		end)
+		if not ok then
+			ctx.log('store: '..tostring(kind)..' failed: '..tostring(err))
+		end
+	end
+
+	inner.transact = transact
+	inner.refresh = function()
+		return Promise.new(function(resolve)
+			resolve(refreshSlots())
+		end)
+	end
+	inner.observedChestFolder = function()
+		return linkValue('ObservedChestFolder')
+	end
+	inner.acceptSnapshot = acceptSnapshot
+	inner.getSnapshot = function()
+		return slotSnapshot
+	end
+	inner.patch = patch
+	inner.setSlice = setSlice
+	inner.notify = markInventory
+
+	ctx.store = store
+	ctx.modules['PlayerScripts.TS.ui.store'] = {ClientStore = store}
+	return store
+end
+
+--[[ One Inventory/TransactSlots request ({operation, slot?, target?, mode?}), queued behind the ones
+before it like the dragging controller's transact. The promise resolves true when the server took it. ]]
+function knitless.storeTransact(ctx, request)
+	local inner = ctx.storeInner
+	if not inner then return ctx.Promise.resolve(false) end
+	return inner.transact(request)
+end
+
+-- Asks the server for the slot snapshot again (Inventory/GetSlotState).
+function knitless.storeRefreshSlots(ctx)
+	local inner = ctx.storeInner
+	if not inner then return ctx.Promise.resolve(false) end
+	return inner.refresh()
+end
+
+--[[ An InventoryDraggingController stand-in over the store's snapshot, with the members AutoHotbar
+uses: transact(request) and refresh() returning promises, getObservedChestFolder(), and snapshot. ]]
+function knitless.storeDraggingController(ctx)
+	local inner = ctx.storeInner
+	if not inner then return nil end
+	local controller = setmetatable({}, {__index = function(_, key)
+		if key == 'snapshot' then
+			return inner.getSnapshot()
+		end
+		return nil
+	end})
+	function controller:transact(request)
+		return inner.transact(request)
+	end
+	function controller:refresh()
+		return inner.refresh()
+	end
+	function controller:getObservedChestFolder()
+		return inner.observedChestFolder()
+	end
+	function controller:applySnapshot(snapshot)
+		inner.acceptSnapshot(snapshot)
+	end
+	return controller
+end
+
+--[[ Sets one field of a slice the way a reducer would (a new slice table, changed on the next
+Heartbeat), for slices that own state the store should show. A slice that is not there yet is made. ]]
+function knitless.storePatch(ctx, slice, key, value)
+	local inner = ctx.storeInner
+	if not (inner and ctx.store) then return end
+	if ctx.store:getState()[slice] == nil then
+		inner.setSlice(slice, {[key] = value})
+	else
+		inner.patch(slice, key, value)
+	end
+end
+
+-- Re-reads the inventory instances on the next Heartbeat.
+function knitless.storeNotify(ctx)
+	local inner = ctx.storeInner
+	if inner then
+		inner.notify()
+	end
+end
+
+--[[ Blocks slice of the knitless layer: the block engine the bootstrap reads as
+bedwars.BlockController, the client engine and BlockPlacer that store.blockPlacer is built from, the
+block-engine remotes and BuilderUtil. Each rule follows the game's module of the same name; where the
+game asks client-only state this layer cannot see, the function says what it does instead. ]]
+
+--[[ World position to block cell, as PositionUtil.convertToBlockPosition: a third of it, rounded. A
+rounded -0 is folded into 0 so one cell is always one table key. ]]
+function knitless.blockCell(position)
+	return Vector3.new(
+		math.round(position.X / 3) + 0,
+		math.round(position.Y / 3) + 0,
+		math.round(position.Z / 3) + 0
+	)
+end
+
+--[[ A cell as the store keys it, as BasicBlockStore.getKey: every component rounded. ]]
+function knitless.blockKey(position)
+	return Vector3.new(math.round(position.X) + 0, math.round(position.Y) + 0, math.round(position.Z) + 0)
+end
+
+--[[ BlockEngine.snapBlockRotation: degrees to the nearest of 0, 90, 180, 270 and 360. ]]
+function knitless.snapBlockRotation(degrees)
+	local angle = degrees % 360
+	local best, bestGap = 0, math.abs(angle)
+	for _, option in {90, 180, 270, 360} do
+		local gap = math.abs(angle - option)
+		if gap < bestGap then
+			best, bestGap = option, gap
+		end
+	end
+	return best
+end
+
+--[[ The handler registry, by block type, as game-block-engine.module fills it: a greedy handler for
+every ItemMeta block with a greedyMesh and for glass, barrier, magic glass, smoke and stone-player
+blocks (greedy subclasses), a plain one for the four crops, and a prefab handler for every source
+block in ReplicatedStorage.Assets.Blocks, which is registered last and wins. A prefab whose item has
+no block meta gets the plain prefab handler, as the game's source-block hook returns nothing for it.
+Without the data file every type gets a handler that decides from the block itself. ]]
+function knitless.newBlockRegistry(ctx, itemMeta)
+	local replicatedStorage = ctx.services.ReplicatedStorage
+	local up = Vector3.new(0, 1, 0)
+	local greedyTypes = {glass = true, barrier = true, magic_glass = true, smoke_block = true, stone_player_block = true}
+	local cropTypes = {pumpkin = true, melon = true, chicken_egg_block = true, carrot = true}
+
+	local function sourceFolder()
+		local assets = replicatedStorage:FindFirstChild('Assets')
+		return assets and assets:FindFirstChild('Blocks')
+	end
+
+	local function box(width, height, depth)
+		local cells = {}
+		for x = 0, width - 1 do
+			for y = 0, height - 1 do
+				for z = 0, depth - 1 do
+					table.insert(cells, Vector3.new(x, y, z))
+				end
+			end
+		end
+		return cells
+	end
+
+	--[[ The bed's second cell follows its yaw (beds-block-handler). ]]
+	local function bedShape(root, degrees)
+		local turn = knitless.snapBlockRotation(degrees)
+		local second = if turn == 0 or turn == 360 then Vector3.new(0, 0, 1)
+			elseif turn == 270 then Vector3.new(-1, 0, 0)
+			elseif turn == 180 then Vector3.new(0, 0, -1)
+			else Vector3.new(1, 0, 0)
+		return {root, root + second}
+	end
+
+	--[[ Two wide along its turned width and two high (cotton-candy-machine-block-handler). ]]
+	local function cottonCandyShape(root, degrees)
+		local turn = knitless.snapBlockRotation(degrees)
+		local width = if turn == 90 then Vector3.new(0, 0, 1)
+			elseif turn == 180 then Vector3.new(-1, 0, 0)
+			elseif turn == 270 then Vector3.new(0, 0, -1)
+			else Vector3.new(1, 0, 0)
+		local cells = {}
+		for across = 0, 1 do
+			for high = 0, 1 do
+				table.insert(cells, root + width * across + up * high)
+			end
+		end
+		return cells
+	end
+
+	--[[ Prefabs that hold more than their root cell, from each handler's getContainedPositions.
+	place is true where its getPlacementPositions asks for the same cells; the others place on the
+	root cell only. Four of these list the cell above twice in the game; once is enough here. The
+	gargoyle statues read their footprint from their parts and are counted as their root cell. ]]
+	local tall = {cells = {Vector3.zero, up}, place = true}
+	local taller = {cells = {Vector3.zero, up, up * 2}, place = true}
+	local footprints = {
+		bed = {shape = bedShape},
+		og_bed = {cells = {Vector3.zero, Vector3.new(0, 0, 1)}},
+		black_market_shop = {cells = {Vector3.zero, Vector3.new(0, 0, 1)}},
+		cursed_coffin = {cells = {Vector3.zero, Vector3.new(-1, 0, 0)}},
+		cotton_candy_machine = {shape = cottonCandyShape, place = true},
+		camera_turret = tall,
+		grave_trap = tall,
+		tesla_trap = tall,
+		diamond_capture_block = tall,
+		fire_sheep_statue = tall,
+		target_dummy_tier_1 = tall,
+		target_dummy_tier_2 = tall,
+		target_dummy_tier_3 = tall,
+		target_dummy_tier_4 = tall,
+		lightning_coil = taller,
+		snow_cone_machine = taller,
+		broken_snow_cone_machine = taller,
+		zipline_base = taller,
+		huge_lucky_block = {cells = box(2, 2, 2), place = true},
+		merchant_region = {cells = box(7, 5, 8), place = true},
+	}
+
+	--[[ GreedyBlockHandler.getContainedPositions: every cell inside the part's box, cached per
+	block until its size changes. ]]
+	local greedyCache = setmetatable({}, {__mode = 'k'})
+	local function greedyCells(block)
+		local size = block.Size / 3
+		local cached = greedyCache[block]
+		if cached and cached.size == size then
+			return cached.cells
+		end
+		local low = block.Position / 3 - size / 2 + Vector3.new(0.5, 0.5, 0.5)
+		local cells = {}
+		for x = 0, math.max(math.round(size.X), 1) - 1 do
+			for y = 0, math.max(math.round(size.Y), 1) - 1 do
+				for z = 0, math.max(math.round(size.Z), 1) - 1 do
+					table.insert(cells, knitless.blockKey(low + Vector3.new(x, y, z)))
+				end
+			end
+		end
+		greedyCache[block] = {size = size, cells = cells}
+		return cells
+	end
+
+	local Handler = {}
+	Handler.__index = Handler
+
+	function Handler:getBlockType()
+		return self.blockType
+	end
+
+	function Handler:getBlockMeta()
+		return self.blockMeta
+	end
+
+	--[[ The game tells greedy handlers apart by class; a guessed handler goes by the block's own
+	GreedyBlock attribute, which only GreedyBlockHandler.place sets. ]]
+	function Handler:isGreedy(block)
+		if self.kind == 'auto' then
+			return block ~= nil and block:GetAttribute('GreedyBlock') == true
+		end
+		return self.kind == 'greedy'
+	end
+
+	function Handler:getContainedPositions(block)
+		if not block then return {} end
+		if self:isGreedy(block) then
+			return greedyCells(block)
+		end
+		local root = knitless.blockCell(block.Position)
+		local footprint = self.footprint
+		if not footprint then
+			return {root}
+		end
+		if footprint.shape then
+			return footprint.shape(root, math.deg((select(2, block.CFrame:ToOrientation()))))
+		end
+		local cells = table.create(#footprint.cells)
+		for index, offset in footprint.cells do
+			cells[index] = root + offset
+		end
+		return cells
+	end
+
+	function Handler:getPlacementPositions(cell, rotation)
+		local footprint = self.footprint
+		if not (footprint and footprint.place) then
+			return {cell}
+		end
+		if footprint.shape then
+			return footprint.shape(cell, rotation or 0)
+		end
+		local cells = table.create(#footprint.cells)
+		for index, offset in footprint.cells do
+			cells[index] = cell + offset
+		end
+		return cells
+	end
+
+	--[[ A loose copy of the block at a cell, for previews such as Schematica's: the source block's
+	Root, as PrefabBlockHandler.createNewInstance clones it, or else a plain 3-stud part. It is
+	left unparented, and the server never hears of it. ]]
+	function Handler:place(cell)
+		local folder = sourceFolder()
+		local source = folder and folder:FindFirstChild(self.blockType)
+		local root = source and source:FindFirstChild('Root')
+		local part = root and root:Clone()
+		if not part then
+			part = Instance.new('Part')
+			part.Size = Vector3.new(3, 3, 3)
+		end
+		part.Name = self.blockType
+		part.Anchored = true
+		part.CFrame = CFrame.new(cell * 3)
+		return part
+	end
+
+	local function newHandler(name, kind, blockMeta, footprint)
+		return setmetatable({
+			blockType = name,
+			kind = kind,
+			blockMeta = blockMeta or {breakType = 'wood'},
+			footprint = footprint
+		}, Handler)
+	end
+
+	local function resolve(name)
+		if not itemMeta then
+			return newHandler(name, 'auto', nil, footprints[name])
+		end
+		local meta = itemMeta[name]
+		local blockMeta = type(meta) == 'table' and meta.block or nil
+		local folder = sourceFolder()
+		if folder and folder:FindFirstChild(name) then
+			return newHandler(name, 'prefab', blockMeta, blockMeta and footprints[name] or nil)
+		end
+		if not blockMeta then return nil end
+		if cropTypes[name] then
+			return newHandler(name, 'single', blockMeta)
+		end
+		if greedyTypes[name] or blockMeta.greedyMesh then
+			return newHandler(name, 'greedy', blockMeta)
+		end
+		--[[ The source folder has not been seen yet: every other block counts as a prefab. ]]
+		if not folder then
+			return newHandler(name, 'prefab', blockMeta, footprints[name])
+		end
+		return nil
+	end
+
+	local registry = {handlers = {}, fallback = newHandler('', 'auto')}
+
+	--[[ A miss is remembered only once the source folder exists, as it can replicate after this
+	layer starts. ]]
+	function registry:getHandler(name)
+		if type(name) ~= 'string' then return nil end
+		local handler = self.handlers[name]
+		if handler == nil then
+			handler = resolve(name)
+			if handler or sourceFolder() then
+				self.handlers[name] = handler or false
+			end
+		end
+		return handler or nil
+	end
+
+	return registry
+end
+
+--[[ BasicBlockStore over the 'block' tag, filled the way IClientBlockEngine.startBlockReplication
+fills it: every cell its handler says the block holds, only its root cell when it is tagged
+single-space-block, and a greedy block's cells again whenever its size changes. A block whose type
+has no handler (stale data) is kept by its root cell rather than dropped. ]]
+function knitless.newBlockStore(ctx, registry)
+	local collectionService = ctx.services.CollectionService
+	local workspace = ctx.services.Workspace
+	local blocks, roots, tracked, held = {}, {}, {}, {}
+	local store = {blocks = blocks, blockRoots = roots, handlerRegistry = registry}
+
+	function store:getKey(position)
+		return knitless.blockKey(position)
+	end
+
+	function store:getBlockAt(position)
+		if not position then return nil end
+		return blocks[Vector3.new(math.round(position.X) + 0, math.round(position.Y) + 0, math.round(position.Z) + 0)]
+	end
+
+	function store:getBlockRootPosition(block)
+		return roots[block]
+	end
+
+	function store:getAllBlocks()
+		local list = {}
+		for _, block in blocks do
+			table.insert(list, block)
+		end
+		return list
+	end
+
+	function store:getAllBlockPositions()
+		local list = {}
+		for cell in blocks do
+			table.insert(list, cell)
+		end
+		return list
+	end
+
+	function store:getBlockDataFolder()
+		return workspace:FindFirstChild('BlockData')
+	end
+
+	function store:getBlockDataName(block, position)
+		local uuid = block:GetAttribute('BlockUUID')
+		if block:GetAttribute('GreedyBlock') == true then
+			return tostring(uuid)..'_'..tostring(position)
+		end
+		return uuid
+	end
+
+	--[[ Workspace.BlockData[BlockUUID], or [BlockUUID_<cell>] for a greedy block. The server names
+	that one after its own integer cell, so an unrounded cell from a caller is tried rounded too. ]]
+	function store:getBlockData(position)
+		local block = self:getBlockAt(position)
+		local folder = block and workspace:FindFirstChild('BlockData')
+		if not folder then return nil end
+		local name = self:getBlockDataName(block, position)
+		local data = name ~= nil and folder:FindFirstChild(tostring(name)) or nil
+		if not data and block:GetAttribute('GreedyBlock') == true then
+			data = folder:FindFirstChild(tostring(block:GetAttribute('BlockUUID'))..'_'..tostring(knitless.blockKey(position)))
+		end
+		return data
+	end
+
+	--[[ As BasicBlockStore.setBlock: a cell taken from another block drops that block's root. ]]
+	local function claim(block, cells)
+		for _, cell in cells do
+			local key = knitless.blockKey(cell)
+			local previous = blocks[key]
+			if previous ~= nil and previous ~= block then
+				roots[previous] = nil
+			end
+			blocks[key] = block
+		end
+	end
+
+	local function release(block, cells, keep)
+		for _, cell in cells do
+			local key = knitless.blockKey(cell)
+			if not (keep and keep[key]) and blocks[key] == block then
+				blocks[key] = nil
+			end
+		end
+	end
+
+	local function add(block)
+		if tracked[block] or not block:IsA('BasePart') then return end
+		local root = knitless.blockCell(block.Position)
+		local single = collectionService:HasTag(block, 'single-space-block')
+		local handler = registry:getHandler(block.Name) or registry.fallback
+		local entry = {cells = if single then {root} else handler:getContainedPositions(block)}
+		tracked[block] = entry
+		claim(block, entry.cells)
+		roots[block] = root
+		if not single and handler:isGreedy(block) then
+			entry.resized = block:GetPropertyChangedSignal('Size'):Connect(function()
+				local cells = handler:getContainedPositions(block)
+				local keep = {}
+				for _, cell in cells do
+					keep[knitless.blockKey(cell)] = true
+				end
+				release(block, entry.cells, keep)
+				entry.cells = cells
+				claim(block, cells)
+				roots[block] = knitless.blockCell(block.Position)
+			end)
+		end
+	end
+
+	local function remove(block)
+		local entry = tracked[block]
+		if not entry then return end
+		tracked[block] = nil
+		if entry.resized then
+			entry.resized:Disconnect()
+		end
+		release(block, entry.cells)
+		roots[block] = nil
+	end
+
+	--[[ The client's own copy of a block it has asked the server for, as the game's placer keeps one
+	(BlockEngine:placeBlock on the client) from the request until the answer. It holds the cell here,
+	so a caller sees the cell taken at once: Scaffold grows its line off it, and nothing asks for the
+	cell again while the request is out. Unlike the game's copy it is never parented, tagged or
+	drawn. Only an empty cell is held. The server's part takes the cell over when it replicates
+	(claim), and letting go clears the cell only while the copy still holds it. ]]
+	function store:hold(cell, part)
+		local key = knitless.blockKey(cell)
+		if blocks[key] ~= nil then return nil end
+		held[part] = key
+		blocks[key] = part
+		roots[part] = key
+		return part
+	end
+
+	function store:letGo(part)
+		local key = held[part]
+		if key == nil then return end
+		held[part] = nil
+		if blocks[key] == part then
+			blocks[key] = nil
+		end
+		roots[part] = nil
+		part:Destroy()
+	end
+
+	ctx.clean(collectionService:GetInstanceAddedSignal('block'):Connect(function(block)
+		pcall(add, block)
+	end))
+	ctx.clean(collectionService:GetInstanceRemovedSignal('block'):Connect(function(block)
+		pcall(remove, block)
+	end))
+	ctx.clean(function()
+		for _, entry in tracked do
+			if entry.resized then
+				entry.resized:Disconnect()
+			end
+		end
+		table.clear(tracked)
+		for part, key in held do
+			if blocks[key] == part then
+				blocks[key] = nil
+			end
+			roots[part] = nil
+			pcall(part.Destroy, part)
+		end
+		table.clear(held)
+	end)
+	for _, block in collectionService:GetTagged('block') do
+		pcall(add, block)
+	end
+
+	return store
+end
+
+--[[ The shared BlockEngine singleton (block-engine.out .BlockEngine). Methods are plain fields so
+the bootstrap can read and replace isBlockBreakable as it does on the game's copy. ]]
+function knitless.newBlockEngine(ctx, store, registry, itemMeta)
+	local players = ctx.services.Players
+	local workspace = ctx.services.Workspace
+	local replicatedStorage = ctx.services.ReplicatedStorage
+	local okBalance, balance = pcall(ctx.data, 'BalanceFile')
+	balance = okBalance and type(balance) == 'table' and balance or {}
+
+	local animations = {animationMap = {[0] = 'rbxassetid://4866397461', [1] = 'rbxassetid://6322507715'}}
+	function animations:getAssetId(id)
+		return self.animationMap[id]
+	end
+	function animations:setAssetId(id, asset)
+		self.animationMap[id] = asset
+	end
+
+	local engine = {store = store, handlerRegistry = registry, animationController = animations}
+
+	function engine:getStore()
+		return self.store
+	end
+
+	function engine:getHandlerRegistry()
+		return self.handlerRegistry
+	end
+
+	function engine:getAnimationController()
+		return self.animationController
+	end
+
+	function engine:getSourceBlocksFolder()
+		local assets = replicatedStorage:FindFirstChild('Assets')
+		return assets and assets:FindFirstChild('Blocks')
+	end
+
+	function engine:getBlockPosition(position)
+		return knitless.blockCell(position)
+	end
+
+	function engine:getWorldPosition(cell)
+		return cell * 3
+	end
+
+	function engine:snapPosition(position)
+		return knitless.blockKey(position)
+	end
+
+	function engine:snapBlockRotation(degrees)
+		return knitless.snapBlockRotation(degrees)
+	end
+
+	--[[ BlockEngineCharacter's resolver: a live model in the player's BlockEngineCharacter
+	ObjectValue acts for them, else their character. ]]
+	function engine:getCharacter(player)
+		local override = player:FindFirstChild('BlockEngineCharacter')
+		local model = override and override:IsA('ObjectValue') and override.Value
+		if model and model:IsA('Model') and model.Parent then
+			return model
+		end
+		return player.Character
+	end
+
+	function engine:distanceFromCharacter(player, position)
+		local character = self:getCharacter(player)
+		if character ~= nil and character ~= player.Character then
+			local head = character:FindFirstChild('Head')
+			local from = if head and head:IsA('BasePart') then head.Position else character:GetPivot().Position
+			return (from - position).Magnitude
+		end
+		return player:DistanceFromCharacter(position)
+	end
+
+	function engine:getBlockInstanceFromChild(instance)
+		while instance do
+			if instance:GetAttribute('Block') == true then
+				return instance
+			end
+			instance = instance.Parent
+		end
+		return nil
+	end
+
+	--[[ BlockEngine.isBlockBreakable with the one breakable-hook listener the game has
+	(bedwars-block-engine.module): NoBreak, then Team<team>NoBreak and Player<userId>NoBreak for the
+	asking player. An empty cell is breakable. ]]
+	function engine:isBlockBreakable(blockRef, player)
+		local block = self.store:getBlockAt(blockRef.blockPosition)
+		if not block then return true end
+		if block:GetAttribute('NoBreak') == true then return false end
+		if player then
+			local team = player:GetAttribute('Team')
+			if team ~= nil and team ~= '' and block:GetAttribute('Team'..tostring(team)..'NoBreak') == true then
+				return false
+			end
+			if block:GetAttribute('Player'..tostring(player.UserId)..'NoBreak') == true then
+				return false
+			end
+		end
+		return true
+	end
+
+	--[[ BlockEngine.calculateBlockDamage: 2, or the held tool's breakBlock figure for the block's
+	breakType, then game-block-engine's own changes (Axolotl speed, snow cone stacks, host-only and
+	owner-only blocks, bed shields). Kit listeners (Berserker rage, Jailor souls) and bed plating are
+	not seen, so the figure is the plain one for those. ]]
+	function engine:calculateBlockDamage(player, blockRef)
+		local character = player.Character
+		if not character then return 0 end
+		local damage = 2
+		local block = self.store:getBlockAt(blockRef.blockPosition)
+		local blockItem = block and itemMeta[block.Name]
+		local blockMeta = blockItem and blockItem.block
+		local hand = character:FindFirstChild('HandInvItem')
+		local tool = hand and hand:IsA('ObjectValue') and hand.Value
+		if tool and blockMeta and blockMeta.breakType then
+			local toolMeta = itemMeta[tool.Name]
+			local figure = toolMeta and toolMeta.breakBlock and toolMeta.breakBlock[blockMeta.breakType]
+			if figure ~= nil then
+				damage = figure
+			end
+		end
+		local axolotl = balance.AXOLOTL
+		if character:GetAttribute('AxolotlBreakSpeed') == true and axolotl and axolotl.AXOLOTL_BREAK_SPEED_MULT then
+			damage *= axolotl.AXOLOTL_BREAK_SPEED_MULT
+		end
+		local stacks = 0
+		if character:GetAttribute('StatusEffect_snow_cone') ~= nil then
+			stacks = tonumber(character:GetAttribute('StatusEffect_snow_cone_stacks')) or 0
+		end
+		if balance.SNOW_CONE_BLOCK_COST and stacks >= balance.SNOW_CONE_BLOCK_COST then
+			damage *= (balance.SNOW_CONE_BLOCK_BASE_DMG or 1) + (balance.SNOW_CONE_BLOCK_STACK_BONUS or 0) * stacks
+		end
+		if block then
+			if blockMeta and blockMeta.breakableOnlyByHosts then
+				local role = player:GetAttribute('CustomMatchRole')
+				if role ~= 'host' and role ~= 'cohost' then return 0 end
+			end
+			if blockMeta and blockMeta.breakableOnlyByOwner and block:GetAttribute('PlacedByUserId') ~= player.UserId then
+				return 0
+			end
+			local shield = block:GetAttribute('BedShieldEndTime')
+			if type(shield) == 'number' and shield ~= 0 and shield == shield and workspace:GetServerTimeNow() < shield then
+				return 0
+			end
+		end
+		return damage
+	end
+
+	--[[ BlockEngine.isClientAllowedPlacement: a known type, not inside your head, not in your own
+	body's column and not in another player's feet cells. ]]
+	function engine:isClientAllowedPlacement(player, blockType, cell, rotation)
+		local handler = self.handlerRegistry:getHandler(blockType)
+		if not handler then return false end
+		local character = self:getCharacter(player)
+		local head = character and character:FindFirstChild('Head')
+		if head then
+			local overlap = OverlapParams.new()
+			overlap.FilterType = Enum.RaycastFilterType.Include
+			overlap.FilterDescendantsInstances = {head}
+			overlap.MaxParts = 1
+			for _, position in handler:getPlacementPositions(cell, rotation or 0) do
+				if #workspace:GetPartBoundsInBox(CFrame.new(position * 3), Vector3.new(3, 3, 3), overlap) > 0 then
+					return false
+				end
+			end
+		end
+		if not character then return false end
+		local humanoid = character:FindFirstChildOfClass('Humanoid')
+		if not humanoid then return false end
+		local feet = self:getBlockPosition(character:GetPivot().Position - Vector3.new(0, humanoid.HipHeight / 2, 0))
+		local scale = humanoid:GetAttribute('BodyHeightScaleOverride')
+		if scale == nil then
+			local value = humanoid:FindFirstChild('BodyHeightScale')
+			scale = value and value.Value or 1
+		end
+		local height = math.round(scale * 2)
+		local overhead = self.store:getBlockAt(feet + Vector3.new(0, height, 0))
+		if height > 1 and cell.X == feet.X and cell.Z == feet.Z
+			and feet.Y + (if overhead then 0 else 1) <= cell.Y and cell.Y <= feet.Y + height - 1 then
+			return false
+		end
+		for _, other in players:GetPlayers() do
+			if other ~= player then
+				local bodies = {other.Character}
+				local acting = self:getCharacter(other)
+				if acting and acting ~= other.Character then
+					table.insert(bodies, acting)
+				end
+				for _, body in bodies do
+					local otherHumanoid = body:FindFirstChildOfClass('Humanoid')
+					if otherHumanoid then
+						local otherFeet = self:getBlockPosition(body:GetPivot().Position - Vector3.new(0, otherHumanoid.HipHeight / 2, 0))
+						local depth = otherHumanoid:FindFirstChild('BodyDepthScale')
+						for step = 0, math.round((depth and depth.Value or 1) * 2) - 1 do
+							if cell == otherFeet + Vector3.new(0, step, 0) then
+								return false
+							end
+						end
+					end
+				end
+			end
+		end
+		return true
+	end
+
+	--[[ BlockEngine.isServerAllowedPlacement, the half the server repeats: the cells free (or
+	CanReplace), not on a denied block type, supported where the block needs it, and not on a prefab
+	where that is denied. The server's own placement listeners may still refuse. ]]
+	function engine:isServerAllowedPlacement(blockType, cell, rotation, mouseInfo)
+		local handler = self.handlerRegistry:getHandler(blockType)
+		if not handler then return false end
+		for _, position in handler:getPlacementPositions(cell, rotation or 0) do
+			local occupant = self.store:getBlockAt(position)
+			if occupant and occupant:GetAttribute('CanReplace') ~= true then
+				return false
+			end
+		end
+		local meta = handler:getBlockMeta()
+		local target = mouseInfo and mouseInfo.target
+		local targetName = target and target.blockInstance and target.blockInstance.Name
+		if targetName and targetName ~= '' and type(meta.denyPlaceOnBlockTypes) == 'table'
+			and table.find(meta.denyPlaceOnBlockTypes, targetName) ~= nil then
+			return false
+		end
+		local below = self.store:getBlockAt(cell - Vector3.new(0, 1, 0))
+		if meta.requiresSupportingBlock and not below then
+			return false
+		end
+		if meta.denyPlacingOnPrefabBlocks and below then
+			local belowHandler = self.handlerRegistry:getHandler(below.Name)
+			if belowHandler and belowHandler.kind == 'prefab' then
+				return false
+			end
+		end
+		return true
+	end
+
+	function engine:isAllowedPlacement(player, blockType, cell, rotation, mouseInfo)
+		rotation = rotation or 0
+		if not self:isClientAllowedPlacement(player, blockType, cell, rotation, mouseInfo) then
+			return false
+		end
+		return self:isServerAllowedPlacement(blockType, cell, rotation, mouseInfo)
+	end
+
+	return engine
+end
+
+--[[ BlockSelector.getMouseInfo(mode, {ray, range, searchOutward, allowVoidSave}): mode 0 places,
+1 selects. A block under the ray within range gives its cell and the cell beside the hit face;
+placing with nothing there bridges off the block under you, as the game does. ]]
+function knitless.newBlockSelector(ctx, engine)
+	local players = ctx.services.Players
+	local workspace = ctx.services.Workspace
+	local collectionService = ctx.services.CollectionService
+	local lplr = ctx.lplr
+	local okMouse, mouse = pcall(function()
+		return lplr:GetMouse()
+	end)
+	local around = {
+		Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0), Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
+		Vector3.new(1, 0, 1), Vector3.new(-1, 0, -1), Vector3.new(-1, 0, 1), Vector3.new(1, 0, -1)
+	}
+
+	local function skipped(part, mode)
+		return collectionService:HasTag(part, 'block:no-collision')
+			or (part:IsA('BasePart') and part:GetAttribute('gamecore_GameQueryIgnore') == true)
+			or (mode == 0 and part:GetAttribute('BlockEngine_Select_IgnorePlaceMode') == true)
+	end
+
+	local function cast(ray, range, params, mode)
+		local direction = ray.Direction * (range * 3.5)
+		local result = workspace:Raycast(ray.Origin, direction, params)
+		for _ = 1, 64 do
+			if not (result and skipped(result.Instance, mode)) then break end
+			local filter = params.FilterDescendantsInstances
+			table.insert(filter, result.Instance)
+			params.FilterDescendantsInstances = filter
+			result = workspace:Raycast(ray.Origin, direction, params)
+		end
+		return result
+	end
+
+	local selector = {mouse = okMouse and mouse or nil}
+
+	function selector:getMouseInfo(mode, options)
+		options = options or {}
+		local store = engine:getStore()
+		local character = engine:getCharacter(lplr)
+		local primary = character and character.PrimaryPart
+		if not primary then return nil end
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = {character}
+		local ray = options.ray or (self.mouse and self.mouse.UnitRay)
+		if not ray then return nil end
+		local range = options.range
+		if range == 0 or range ~= range or not range then
+			range = 18
+		end
+		local origin = primary.Position
+		local hit = cast(ray, range, params, mode)
+
+		if hit and hit.Instance:IsA('BasePart') and options.searchOutward ~= true and (hit.Position - origin).Magnitude <= range then
+			local block = engine:getBlockInstanceFromChild(hit.Instance)
+			if block then
+				local handler = engine:getHandlerRegistry():getHandler(block.Name)
+				local meta = handler and handler:getBlockMeta()
+				if mode == 0 and meta and meta.denyPlaceOn then return nil end
+				local inside = hit.Position - hit.Normal * 0.1
+				local cell
+				if handler and not handler:isGreedy(block) then
+					local scaled = inside / 3
+					for _, candidate in handler:getContainedPositions(block) do
+						if (candidate - scaled).Magnitude < (if cell then (cell - scaled).Magnitude else math.huge) then
+							cell = candidate
+						end
+					end
+				end
+				cell = cell or knitless.blockCell(inside)
+				return {
+					target = {
+						blockInstance = block,
+						blockRef = {blockPosition = cell},
+						hitPosition = hit.Position,
+						hitNormal = hit.Normal
+					},
+					placementPosition = cell + hit.Normal.Unit
+				}
+			end
+		end
+		if mode ~= 0 then return nil end
+
+		local normal = workspace:GetAttribute('WorldNormal') or Vector3.new(0, 1, 0)
+		local support
+		for depth = 1, 3 do
+			local cell = engine:getBlockPosition(origin - normal * 3 * depth)
+			if store:getBlockAt(cell) then
+				support = cell
+				break
+			end
+		end
+		if not support then
+			if options.allowVoidSave then
+				for depth = 1, 3 do
+					local cell = engine:getBlockPosition(origin - normal * 3 * depth)
+					for _, offset in around do
+						if store:getBlockAt(cell + offset) ~= nil then
+							return {placementPosition = cell}
+						end
+					end
+				end
+			end
+			return nil
+		end
+
+		--[[ A flat invisible plate through the supporting layer: where the ray meets it is the cell to
+		walk out towards, half a cell at a time, until the walk leaves the blocks. ]]
+		local plate = Instance.new('Part')
+		plate.Size = Vector3.new(90, 3, 90)
+		plate.CFrame = CFrame.new(support * 3) * CFrame.Angles(normal.Z, 0, normal.X)
+		plate.Anchored = true
+		plate.Transparency = 1
+		plate.CanCollide = false
+		plate.Parent = workspace
+		local bodies = {}
+		for _, player in players:GetPlayers() do
+			if player.Character then
+				table.insert(bodies, player.Character)
+			end
+			local acting = engine:getCharacter(player)
+			if acting and acting ~= player.Character then
+				table.insert(bodies, acting)
+			end
+		end
+		params.FilterDescendantsInstances = bodies
+		if options.searchOutward then
+			params.FilterDescendantsInstances = {plate}
+			params.FilterType = Enum.RaycastFilterType.Include
+		end
+		hit = cast(ray, range, params, mode)
+		plate:Destroy()
+		if hit and hit.Instance == plate then
+			local aim = engine:getBlockPosition(engine:snapPosition(hit.Position - normal * 1.5))
+			local walk = support
+			if store:getBlockAt(walk) then
+				for _ = 1, 20 do
+					local gap = aim - walk
+					local length = gap.Magnitude
+					walk += (if length == 0 or length ~= length then gap else gap.Unit) / 2
+					if not store:getBlockAt(engine:snapPosition(walk)) then break end
+				end
+			end
+			local cell = engine:snapPosition(walk)
+			if store:getBlockAt(cell) == nil then
+				return {placementPosition = cell}
+			end
+		end
+		return nil
+	end
+
+	return selector
+end
+
+--[[ The BlockPlacer class. placeBlock(cell, mouseInfo) runs the game's checks, then sends
+PlaceBlock {blockType, position, mouseBlockInfo?} through the block-engine client, exactly the
+keys of the game's strict interface, and returns nothing, as the game's does. blockData is the
+game's client place event's to set and stays out. ]]
+function knitless.newBlockPlacerClass(ctx, engine)
+	local lplr = ctx.lplr
+	local players = ctx.services.Players
+	local workspace = ctx.services.Workspace
+	local replicatedStorage = ctx.services.ReplicatedStorage
+	local paceFallback = {lastPlaceTimestamp = 0}
+	local underfoot = {
+		Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0), Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
+		Vector3.new(1, 0, 1), Vector3.new(-1, 0, -1), Vector3.new(-1, 0, 1), Vector3.new(1, 0, -1),
+		Vector3.new(0, -1, 0)
+	}
+
+	local function placeRate()
+		local constants = ctx.modules['ReplicatedStorage.TS.shared-constants']
+		local cps = type(constants) == 'table' and type(constants.CpsConstants) == 'table'
+			and tonumber(constants.CpsConstants.BLOCK_PLACE_CPS)
+		return if cps and cps > 0 then cps else 12
+	end
+
+	--[[ AUTOBRIDGE_Y_OFFSET, which block-placer registers through ConstantManager. ]]
+	local function bridgeLift()
+		local ok, value = pcall(function()
+			local module = replicatedStorage.rbxts_include.node_modules['@easy-games']['block-engine'].out.client.placement['block-placer']
+			return module:GetAttribute('ConstantManager_AUTOBRIDGE_Y_OFFSET')
+		end)
+		return ok and tonumber(value) or 3
+	end
+
+	--[[ The game's client place-event listeners this layer can stand in for: BlockCpsController's
+	pace (a placement less than half an interval early waits its turn, an earlier one is dropped,
+	and the latest waiter wins) on the BlockCpsController stand-in when there is one, then
+	MapController's deny regions and map bounds. Kit listeners (smoke, wall builder, gargoyle) are
+	not seen. ]]
+	local function clearToPlace(cell)
+		local controllers = ctx.controllers or {}
+		local pace = controllers.BlockCpsController or paceFallback
+		local interval = 1 / placeRate()
+		local remaining = interval - (workspace:GetServerTimeNow() - (tonumber(pace.lastPlaceTimestamp) or 0))
+		local ticket
+		if remaining > 0 then
+			if remaining >= interval * 0.5 then return false end
+			ticket = {}
+			pace.pendingPlacement = ticket
+			task.wait(remaining)
+		end
+		local map = controllers.MapController
+		if map then
+			local ok, denied = pcall(function()
+				return map:isInDenyRegion(cell) or map:isOutOfBounds(cell)
+			end)
+			if ok and denied then return false end
+		end
+		if ticket and pace.pendingPlacement ~= ticket then return false end
+		pace.lastPlaceTimestamp = workspace:GetServerTimeNow()
+		pace.pendingPlacement = nil
+		return true
+	end
+
+	--[[ How long a held copy can outlast a request the server never answers (the game's copy waits
+	for the answer however long it takes; this only stops a lost answer holding a cell for good),
+	and how long a copy stays, after a yes, for the server's part to take its cell. ]]
+	local HOLD_LIMIT, HOLD_SETTLE = 3, 0.5
+
+	--[[ The copy the game's placer makes, for the plain one-cell blocks (the greedy ones: wool,
+	clay, wood, stone, glass), which are what bridging places. Prefab blocks (traps, banners,
+	cannons, beds) get none, as nothing is built off them, and neither does a cell something
+	already stands in. Without the data file no handler is known to be greedy, so nothing is
+	held, as before. ]]
+	local function holdCell(blockType, cell)
+		local store = engine:getStore()
+		local handler = engine:getHandlerRegistry():getHandler(blockType)
+		if not (handler and handler.kind == 'greedy' and type(store.hold) == 'function') then return nil end
+		if store:getBlockAt(cell) ~= nil then return nil end
+		local ok, part = pcall(handler.place, handler, cell)
+		if not (ok and typeof(part) == 'Instance') then return nil end
+		part:SetAttribute('Block', true)
+		part:SetAttribute('ClientPlaced', true)
+		part:SetAttribute('PlacedByUserId', lplr.UserId)
+		if store:hold(cell, part) then
+			return part
+		end
+		part:Destroy()
+		return nil
+	end
+
+	--[[ Developer mode only: one line per 2 s of placing (sent, placed, turned down, how long the
+	answers took, how many held a copy, and the asks the pace or a deny region dropped), so a live
+	test reads the rate off F9 without a probe. ]]
+	local stats
+	local function count(field, value)
+		if shared.PistonwareDeveloper ~= true then return end
+		local now = os.clock()
+		if not stats then
+			stats = {since = now, sent = 0, placed = 0, refused = 0, failed = 0, held = 0, paced = 0, taken = 0, answers = {}}
+		end
+		if field == 'answer' then
+			table.insert(stats.answers, value)
+		elseif field then
+			stats[field] += value or 1
+		end
+		local span = now - stats.since
+		if span < 2 or not (field == 'placed' or field == 'refused' or field == 'failed') then return end
+		local answers = stats.answers
+		table.sort(answers)
+		local median = answers[math.max(1, math.ceil(#answers / 2))]
+		ctx.log(string.format('blocks: %.1f s: %d PlaceBlock sent (%.1f/s), %d placed, %d turned down, %d failed;'
+			..' answers in %s ms (%s-%s); %d held a copy; %d dropped by the pace or a deny region, %d on a taken cell',
+			span, stats.sent, stats.sent / span, stats.placed, stats.refused, stats.failed,
+			median and tostring(math.floor(median)) or '-', answers[1] and tostring(math.floor(answers[1])) or '-',
+			answers[#answers] and tostring(math.floor(answers[#answers])) or '-', stats.held, stats.paced, stats.taken))
+		stats = nil
+	end
+
+	local BlockPlacer = {}
+	BlockPlacer.__index = BlockPlacer
+
+	function BlockPlacer.new(clientManager, blockType)
+		return setmetatable({clientManager = clientManager, blockType = blockType}, BlockPlacer)
+	end
+
+	--[[ The game's placer without its animation and sound: after the game's checks and pace, a
+	copy of a plain block holds the cell in the store (holdCell) until the server answers, as the
+	game's own copy does, and the request is sent and answered in the caller's thread, as the
+	game's is. The type is read once, at the call, so a caller switching blockType while this
+	waits on the pace does not change what is sent. ]]
+	function BlockPlacer:placeBlock(cell, mouseInfo)
+		local blockType = self.blockType
+		if type(blockType) ~= 'string' or typeof(cell) ~= 'Vector3' then return nil end
+		if not engine:isAllowedPlacement(lplr, blockType, cell, 0, mouseInfo) then
+			count('taken')
+			return nil
+		end
+		if not clearToPlace(cell) or lplr:GetAttribute('DenyBlockPlace') == true then
+			count('paced')
+			return nil
+		end
+		local payload = {blockType = blockType, position = cell}
+		if type(mouseInfo) == 'table' then
+			local target = mouseInfo.target
+			payload.mouseBlockInfo = {
+				target = if target then {
+					blockRef = target.blockRef,
+					hitPosition = target.hitPosition,
+					hitNormal = target.hitNormal
+				} else nil,
+				placementPosition = mouseInfo.placementPosition
+			}
+		end
+		--[[ Answered in the caller's thread, as the game's placer is: its TS.try is a plain xpcall,
+		so BlockPlacer.placeBlock returns once the server has answered. The bed and wall builders
+		count their requests until then, and traps, banners and the cannon look for the block after
+		it. Scaffold and the other callers that must not wait call this from a thread of their own. ]]
+		count('sent')
+		local copy = holdCell(blockType, cell)
+		if copy then
+			count('held')
+			task.delay(HOLD_LIMIT, function()
+				engine:getStore():letGo(copy)
+			end)
+		end
+		local sentAt = os.clock()
+		local ok, result = pcall(function()
+			return ctx.blockNet:Get('PlaceBlock'):CallServer(payload)
+		end)
+		if copy then
+			local store = engine:getStore()
+			if ok and result and store:getBlockAt(cell) == copy then
+				-- A yes whose part has not reached the store yet: keep the cell a moment longer.
+				task.delay(HOLD_SETTLE, function()
+					store:letGo(copy)
+				end)
+			else
+				store:letGo(copy)
+			end
+		end
+		if not ok then
+			ctx.log('blocks: PlaceBlock failed: '..tostring(result))
+		end
+		count('answer', (os.clock() - sentAt) * 1000)
+		count(not ok and 'failed' or result and 'placed' or 'refused')
+		return nil
+	end
+
+	--[[ BlockPlacer.autoBridge: nothing when a block is just ahead, straight down onto the column
+	under you when looking steeply down, else the selector's outward search along your move
+	direction tipped 15 degrees down. ]]
+	function BlockPlacer:autoBridge(allowVoidSave)
+		if allowVoidSave == nil then
+			allowVoidSave = true
+		end
+		local character = engine:getCharacter(lplr)
+		local primary = character and character.PrimaryPart
+		if not primary then return nil end
+		local humanoid = character:FindFirstChild('Humanoid')
+		local move = ((humanoid and humanoid.MoveDirection) or Vector3.zero) * Vector3.new(1, 0, 1)
+		local facing = if move.Magnitude == 0 then primary.CFrame else CFrame.new(Vector3.zero, move)
+		local look = (facing * CFrame.Angles(-math.rad(15), 0, 0)).LookVector
+		local start = primary.CFrame.Position + Vector3.new(0, bridgeLift(), 0)
+		local params = RaycastParams.new()
+		params.CollisionGroup = 'Blocks'
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		local bodies = {}
+		for _, player in players:GetPlayers() do
+			if player.Character then
+				table.insert(bodies, player.Character)
+			end
+			local acting = engine:getCharacter(player)
+			if acting and acting ~= player.Character then
+				table.insert(bodies, acting)
+			end
+		end
+		params.FilterDescendantsInstances = bodies
+		local ahead = workspace:Raycast(start, look, params)
+		for _ = 1, 32 do
+			if not (ahead and ahead.Instance:IsA('BasePart') and ahead.Instance:GetAttribute('gamecore_GameQueryIgnore') == true) then break end
+			params:AddToFilter(ahead.Instance)
+			ahead = workspace:Raycast(start, look, params)
+		end
+		if ahead and engine:getBlockInstanceFromChild(ahead.Instance) then return nil end
+		local camera = workspace.CurrentCamera
+		if camera and math.deg((camera.CFrame:ToOrientation())) < -65 then
+			local position = primary.Position
+			for depth = 0, 3 do
+				local cell = engine:getBlockPosition(position - Vector3.new(0, 3, 0) * depth)
+				for _, offset in underfoot do
+					if engine:getStore():getBlockAt(cell + offset) ~= nil then
+						self:placeBlock(cell)
+						return nil
+					end
+				end
+			end
+		end
+		local info = self.clientManager:getBlockSelector():getMouseInfo(0, {
+			searchOutward = true,
+			ray = Ray.new(start, look),
+			allowVoidSave = allowVoidSave
+		})
+		if info then
+			self:placeBlock(info.placementPosition, info)
+		end
+		return nil
+	end
+
+	--[[ The game's own placer already answers the player's clicks and taps, so this one binds
+	nothing and has nothing to unbind. ]]
+	function BlockPlacer:enable() end
+
+	function BlockPlacer:disable() end
+
+	function BlockPlacer:getBlockType()
+		return self.blockType
+	end
+
+	return BlockPlacer
+end
+
+--[[ BuilderUtil.getFortificationCost: one {currency, amount} from the block's base shop entry
+(white wool's for any wool), the price times 1.5 for blast-proof blocks or 2.25 otherwise, over the
+stack size; nil when the shop has no entry. It reads the default ShopItems list, which is what
+BedwarsShop.getShopItem(type, nil) answers outside a shop's own component. ]]
+function knitless.newBuilderUtil(ctx, itemMeta)
+	local byType
+
+	local function shopItem(itemType)
+		if not byType then
+			byType = {}
+			local ok, items = pcall(ctx.data, 'ShopItems')
+			if ok and type(items) == 'table' then
+				for _, item in items do
+					if type(item) == 'table' and item.itemType ~= nil then
+						byType[item.itemType] = item
+					end
+				end
+			end
+		end
+		return byType[itemType]
+	end
+
+	local util = {FORTIFY_RANGE = 18}
+
+	--[[ An unknown type errors, as getItemMeta(type).block does in the game. ]]
+	function util.getFortificationCost(itemType)
+		local meta = itemMeta[itemType]
+		if type(meta) ~= 'table' then
+			error('no item meta for '..tostring(itemType), 2)
+		end
+		local block = meta.block
+		local item = shopItem(if block and block.wool then 'wool_white' else itemType)
+		if not item then return nil end
+		local price, amount = tonumber(item.price), tonumber(item.amount)
+		if not (price and amount and amount > 0) then return nil end
+		local factor = if block and block.blastProof then 1.5 else 2.25
+		return {{currency = item.currency, amount = math.ceil(price * factor / amount)}}
+	end
+
+	return util
+end
+
+--[[ Fills the block-engine module paths the bootstrap requires, and publishes the store, engine,
+client engine and placer class on knitless for the other slices. ]]
+function knitless.buildBlocks(ctx)
+	local okMeta, itemMeta = pcall(ctx.data, 'ItemMeta')
+	itemMeta = okMeta and type(itemMeta) == 'table' and itemMeta or nil
+	if not itemMeta then
+		ctx.log('blocks: no ItemMeta in the data file; block handlers are guessed from the blocks')
+	end
+	if not ctx.blockNet then
+		ctx.log('blocks: the block-engine remotes folder is missing; PlaceBlock and DamageBlock are unavailable')
+	end
+
+	local registry = knitless.newBlockRegistry(ctx, itemMeta)
+	local store = knitless.newBlockStore(ctx, registry)
+	local engine = knitless.newBlockEngine(ctx, store, registry, itemMeta or {})
+	local selector = knitless.newBlockSelector(ctx, engine)
+	local BlockPlacer = knitless.newBlockPlacerClass(ctx, engine)
+
+	--[[ The game's IClientBlockEngine instance from PlayerScripts.TS.lib.block-engine. ]]
+	local clientEngine = {config = {}, blockSelector = selector}
+	function clientEngine:getBlockSelector()
+		return self.blockSelector
+	end
+	function clientEngine:getConfig()
+		return self.config
+	end
+	--[[ This layer's placer plays no place sound. ]]
+	function clientEngine:getBlockPlacementAudioController()
+		return {playPlaceAudio = function() end}
+	end
+	--[[ The store already follows the block tag. ]]
+	function clientEngine:startBlockReplication() end
+
+	local remotes = {
+		BlockEngineRemotes = {Client = ctx.blockNet},
+		DamageBlockResponse = {FAILED = 'failed', DAMAGED = 'damaged', DESTROYED = 'destroyed', CANCELLED = 'cancelled'}
+	}
+
+	knitless.blockStore = store
+	knitless.blockEngine = engine
+	knitless.clientBlockEngine = clientEngine
+	knitless.BlockPlacer = BlockPlacer
+
+	local base = 'ReplicatedStorage.rbxts_include.node_modules.@easy-games.block-engine.out'
+	ctx.modules[base] = {BlockEngine = engine, BlockEngineRemotes = remotes.BlockEngineRemotes}
+	ctx.modules[base..'.shared.remotes'] = remotes
+	ctx.modules[base..'.client.placement.block-placer'] = {BlockPlacer = BlockPlacer}
+	ctx.modules['PlayerScripts.TS.lib.block-engine.client-block-engine'] = {ClientBlockEngine = clientEngine}
+	ctx.modules['ReplicatedStorage.TS.games.bedwars.kit.kits.builder.builder-util'] = {
+		BuilderUtil = knitless.newBuilderUtil(ctx, itemMeta or {})
+	}
+end
+
+--[[ Controllers slice of the knitless layer: the stand-ins behind Knit.Controllers, Flamework's
+resolver for the three controllers the bootstrap takes from it, and KnockbackUtil and
+StatusEffectUtil. Each stand-in offers what the bootstrap, the loader's modules and the payload read,
+with the game's signatures. They work from instances, attributes, tags and remotes only. The game's
+own controllers keep running beside them and stay out of reach, so where a value lives only inside
+one of those, the stand-in says what it does instead. ]]
+
+--[[ The shared state every stand-in here reads: services, the dumped tables it needs, and the
+animation ids it plays. ]]
+function knitless.ctrlShared(ctx)
+	local services = ctx.services
+	local h = {
+		ctx = ctx,
+		lplr = ctx.lplr,
+		players = services.Players,
+		workspace = services.Workspace,
+		replicatedStorage = services.ReplicatedStorage,
+		collection = services.CollectionService,
+		inputService = services.UserInputService,
+		tweenService = services.TweenService,
+		debris = services.Debris,
+		logged = {},
+		-- Tracks this file plays, so its own swings never count as the player's.
+		ownTracks = setmetatable({}, {__mode = 'k'})
+	}
+	local function data(name)
+		local ok, value = pcall(ctx.data, name)
+		return ok and type(value) == 'table' and value or nil
+	end
+	h.animationType = data('AnimationType') or {}
+	h.gameSound = data('GameSound') or {}
+	h.kitMeta = knitless.ctrlExport(h, 'ReplicatedStorage.TS.games.bedwars.kit.bedwars-kit-meta', 'BedwarsKitMeta')
+		or data('BedwarsKitMeta') or {}
+	h.combatData = data('CombatConstant') or {RAYCAST_SWORD_CHARACTER_DISTANCE = 14.4, REGION_SWORD_CHARACTER_DISTANCE = 12.6}
+	h.swordsData = data('SwordsConstants') or {swordSwingBufferMultiplier = 0.4}
+	-- Not in the current dump; the ability stand-in uses it when a later dump carries it.
+	h.abilityMeta = data('AbilityMeta')
+
+	--[[ The swing and use animations this file plays itself (prod-animations), for when the
+	registry's GameAnimationUtil does not know one. ]]
+	h.animationIdByName = {
+		SWORD_SWING = 'rbxassetid://4947108314',
+		NEW_SWORD_SWING = 'rbxassetid://138277477587269',
+		FP_SWING_SWORD = 'rbxassetid://8089691925',
+		FP_USE_ITEM = 'rbxassetid://8089691925',
+		NEW_SWORD_SWING_FP = 'rbxassetid://89650060348854',
+		DAGGER_SWING_1 = 'rbxassetid://13836234644',
+		DAGGER_SWING_2 = 'rbxassetid://13816190401',
+		DAGGER_SWING_FP = 'rbxassetid://13816205964',
+		DAGGER_SWING_2_FP = 'rbxassetid://13816207519',
+		GREAT_HAMMER_SWING_1 = 'rbxassetid://13802346346',
+		GREAT_HAMMER_SWING_2 = 'rbxassetid://13802354449',
+		GREAT_HAMMER_SWING_1_FP = 'rbxassetid://13802501742',
+		GREAT_HAMMER_SWING_2_FP = 'rbxassetid://13802503894',
+		SCYTHE_SWING = 'rbxassetid://8479246017',
+		SCYTHE_SLASH_1 = 'rbxassetid://13802531000',
+		SCYTHE_SLASH_2 = 'rbxassetid://13816174473',
+		SCYTHE_SLASH_1_FP = 'rbxassetid://13802569648',
+		SCYTHE_SLASH_2_FP = 'rbxassetid://13816181777',
+		TWIRLBLADE_ATTACK_1 = 'rbxassetid://8789340437',
+		TWIRLBLADE_ATTACK_2 = 'rbxassetid://8789342166',
+		FP_TWIRLBLADE_ATTACK_1 = 'rbxassetid://8795210389',
+		FP_TWIRLBLADE_ATTACK_2 = 'rbxassetid://8795211816',
+		BEAR_CLAWS_SWIPE = 'rbxassetid://9440191148',
+		INFERNO_SWORD_SPIN = 'rbxassetid://9611595934',
+		FP_INFERNO_SWORD_SPIN = 'rbxassetid://9611585335',
+		FROSTY_HAMMER_1 = 'rbxassetid://11824356500',
+		FROSTY_HAMMER_2 = 'rbxassetid://11824358904',
+		FROSTY_HAMMER_3 = 'rbxassetid://11824362467',
+		LASER_SWORD_SWING_1 = 'rbxassetid://11710365271',
+		LASER_SWORD_SWING_2 = 'rbxassetid://11710363907',
+		KNIGHT_SHIELD_THIRD_PERSON_BASH = 'rbxassetid://140300979233839'
+	}
+	h.animationIds = {}
+	for name, id in h.animationIdByName do
+		local number = h.animationType[name]
+		if number ~= nil then
+			h.animationIds[number] = id
+		end
+	end
+	return h
+end
+
+--[[ ctx.modules[path][key], or nil. ]]
+function knitless.ctrlExport(h, path, key)
+	local module = h.ctx.modules[path]
+	local value = type(module) == 'table' and module[key] or nil
+	return value
+end
+
+--[[ One log line per distinct message, for anything that can repeat on every swing or frame. ]]
+function knitless.ctrlLog(h, message)
+	if h.logged[message] then return end
+	h.logged[message] = true
+	h.ctx.log('controllers: '..message)
+end
+
+--[[ Registers a stand-in, unless an earlier slice already made that controller. ]]
+function knitless.ctrlPut(h, name, controller)
+	local existing = h.ctx.controllers[name]
+	if existing ~= nil then
+		knitless.ctrlLog(h, name..' was already provided by another slice; kept that one')
+		return existing
+	end
+	h.ctx.controllers[name] = controller
+	return controller
+end
+
+--[[ The same, for a module export table. ]]
+function knitless.ctrlModule(h, path, exports)
+	if h.ctx.modules[path] ~= nil then
+		knitless.ctrlLog(h, path..' was already provided by another slice; kept that one')
+		return
+	end
+	h.ctx.modules[path] = exports
+end
+
+--[[ A controller whose methods pistonware swaps for a no-op to switch a game behaviour off
+(deflateBalloon, addGameNametag). That swap never reaches the game's controller, so the swap itself
+is what is watched: onSwap(key, replaced) runs each time a method in methods is set, replaced being
+whether it is now something other than this file's own. Methods are served from a shadow table and
+never stored on the controller, so every later assignment is seen as well. Other fields are stored
+as usual. ]]
+function knitless.ctrlWatched(fields, methods, onSwap)
+	local shadow = {}
+	return setmetatable(fields, {
+		__index = function(_, key)
+			local value = shadow[key]
+			if value == nil then
+				value = methods[key]
+			end
+			return value
+		end,
+		__newindex = function(self, key, value)
+			if methods[key] == nil then
+				rawset(self, key, value)
+				return
+			end
+			shadow[key] = value
+			onSwap(key, value ~= nil and value ~= methods[key])
+		end
+	})
+end
+
+--[[ The remotes client the scripts use (bedwars.Client), so sends from here pass through the
+loader's Client.Get wrapper the way the game's own sends do on a full executor. ]]
+function knitless.ctrlRemote(h, name)
+	local remotes = h.ctx.modules['ReplicatedStorage.TS.remotes']
+	local client = type(remotes) == 'table' and type(remotes.default) == 'table' and remotes.default.Client or h.ctx.net
+	local ok, remote = pcall(client.Get, client, name)
+	if ok and type(remote) == 'table' then
+		return remote
+	end
+	knitless.ctrlLog(h, 'remote '..name..' is unavailable: '..tostring(remote))
+	return nil
+end
+
+--[[ Listens to a server event of the main remotes folder, in a thread of its own because the
+lookup can wait for the remote to replicate. ]]
+function knitless.ctrlListen(h, name, callback)
+	task.spawn(function()
+		local ok, remote = pcall(h.ctx.net.Get, h.ctx.net, name)
+		if not (ok and type(remote) == 'table') then
+			knitless.ctrlLog(h, 'cannot listen to '..name..': '..tostring(remote))
+			return
+		end
+		local connected, connection = pcall(remote.Connect, remote, function(...)
+			local fine, err = pcall(callback, ...)
+			if not fine then
+				knitless.ctrlLog(h, name..' handler failed: '..tostring(err))
+			end
+		end)
+		if connected then
+			h.ctx.clean(connection)
+		end
+	end)
+end
+
+--[[ A RemoteEvent of a Flamework events folder (ReplicatedStorage['events-'..folder]), looked up
+at the time of use: the folder can replicate late. ]]
+function knitless.ctrlEventRemote(h, folderName, remoteName)
+	local ok, folder = pcall(h.ctx.events, folderName)
+	local remote = ok and typeof(folder) == 'Instance' and folder:FindFirstChild(remoteName) or nil
+	if remote and remote:IsA('RemoteEvent') then
+		return remote
+	end
+	knitless.ctrlLog(h, remoteName..' is not in events-'..folderName)
+	return nil
+end
+
+--[[ A plain FireServer on a Flamework event, as the game's networking event sends it. ]]
+function knitless.ctrlFire(h, folderName, remoteName, ...)
+	local remote = knitless.ctrlEventRemote(h, folderName, remoteName)
+	if not remote then return false end
+	remote:FireServer(...)
+	return true
+end
+
+--[[ Listens to a server event of a Flamework events folder once the folder is there. ]]
+function knitless.ctrlListenFolder(h, folderName, remoteName, callback)
+	task.spawn(function()
+		local folder = h.replicatedStorage:WaitForChild('events-'..folderName, 60)
+		local remote = folder and folder:WaitForChild(remoteName, 30)
+		if not (remote and remote:IsA('RemoteEvent')) then
+			knitless.ctrlLog(h, 'cannot listen to '..remoteName..' in events-'..folderName)
+			return
+		end
+		h.ctx.clean(remote.OnClientEvent:Connect(function(...)
+			local fine, err = pcall(callback, ...)
+			if not fine then
+				knitless.ctrlLog(h, remoteName..' handler failed: '..tostring(err))
+			end
+		end))
+	end)
+end
+
+--[[ Runs callback(character, humanoid) for the current character and every one after, once its
+Humanoid is there. The connections callback returns are dropped when the next character comes. ]]
+function knitless.ctrlOnCharacter(h, callback)
+	local current = {}
+	local function drop()
+		for _, connection in current do
+			pcall(function()
+				connection:Disconnect()
+			end)
+		end
+		table.clear(current)
+	end
+	local function attach(character)
+		drop()
+		task.spawn(function()
+			local humanoid = character:WaitForChild('Humanoid', 10)
+			if not humanoid or h.lplr.Character ~= character then return end
+			local ok, connections = pcall(callback, character, humanoid)
+			if not ok then
+				knitless.ctrlLog(h, 'character hook failed: '..tostring(connections))
+			elseif type(connections) == 'table' and h.lplr.Character == character then
+				for _, connection in connections do
+					table.insert(current, connection)
+				end
+			end
+		end)
+	end
+	h.ctx.clean(h.lplr.CharacterAdded:Connect(attach))
+	h.ctx.clean(drop)
+	if h.lplr.Character then
+		attach(h.lplr.Character)
+	end
+end
+
+--[[ The store stand-in's state, or nil before it exists. ]]
+function knitless.ctrlState(h)
+	local store = h.ctx.store
+	if type(store) ~= 'table' or type(store.getState) ~= 'function' then return nil end
+	local ok, state = pcall(store.getState, store)
+	return ok and type(state) == 'table' and state or nil
+end
+
+--[[ Game.matchState: 0 before the match, 1 running, 2 over. ]]
+function knitless.ctrlMatchState(h)
+	local state = knitless.ctrlState(h)
+	local game = state and state.Game
+	return game and tonumber(game.matchState) or 0
+end
+
+--[[ item-meta for an item type, from the registry's table (the one bedwars.ItemMeta is). ]]
+function knitless.ctrlItemMeta(h, itemType)
+	if type(itemType) ~= 'string' then return nil end
+	local items = knitless.ctrlExport(h, 'ReplicatedStorage.TS.item.item-meta', 'items')
+	return type(items) == 'table' and items[itemType] or nil
+end
+
+--[[ CombatConstant, the table Reach rewrites, read at the time of use. ]]
+function knitless.ctrlCombat(h)
+	local constants = knitless.ctrlExport(h, 'ReplicatedStorage.TS.combat.combat-constant', 'CombatConstant')
+	return type(constants) == 'table' and constants or h.combatData
+end
+
+--[[ The tool in your hand (Character.HandInvItem) and its item meta. ]]
+function knitless.ctrlHand(h)
+	local character = h.lplr.Character
+	local holder = character and character:FindFirstChild('HandInvItem')
+	local tool = holder and holder:IsA('ObjectValue') and holder.Value or nil
+	if not tool then return nil, nil end
+	return tool, knitless.ctrlItemMeta(h, tool.Name)
+end
+
+function knitless.ctrlAlive(model)
+	local humanoid = model and model:FindFirstChildOfClass('Humanoid')
+	return humanoid ~= nil and humanoid.Health > 0
+end
+
+--[[ The entity a part belongs to: a player's character or a model tagged 'entity'. ]]
+function knitless.ctrlEntityOf(h, part)
+	local node = part
+	while node and node ~= h.workspace do
+		if node:IsA('Model') and (h.collection:HasTag(node, 'entity') or h.players:GetPlayerFromCharacter(node)) then
+			return node
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
+--[[ Whether you may hit this entity: alive, not you, and on another team (the Team attribute of
+its player, or of the model itself for a mob). ]]
+function knitless.ctrlCanAttack(h, model)
+	if not model or model == h.lplr.Character or not knitless.ctrlAlive(model) then return false end
+	local player = h.players:GetPlayerFromCharacter(model)
+	local team
+	if player then
+		team = player:GetAttribute('Team')
+	else
+		team = model:GetAttribute('Team')
+	end
+	return team == nil or team ~= h.lplr:GetAttribute('Team')
+end
+
+--[[ GameQueryUtil's raycast: parts the game marks gamecore_GameQueryIgnore are passed through. ]]
+function knitless.ctrlQueryCast(h, origin, direction, exclude)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local list = table.clone(exclude)
+	for _ = 1, 16 do
+		params.FilterDescendantsInstances = list
+		local hit = h.workspace:Raycast(origin, direction, params)
+		if not hit or not (hit.Instance:IsA('BasePart') and hit.Instance:GetAttribute('gamecore_GameQueryIgnore') == true) then
+			return hit
+		end
+		table.insert(list, hit.Instance)
+	end
+	return nil
+end
+
+--[[ CameraPerspectiveController's own test: 0 (first person) when the camera is within a stud of
+its focus, else 1. ]]
+function knitless.ctrlPerspective(h)
+	local camera = h.workspace.CurrentCamera
+	if camera and (camera.CFrame.Position - camera.Focus.Position).Magnitude <= 1 then
+		return 0
+	end
+	return 1
+end
+
+--[[ An animation type's asset id: the registry's GameAnimationUtil first, then this file's list.
+A string that already is an asset id passes through. ]]
+function knitless.ctrlAssetId(h, animationType)
+	if animationType == nil then return nil end
+	if type(animationType) == 'string' and animationType:find('^rbxassetid://') then
+		return animationType
+	end
+	local util = knitless.ctrlExport(h, 'ReplicatedStorage.TS.animation.animation-util', 'GameAnimationUtil')
+	if type(util) == 'table' and type(util.getAssetId) == 'function' then
+		local ok, id = pcall(util.getAssetId, util, animationType)
+		if ok and type(id) == 'string' and id ~= '' then
+			return id
+		end
+	end
+	return h.animationIds[animationType] or h.animationIdByName[animationType]
+end
+
+--[[ Plays an asset on a model's Animator (a character or the viewmodel), as the game's controllers
+do: Action priority unless told otherwise, gone once it ends. ]]
+function knitless.ctrlPlayTrack(h, model, assetId, options)
+	if typeof(model) ~= 'Instance' or type(assetId) ~= 'string' then return nil end
+	local humanoid = model:FindFirstChildOfClass('Humanoid')
+	local animator = humanoid and humanoid:FindFirstChildOfClass('Animator')
+	if not animator then return nil end
+	local animation = Instance.new('Animation')
+	animation.AnimationId = assetId
+	local ok, track = pcall(animator.LoadAnimation, animator, animation)
+	if not (ok and track) then return nil end
+	h.ownTracks[track] = true
+	track.Looped = type(options) == 'table' and options.looped == true or false
+	track.Priority = type(options) == 'table' and options.priority or Enum.AnimationPriority.Action
+	if not (type(options) == 'table' and options.reuseAfterStop) then
+		track.Ended:Once(function()
+			track:Destroy()
+		end)
+	end
+	track:Play()
+	return track
+end
+
+--[[ A sound by asset id: through the registry's AudioManager when there is one, else a Sound on
+the camera that removes itself. ]]
+function knitless.ctrlPlaySound(h, assetId)
+	if type(assetId) ~= 'string' or assetId == '' then return end
+	local audio = knitless.ctrlExport(h, 'ReplicatedStorage.rbxts_include.node_modules.@easy-games.game-core.out', 'AudioManager')
+	if type(audio) == 'table' and type(audio.playAudio) == 'function' then
+		pcall(audio.playAudio, audio, assetId)
+		return
+	end
+	local camera = h.workspace.CurrentCamera
+	if not camera then return end
+	local sound = Instance.new('Sound')
+	sound.SoundId = assetId
+	sound.Parent = camera
+	sound:Play()
+	h.debris:AddItem(sound, 5)
+end
+
+--[[ Whether an input is the Attack binding, from KeybindLoadController's keybinds. ]]
+function knitless.ctrlIsAttackInput(h, input)
+	local keyboard, gamepad = Enum.UserInputType.MouseButton1, Enum.KeyCode.ButtonR2
+	pcall(function()
+		local binds = h.ctx.controllers.KeybindLoadController.loadedKeybinds
+		keyboard = binds.keyboard.controlActions.Attack or keyboard
+		gamepad = binds.gamepad.controlActions.Attack or gamepad
+	end)
+	return input.UserInputType == keyboard or input.KeyCode == keyboard or input.KeyCode == gamepad
+end
+
+--[[ SwordController, after sword-controller: state, casting, cooldowns and targeting. ]]
+function knitless.ctrlSword(h)
+	local lplr, workspace = h.lplr, h.workspace
+	local sword = {
+		Name = 'SwordController',
+		lastAttack = 0,
+		lastSwing = 0,
+		disableSwingState = false,
+		holdAutoSwingDisabled = false,
+		swingCounter = 0,
+		lastChargedAttackTimeMap = {}
+	}
+
+	function sword:getHandItem()
+		local tool = knitless.ctrlHand(h)
+		return tool and {tool = tool, itemType = tool.Name, amount = tool:GetAttribute('Amount')} or nil
+	end
+
+	function sword:isRelevantItem(item)
+		local meta = type(item) == 'table' and knitless.ctrlItemMeta(h, item.itemType) or nil
+		return meta ~= nil and meta.sword ~= nil
+	end
+
+	function sword:getRemainingCastingTime()
+		local casting = lplr:GetAttribute('IsCasting')
+		if casting == true then return 0.3 end
+		if type(casting) == 'number' and casting == casting and casting ~= 0 then
+			return math.max(casting - workspace:GetServerTimeNow(), 0)
+		end
+		return 0
+	end
+
+	--[[ The game's flag is flipped by a few kit controllers (elk, sorcerer, spirit gardener) that
+	this file cannot see; a cast (IsCasting) is the part of it that shows on the player. ]]
+	function sword:getSwordSwingDisabled()
+		return self.disableSwingState or self:getRemainingCastingTime() > 0
+	end
+
+	function sword:toggleSwordSwing(disabled)
+		self.disableSwingState = disabled
+	end
+
+	function sword:isClickingTooFast()
+		if tick() - self.lastSwing < 1 / 9 then
+			return true
+		end
+		self.lastSwing = tick()
+		return false
+	end
+
+	function sword:getRemainingSwingCooldown(itemType)
+		local meta = knitless.ctrlItemMeta(h, itemType)
+		local data = meta and meta.sword
+		if not data or self.lastAttack == 0 then return 0 end
+		return math.max(self.lastAttack + (data.attackSpeed or 0) - workspace:GetServerTimeNow(), 0)
+	end
+
+	function sword:getRemainingChargeCooldown(itemType)
+		local meta = knitless.ctrlItemMeta(h, itemType)
+		local charged = meta and meta.sword and meta.sword.chargedAttack
+		local last = self.lastChargedAttackTimeMap[itemType] or 0
+		if not (charged and charged.attackCooldown) or last == 0 then return 0 end
+		return math.max(last + charged.attackCooldown - workspace:GetServerTimeNow(), 0)
+	end
+
+	function sword:isOnChargeAttackCooldown(itemType)
+		local meta = knitless.ctrlItemMeta(h, itemType)
+		local charged = meta and meta.sword and meta.sword.chargedAttack
+		if not charged then return false end
+		if self:getRemainingCastingTime() > 0 then return true end
+		if charged.attackCooldown == nil then return false end
+		return self:getRemainingSwingCooldown(itemType) > 0 or self:getRemainingChargeCooldown(itemType) > 0
+	end
+
+	--[[ canSee: a clear line from your feet to theirs, from five studs up to five studs up, or
+	between the two, either way along, past anything tagged DontBlockSwordRaycast. ]]
+	function sword:canSee(target)
+		local character = lplr.Character
+		if not (character and target) then return false end
+		local function feet(model)
+			local root = model.PrimaryPart
+			if not root then return nil end
+			local humanoid = model:FindFirstChildWhichIsA('Humanoid')
+			return root.Position - Vector3.new(0, (humanoid and humanoid.HipHeight or 0) + root.Size.Y / 2, 0)
+		end
+		local from, to = feet(character), feet(target)
+		if not (from and to) then return false end
+		local humanoid = character:FindFirstChildWhichIsA('Humanoid')
+		local scale = humanoid and humanoid:FindFirstChild('BodyHeightScale')
+		local lift = Vector3.new(0, 5 * (scale and scale.Value or 1), 0)
+		local ignore = {character, target}
+		for _, part in h.collection:GetTagged('DontBlockSwordRaycast') do
+			table.insert(ignore, part)
+		end
+		local function clear(a, b)
+			return not (knitless.ctrlQueryCast(h, a, b - a, ignore) or knitless.ctrlQueryCast(h, b, a - b, ignore))
+		end
+		local fromTop, toTop = from + lift, to + lift
+		return clear(from, to) or clear(fromTop, toTop) or clear((from + fromTop) / 2, (to + toTop) / 2)
+	end
+
+	--[[ The first entity you may hit in the box ahead of you, while the match runs. The game asks
+	for entities touching the box; here an entity counts when its PrimaryPart is inside it. Answers
+	with the entity's model. ]]
+	function sword:getTargetInRegion(range)
+		if knitless.ctrlMatchState(h) ~= 1 or type(range) ~= 'number' then return nil end
+		local character = lplr.Character
+		local root = character and character.PrimaryPart
+		if not root then return nil end
+		local humanoid = character:FindFirstChild('Humanoid')
+		local height = math.max(3, humanoid and humanoid.HipHeight or 1.5)
+		local center = root.Position + root.CFrame.LookVector.Unit * (range / 2)
+		for _, model in h.collection:GetTagged('entity') do
+			local part = model:IsA('Model') and model.PrimaryPart
+			if part and model ~= character then
+				local offset = part.Position - center
+				if math.abs(offset.X) <= range / 2 and math.abs(offset.Y) <= height and math.abs(offset.Z) <= range / 2
+					and (part.Position - root.Position).Magnitude <= range
+					and knitless.ctrlCanAttack(h, model) and self:canSee(model) then
+					return model
+				end
+			end
+		end
+		return nil
+	end
+
+	knitless.ctrlSwordSwing(h, sword)
+	knitless.ctrlSwordEffect(h, sword)
+	knitless.ctrlSwordStamps(h, sword)
+	knitless.ctrlPut(h, 'SwordController', sword)
+end
+
+--[[ The swing itself, as sword-controller sends it: SwordHit for a target, SwordSwingMiss for
+none. ]]
+function knitless.ctrlSwordSwing(h, sword)
+	local lplr, workspace = h.lplr, h.workspace
+
+	function sword:sendServerRequest(target, chargeRatio, options)
+		if self.disableSwingState then return false end
+		local character = lplr.Character
+		local camera = workspace.CurrentCamera
+		if not (character and character.PrimaryPart and camera and target) then return false end
+		local tool = knitless.ctrlHand(h)
+		if not tool then return false end
+		local raycast
+		if type(options) == 'table' and options.rayDirection then
+			raycast = {cameraPosition = {value = camera.CFrame.Position}, cursorDirection = {value = options.rayDirection}}
+		end
+		local swingStart = type(options) == 'table' and options.swingStartTime or nil
+		local remote = knitless.ctrlRemote(h, 'SwordHit')
+		if not remote then return false end
+		remote:SendToServer({
+			weapon = tool,
+			entityInstance = target,
+			validate = {
+				raycast = raycast,
+				targetPosition = {value = target:GetPivot().Position},
+				selfPosition = {value = character:GetPivot().Position}
+			},
+			chargedAttack = {chargeRatio = chargeRatio},
+			timeSinceSwingStart = if swingStart and swingStart ~= 0 then workspace:GetServerTimeNow() - swingStart else nil
+		})
+		return true
+	end
+
+	--[[ attackEntity(targetModel, rayDirection, {chargeTime}, {playAnimation, playSound}). A swing
+	inside the cooldown is cancelled as the game's SwordSwing handler cancels it: still animated for
+	most swords, and replayed when the cooldown ends soon enough. The cooldown bar is the game's UI
+	and is left out. ]]
+	function sword:attackEntity(target, direction, charge, effect)
+		if self.disableSwingState or self:getRemainingCastingTime() > 0 then return false end
+		local character = lplr.Character
+		local root = character and character.PrimaryPart
+		if not (root and workspace.CurrentCamera) then return false end
+		local tool, meta = knitless.ctrlHand(h)
+		local data = meta and meta.sword
+		if not data then return false end
+		local skin = tool:GetAttribute('ItemSkin')
+		if skin == '' then skin = nil end
+		if target then
+			local targetRoot = target.PrimaryPart
+			if not (target.Parent and targetRoot) then return false end
+			local range = data.attackRange
+			if not range or range == 0 then
+				range = knitless.ctrlCombat(h).RAYCAST_SWORD_CHARACTER_DISTANCE or 14.4
+			end
+			if range + 2 <= (root.Position - targetRoot.Position).Magnitude then return false end
+		end
+		local ratio = 0
+		local charged = data.chargedAttack
+		local chargeTime = type(charge) == 'table' and charge.chargeTime or nil
+		if charged and chargeTime and chargeTime ~= 0 then
+			ratio = math.clamp(chargeTime / (charged.maxChargeTimeSec or 1), 0, 1)
+		end
+
+		local now = workspace:GetServerTimeNow()
+		local speed = data.attackSpeed or 0
+		local elapsed = now - self.lastAttack
+		if elapsed < speed then
+			if not data.respectAttackSpeedForEffects and not data.applyCooldownOnMiss and data.skipSwingEffects ~= true then
+				self:playSwordEffect(meta, ratio >= 1, {itemSkin = skin})
+			end
+			local wait = (speed - elapsed) * 1.01
+			local swords = knitless.ctrlExport(h, 'ReplicatedStorage.TS.combat.combat-constant', 'SwordsConstants')
+			swords = type(swords) == 'table' and swords or h.swordsData
+			local buffer = tonumber(swords.swordSwingBufferMultiplier) or 0.4
+			if wait < math.min(speed * buffer, 0.2) and not self.bufferedSwing then
+				self.bufferedSwing = true
+				task.delay(wait, function()
+					self.bufferedSwing = nil
+					if target and self:attackEntity(target, direction, nil, {playAnimation = false, playSound = false}) then
+						return
+					end
+					self:swingSwordInRegion()
+				end)
+			end
+			return false
+		end
+
+		if not data.skipSwingEffects then
+			self:playSwordEffect(meta, ratio >= 1, {
+				playAnimation = type(effect) == 'table' and effect.playAnimation or nil,
+				playSound = type(effect) == 'table' and effect.playSound or nil,
+				itemSkin = skin
+			})
+		end
+		if ratio == 1 then
+			self.lastChargedAttackTimeMap[tool.Name] = now
+		end
+		if target then
+			self.lastAttack = now
+			self:sendServerRequest(target, ratio, {rayDirection = direction})
+		else
+			if data.applyCooldownOnMiss == true then
+				self.lastAttack = now
+			end
+			local multiHit = data.multiHitCheckDurationSec
+			if not multiHit or multiHit == 0 then
+				local remote = knitless.ctrlRemote(h, 'SwordSwingMiss')
+				if remote then
+					remote:SendToServer({weapon = tool, chargeRatio = ratio})
+				end
+			end
+		end
+		return true
+	end
+
+	--[[ A swing at whatever is in the box ahead. A weapon with multiHitCheckDurationSec keeps
+	looking for a target that long after a miss, as the game's does; here in a thread of its own. ]]
+	function sword:swingSwordInRegion(chargeTime)
+		local _, meta = knitless.ctrlHand(h)
+		local data = meta and meta.sword
+		if not data then return nil end
+		local mobile = h.inputService.TouchEnabled and not h.inputService.MouseEnabled
+		local range = 3.8 * 3
+		if data.attackRange and data.attackRange ~= 0 then
+			range = data.attackRange
+		elseif mobile then
+			range = knitless.ctrlCombat(h).REGION_SWORD_CHARACTER_DISTANCE or range
+		end
+		local charge = if chargeTime and chargeTime ~= 0 then {chargeTime = chargeTime} else nil
+		local target = self:getTargetInRegion(range, chargeTime)
+		if not self:attackEntity(target, nil, charge) then return nil end
+		local window = data.multiHitCheckDurationSec or 0
+		if target or window == 0 then return nil end
+		local started = workspace:GetServerTimeNow()
+		local ratio = 0
+		if data.chargedAttack and chargeTime and chargeTime ~= 0 then
+			ratio = math.clamp(chargeTime / (data.chargedAttack.maxChargeTimeSec or 1), 0, 1)
+		end
+		task.spawn(function()
+			local left = window
+			for _ = 1, math.ceil(window / 0.1) do
+				task.wait(math.min(0.1, left))
+				left -= 0.1
+				local found = self:getTargetInRegion(range, chargeTime)
+				if found then
+					self:sendServerRequest(found, ratio, {swingStartTime = started})
+					return
+				end
+			end
+		end)
+		return nil
+	end
+
+	--[[ The click: a ray from the mouse (or a screen point) up to 200 studs; an entity it meets in
+	reach and in sight is hit, anything else falls back to the box ahead. ]]
+	local function swingAlong(self, ray, chargeTime)
+		local character = lplr.Character
+		local root = character and character.PrimaryPart
+		local tool, meta = knitless.ctrlHand(h)
+		if not (tool and root and knitless.ctrlAlive(character)) then return nil end
+		local data = meta and meta.sword
+		local params = RaycastParams.new()
+		params.FilterDescendantsInstances = {character}
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		local hit = workspace:Raycast(ray.Origin, ray.Direction * 200, params)
+		if hit then
+			local range = data and data.attackRange
+			if not range or range == 0 then
+				range = knitless.ctrlCombat(h).RAYCAST_SWORD_CHARACTER_DISTANCE or 14.4
+			end
+			if (root.Position - hit.Instance.Position).Magnitude <= range then
+				local target = knitless.ctrlEntityOf(h, hit.Instance)
+				if target and knitless.ctrlCanAttack(h, target) and self:canSee(target) then
+					self:attackEntity(target, ray.Direction, if chargeTime and chargeTime ~= 0 then {chargeTime = chargeTime} else nil)
+					return nil
+				end
+			end
+		end
+		self:swingSwordInRegion(chargeTime)
+		return nil
+	end
+
+	function sword:swingSwordAtMouse(chargeTime)
+		if self:isClickingTooFast() then return nil end
+		return swingAlong(self, lplr:GetMouse().UnitRay, chargeTime)
+	end
+
+	function sword:swingSwordAtViewportPoint(point)
+		if self:isClickingTooFast() then return nil end
+		local camera = workspace.CurrentCamera
+		if not (camera and typeof(point) == 'Vector2') then return nil end
+		return swingAlong(self, camera:ViewportPointToRay(point.X, point.Y))
+	end
+
+	function sword:mobileSwingPressed()
+		if self.disableSwingState or self.holdAutoSwingDisabled then return nil end
+		local casting = lplr:GetAttribute('IsCasting')
+		if casting ~= nil and casting ~= false and casting ~= 0 and casting ~= '' then return nil end
+		local camera = workspace.CurrentCamera
+		if camera and knitless.ctrlPerspective(h) == 0 then
+			self:swingSwordAtViewportPoint(camera.ViewportSize / 2)
+			return nil
+		end
+		self:swingSwordAtMouse()
+		return nil
+	end
+
+	--[[ The game binds holding the button to repeat swings; that binding is its own. ]]
+	function sword:enableHoldAutoSwing()
+		self.holdAutoSwingDisabled = false
+	end
+	function sword:disableHoldAutoSwing()
+		self.holdAutoSwingDisabled = true
+	end
+	function sword:stopHoldAutoSwing() end
+	function sword:isHoldAutoSwingDisabled()
+		return self.holdAutoSwingDisabled
+	end
+end
+
+--[[ playSwordEffect(meta, charged, {itemSkin, playAnimation, playSound, character}): the swing on
+the character, the first-person swing while ViewmodelController says it is visible (asked at the
+time, so a script that hides it for one call is obeyed), and a swing sound, picked the way
+sword-controller picks them. The trail and hit effects are the game's. ]]
+function knitless.ctrlSwordEffect(h, sword)
+	function sword:playSwordEffect(meta, charged, options)
+		local data = type(meta) == 'table' and meta.sword or nil
+		if not data then return nil end
+		options = type(options) == 'table' and options or {}
+		local types = h.animationType
+		local third = data.swingAnimations or {types.SWORD_SWING}
+		local first = data.firstPersonSwingAnimations or {types.FP_SWING_SWORD}
+		local sounds = data.swingSounds or {h.gameSound.SWORD_SWING_1, h.gameSound.SWORD_SWING_2}
+		if options.itemSkin then
+			local getSkin = knitless.ctrlExport(h, 'ReplicatedStorage.TS.games.bedwars.item-skin.item-skin-meta', 'getItemSkinMeta')
+			local ok, skin = pcall(getSkin, options.itemSkin)
+			local skinSounds = ok and type(skin) == 'table' and skin.sword and skin.sword.swingSounds
+			if skinSounds then
+				sounds = skinSounds
+			end
+		end
+		if charged then
+			third, first = {types.NEW_SWORD_SWING}, {types.NEW_SWORD_SWING_FP}
+		end
+		local chargedMeta = data.chargedAttack
+		if charged and chargedMeta then
+			third = chargedMeta.chargedSwingAnimations or third
+			first = chargedMeta.firstPersonChargedSwingAnimations or first
+			sounds = chargedMeta.chargedSwingSounds or sounds
+		end
+
+		local _, held = knitless.ctrlHand(h)
+		if not held then return nil end
+		local heldCharge = held.sword and held.sword.chargedAttack
+		if charged and heldCharge and heldCharge.ignoreEffectsOnFullyCharged == true then return nil end
+		if data.swingAnimations and #data.swingAnimations == 0 then return nil end
+
+		local function pick(list)
+			if #list == 0 then return nil end
+			if data.randomizeSwingAnimations then
+				return list[math.random(1, #list)]
+			end
+			return list[math.min(self.swingCounter, #list - 1) + 1]
+		end
+		if options.playAnimation ~= false then
+			local previous = self.thirdPersonSwingTrack
+			if previous then
+				pcall(previous.Stop, previous, 0)
+			end
+			self.thirdPersonSwingTrack = knitless.ctrlPlayTrack(h, options.character or h.lplr.Character,
+				knitless.ctrlAssetId(h, pick(third)))
+			local viewmodel = h.ctx.controllers.ViewmodelController
+			local ok, visible = pcall(function()
+				return viewmodel:isVisible()
+			end)
+			if ok and visible then
+				pcall(viewmodel.playAnimation, viewmodel, pick(first))
+			end
+		end
+		if self.swingCounter + 1 < #third then
+			self.swingCounter += 1
+		else
+			self.swingCounter = 0
+		end
+		if #sounds > 0 and options.playSound ~= false then
+			knitless.ctrlPlaySound(h, sounds[math.random(1, #sounds)])
+		end
+		return nil
+	end
+end
+
+--[[ lastSwing and lastAttack for the swings the game makes for you, which never pass through this
+stand-in. lastSwing moves on an Attack press with a sword in hand, on the 1/9 s rule of
+isClickingTooFast, and on the game's own swing animations (held-button and touch swings). lastAttack
+moves on a game swing the cooldown would let through with someone you may hit in reach: the game
+moves it only when it sends a hit, which this cannot see. Swings this file plays are not counted. ]]
+function knitless.ctrlSwordStamps(h, sword)
+	local swingIds = {}
+	for _, name in {
+		'SWORD_SWING', 'NEW_SWORD_SWING', 'DAGGER_SWING_1', 'DAGGER_SWING_2', 'GREAT_HAMMER_SWING_1',
+		'GREAT_HAMMER_SWING_2', 'SCYTHE_SWING', 'SCYTHE_SLASH_1', 'SCYTHE_SLASH_2', 'TWIRLBLADE_ATTACK_1',
+		'TWIRLBLADE_ATTACK_2', 'BEAR_CLAWS_SWIPE', 'INFERNO_SWORD_SPIN', 'FROSTY_HAMMER_1', 'FROSTY_HAMMER_2',
+		'FROSTY_HAMMER_3', 'LASER_SWORD_SWING_1', 'LASER_SWORD_SWING_2', 'KNIGHT_SHIELD_THIRD_PERSON_BASH'
+	} do
+		local id = h.animationIdByName[name]
+		if id then
+			swingIds[id] = true
+		end
+	end
+
+	local function stampSwing()
+		if tick() - sword.lastSwing >= 1 / 9 then
+			sword.lastSwing = tick()
+		end
+	end
+
+	h.ctx.clean(h.inputService.InputBegan:Connect(function(input, processed)
+		if processed or not knitless.ctrlIsAttackInput(h, input) then return end
+		local _, meta = knitless.ctrlHand(h)
+		if not (meta and meta.sword) or sword.disableSwingState or sword:getRemainingCastingTime() > 0 then return end
+		stampSwing()
+	end))
+
+	local function onTrack(track)
+		if h.ownTracks[track] then return end
+		local animation = track.Animation
+		if not (animation and swingIds[animation.AnimationId]) then return end
+		stampSwing()
+		local _, meta = knitless.ctrlHand(h)
+		local data = meta and meta.sword
+		local character = h.lplr.Character
+		local root = character and character.PrimaryPart
+		if not (data and root) then return end
+		local now = h.workspace:GetServerTimeNow()
+		if now - sword.lastAttack < (data.attackSpeed or 0) then return end
+		local range = data.attackRange
+		if not range or range == 0 then
+			range = knitless.ctrlCombat(h).RAYCAST_SWORD_CHARACTER_DISTANCE or 14.4
+		end
+		for _, model in h.collection:GetTagged('entity') do
+			local part = model:IsA('Model') and model.PrimaryPart
+			if part and model ~= character and (part.Position - root.Position).Magnitude < range + 2
+				and knitless.ctrlCanAttack(h, model) then
+				sword.lastAttack = now
+				return
+			end
+		end
+	end
+
+	knitless.ctrlOnCharacter(h, function(_, humanoid)
+		local animator = humanoid:WaitForChild('Animator', 10)
+		if not animator then return nil end
+		return {animator.AnimationPlayed:Connect(onTrack)}
+	end)
+end
+
+--[[ ViewmodelController, CameraPerspectiveController, FovController and
+InventoryViewmodelController. ]]
+function knitless.ctrlCamera(h)
+	local workspace = h.workspace
+
+	local perspective = {Name = 'CameraPerspectiveController', cachedCameraPerspective = 1}
+	function perspective:calculateCameraPerspective()
+		return knitless.ctrlPerspective(h)
+	end
+	--[[ The game caches this every render step; here it is worked out when asked. ]]
+	function perspective:getCameraPerspective()
+		return knitless.ctrlPerspective(h)
+	end
+	knitless.ctrlPut(h, 'CameraPerspectiveController', perspective)
+
+	--[[ isVisible and playAnimation are plain fields: Killaura swaps isVisible out for one call and
+	puts back what rawget gave it. setHeldItem and the crosshair belong to the game's controller. ]]
+	local viewmodel = {Name = 'ViewmodelController', crosshair = false}
+	function viewmodel:getViewModel()
+		local camera = workspace.CurrentCamera
+		return camera and camera:FindFirstChild('Viewmodel')
+	end
+	function viewmodel:isVisible()
+		return knitless.ctrlPerspective(h) == 0
+	end
+	function viewmodel:playAnimation(animationType, options)
+		return knitless.ctrlPlayTrack(h, viewmodel:getViewModel(), knitless.ctrlAssetId(h, animationType), options)
+	end
+	function viewmodel:showCrosshair() end
+	function viewmodel:hideCrosshair() end
+	knitless.ctrlPut(h, 'ViewmodelController', viewmodel)
+
+	--[[ The game redraws the held item from its own store; there is nothing to redraw from here. ]]
+	knitless.ctrlPut(h, 'InventoryViewmodelController', {
+		Name = 'InventoryViewmodelController',
+		handleStore = function() end
+	})
+
+	--[[ FovController: setFOV writes the camera's field of view the way the game's does (ten less in
+	third person). The game's controller sets it again on its own events (perspective, settings),
+	and that is not undone here. ]]
+	local function settingsFov()
+		local state = knitless.ctrlState(h)
+		local settings = state and state.Settings
+		local camera = workspace.CurrentCamera
+		return settings and tonumber(settings.fov) or (camera and camera.FieldOfView) or 80
+	end
+	local fov = {Name = 'FovController', fovMultiplier = 1}
+	function fov:getBaseFOV()
+		local base = settingsFov()
+		return knitless.ctrlPerspective(h) == 0 and base or base - 10
+	end
+	fov.fov = fov:getBaseFOV()
+	function fov:getFOV()
+		return self.fov
+	end
+	function fov:setFOV(value)
+		value = tonumber(value) or settingsFov()
+		if knitless.ctrlPerspective(h) ~= 0 then
+			value -= 10
+		end
+		self.fov = value * self.fovMultiplier
+		local camera = workspace.CurrentCamera
+		if camera then
+			camera.FieldOfView = self.fov
+		end
+	end
+	knitless.ctrlPut(h, 'FovController', fov)
+end
+
+--[[ SprintController, after sprint-controller. The game's controller keeps running and owns the
+Sprinting attribute, so that attribute is read as the game's own sprint state and never written
+here. Speed is WalkSpeed: base speed (20 running, 14 walking) times the game's multiplier, which is
+worked out from what the game itself writes to WalkSpeed, times the modifiers added here.
+startSprinting holds run speed and sets it back each time the game writes walk speed; a sprint the
+game blocks through its own modifiers is not seen. ]]
+function knitless.ctrlSprint(h)
+	local WALK, RUN, FOV_MULT = 14, 20, 1.1
+	local lplr, workspace = h.lplr, h.workspace
+	local state = {humanoid = nil, gameMultiplier = 1, own = 1, written = nil}
+	local inferred = {}
+	local sprint = {
+		Name = 'SprintController',
+		sprinting = false,
+		attemptingSprint = false,
+		blockSprint = false,
+		moveSpeedMultiplier = 1,
+		immediateStop = false
+	}
+	local modifier = {modifiers = {}}
+
+	local function gameRunning()
+		return lplr:GetAttribute('Sprinting') == true
+	end
+
+	local function apply()
+		local humanoid = state.humanoid
+		if not (humanoid and humanoid.Parent) then return end
+		local base = (sprint.sprinting or gameRunning()) and RUN or WALK
+		local target = base * state.gameMultiplier * state.own
+		if math.abs(humanoid.WalkSpeed - target) > 0.01 then
+			state.written = target
+			humanoid.WalkSpeed = target
+		end
+	end
+
+	--[[ The game's startSprinting tweens the field of view to FovController:getFOV() times
+	RUN_FOV_MULT over 0.1 s and its stopSprinting tweens it back; where Knit loaded, the Sprint module
+	runs exactly those. Here the same tweens run once on each change of this sprint state, from the
+	FovController stand-in's base (Settings fov, ten less in third person; its getFOV is only what its
+	setFOV last wrote). Nothing here answers a field of view change: tweening on each one fought the
+	game's own tweens (owner, 10-24: the camera glitched). ]]
+	local fovTween, fovBase
+	local function widenFov()
+		local camera = workspace.CurrentCamera
+		local controller = h.ctx.controllers.FovController
+		if not (camera and controller) then return end
+		pcall(function()
+			local base = controller:getBaseFOV()
+			--[[ Only from the game's base or a widening of it. A camera outside that (the settings
+			changed since the stand-in read them, or a game effect such as a scope) is left alone. ]]
+			local fov = camera.FieldOfView
+			if fov < base - 1 or fov > base * FOV_MULT + 1 then return end
+			fovBase = base
+			fovTween = h.tweenService:Create(camera, TweenInfo.new(0.1, Enum.EasingStyle.Linear), {FieldOfView = base * FOV_MULT})
+			fovTween:Play()
+		end)
+	end
+	--[[ Back to the base, but only over a widening of this file's that is still on screen: once the
+	game has set a field of view of its own since (a respawn, a menu, a settings change), that one
+	stays. While the game sprints itself the camera is its sprint's. ]]
+	local function restoreFov()
+		local camera = workspace.CurrentCamera
+		local base, tween = fovBase, fovTween
+		fovBase, fovTween = nil, nil
+		if not (camera and base) or gameRunning() then return end
+		pcall(function()
+			local playing = tween ~= nil and tween.PlaybackState == Enum.PlaybackState.Playing
+			if not playing and math.abs(camera.FieldOfView - base * FOV_MULT) > 0.05 then return end
+			h.tweenService:Create(camera, TweenInfo.new(0.1, Enum.EasingStyle.Linear), {FieldOfView = base}):Play()
+		end)
+	end
+
+	--[[ The game's reduce: percents add up, a zero multiplier stops you, a constant one wins, and any
+	modifier with blockSprint ends the sprint. ]]
+	function modifier:updateModifiers()
+		local percent, stopped, blocked, constant = 0, false, false, nil
+		for entry in self.modifiers do
+			local multiplier = entry.moveSpeedMultiplier
+			if multiplier ~= nil then
+				if multiplier == 0 then
+					stopped = true
+				else
+					percent += multiplier - 1
+				end
+			end
+			if entry.blockSprint then
+				blocked = true
+			end
+			if entry.constantSpeedMultiplier ~= nil then
+				constant = entry.constantSpeedMultiplier
+			end
+		end
+		state.own = constant or (if stopped then 0 else math.max(1 + percent, 0))
+		sprint.blockSprint = blocked
+		sprint.moveSpeedMultiplier = state.gameMultiplier * state.own
+		if blocked then
+			sprint:stopSprinting(false)
+		elseif sprint.attemptingSprint and not sprint.sprinting then
+			sprint:startSprinting()
+		end
+		apply()
+	end
+
+	function modifier:addModifier(entry, onRemove)
+		self.modifiers[entry] = true
+		self:updateModifiers()
+		return {Destroy = function()
+			if onRemove then
+				onRemove()
+			end
+			return self:removeModifier(entry)
+		end}
+	end
+
+	function modifier:removeModifier(entry)
+		local had = self.modifiers[entry] ~= nil
+		self.modifiers[entry] = nil
+		if had then
+			self:updateModifiers()
+		end
+		return had
+	end
+
+	--[[ This file's modifiers, plus one that stands for all of the game's: its multiplier as read
+	off WalkSpeed. ]]
+	function modifier:getModifiers()
+		local set = table.clone(self.modifiers)
+		inferred.moveSpeedMultiplier = state.gameMultiplier
+		set[inferred] = true
+		return set
+	end
+
+	function modifier:clear()
+		table.clear(self.modifiers)
+		self:updateModifiers()
+	end
+
+	function sprint:getMovementStatusModifier()
+		return modifier
+	end
+
+	function sprint:isSprinting()
+		return self.sprinting
+	end
+
+	--[[ The speed always follows the sprint state and the modifiers here. ]]
+	function sprint:setSpeed()
+		apply()
+	end
+
+	function sprint:startSprinting()
+		if workspace:GetAttribute('FreecamEnabled') then return nil end
+		if self.blockSprint then return nil end
+		local was = self.sprinting
+		self.sprinting = true
+		self.attemptingSprint = true
+		apply()
+		if not was then
+			widenFov()
+		end
+		return nil
+	end
+
+	function sprint:stopSprinting(clearAttempt)
+		if not self.sprinting then return nil end
+		self.sprinting = false
+		if clearAttempt then
+			self.attemptingSprint = false
+		end
+		apply()
+		restoreFov()
+		return nil
+	end
+
+	knitless.ctrlOnCharacter(h, function(_, humanoid)
+		state.humanoid = humanoid
+		state.gameMultiplier = 1
+		state.written = nil
+		-- The game clears its movement modifiers on respawn; these go with them.
+		modifier:clear()
+		return {humanoid:GetPropertyChangedSignal('WalkSpeed'):Connect(function()
+			local speed = humanoid.WalkSpeed
+			if state.written and math.abs(speed - state.written) < 0.01 then return end
+			state.written = nil
+			state.gameMultiplier = speed / (gameRunning() and RUN or WALK)
+			sprint.moveSpeedMultiplier = state.gameMultiplier * state.own
+			task.defer(apply)
+		end)}
+	end)
+
+	--[[ The widening goes back on, once each, after two things the game does by itself while this
+	sprints: its own sprint ending (you let go of shift), which tweens the field of view back, and a
+	switch between first and third person, which sets it again. Where Knit loaded, the Sprint module
+	starts the game's sprint again at once, and the game's SprintController widens again on a switch
+	while it sprints. The first is deferred so it lands after the game's tween; the second is read
+	each Heartbeat and written only on a switch. ]]
+	local lastPerspective
+	h.ctx.clean(lplr:GetAttributeChangedSignal('Sprinting'):Connect(function()
+		if gameRunning() or not sprint.sprinting then return end
+		task.defer(function()
+			if sprint.sprinting and not gameRunning() then
+				widenFov()
+			end
+		end)
+	end))
+	h.ctx.clean(h.ctx.services.RunService.Heartbeat:Connect(function()
+		if not sprint.sprinting or gameRunning() then
+			lastPerspective = nil
+			return
+		end
+		local now = knitless.ctrlPerspective(h)
+		if lastPerspective ~= nil and now ~= lastPerspective then
+			widenFov()
+		end
+		lastPerspective = now
+	end))
+
+	knitless.ctrlPut(h, 'SprintController', sprint)
+end
+
+--[[ ProjectileController.createLocalProjectile without the game's controller. The game scores a
+shot only through the shooter's own local projectile: ProjectileUtil.fireProjectile flies it, and at
+the first part it accepts the hit callback sends ProjectileHit(refId, entity model or nil) with the
+refId the ProjectileFire call carried. Nothing else reports a hit, so without this the server has
+the shot and never hears that it landed. This flies the shot the way fireProjectile does
+(projectile-controller and projectile-util, 10-19 and 10-24 decompiles), with no model:
+
+  * Path: spawn = CFrame.new(positionFrom, positionFrom + velocity) * CFrame.new(rel), rel being
+    the source's relativeOverride or projectile-util's RelX/RelY/RelZ; then
+    spawn + velocity*t + (0, -g, 0)*t*t/2, g = ProjectileMeta[type].gravitationalAcceleration
+    (196.2 when missing), no drag. t adds up the Heartbeat steps, starting with the first physics
+    step after the call, as the game's model moves.
+  * Each Heartbeat takes clamp(ceil(|velocity|/170), 1, 16) points from the last position to this
+    one (positionFrom itself first, on the first step) and at each runs an entity box
+    (3, 1, 3)*hitscanRegionMultiplier, a wall box (1, 0.5, 1)*wallHitscanRegionMultiplier and the
+    terrain around the wall box, in that order, through the game's own test of each part
+    (knitless.projectileAccept). The first part it accepts is the hit.
+  * The hit sends ProjectileHit(refId, model) as the game does: model is the 'entity' the part
+    belongs to, or nil for a block, terrain or any other part. One per shot; then the shot is over.
+  * With no hit the shot ends silently after lifetimeSec (10 s when the meta has none; the game
+    counts from a frame late), below FallenPartsDestroyHeight (Roblox removes the game's model
+    there), or once it is returnDistance from you (the game then flies it back to you).
+  * useServerModel and collisionDisabled projectiles get no local shot, as in the game.
+At most sim.cap shots fly at once; a new one drops the oldest. Nothing is drawn and nil is returned.
+It never throws or yields, and nothing is tested or sent before the next Heartbeat. ]]
+function knitless.projectileLaunch(h, source, ammo, projectileType, positionFrom, refId, velocity, options, config, shooter, tool)
+	local ok, err = pcall(knitless.projectileStart, h, source, projectileType, positionFrom, refId, velocity, config, tool)
+	if not ok then
+		knitless.ctrlLog(h, 'createLocalProjectile failed: '..tostring(err))
+	end
+	return nil
+end
+
+--[[ isValidProjectileLaunch: finite, within a million studs, and 0.001 to 10000 studs a second. ]]
+function knitless.projectileValid(position, velocity)
+	for _, value in {position.X, position.Y, position.Z, velocity.X, velocity.Y, velocity.Z} do
+		if value ~= value or math.abs(value) == math.huge then return false end
+	end
+	if math.abs(position.X) > 1e6 or math.abs(position.Y) > 1e6 or math.abs(position.Z) > 1e6 then
+		return false
+	end
+	local speed = velocity.Magnitude
+	return speed >= 0.001 and speed <= 10000
+end
+
+--[[ One shot, checked the way createLocalProjectile and fireProjectile check it, then added to the
+list the Heartbeat flies. ]]
+function knitless.projectileStart(h, source, projectileType, positionFrom, refId, velocity, config, tool)
+	local sim = knitless.projectileSim or knitless.projectileSetup(h)
+	if sim.closed then return end
+	local meta = type(projectileType) == 'string' and sim.meta[projectileType] or nil
+	if type(meta) ~= 'table' then
+		knitless.ctrlLog(h, 'no ProjectileMeta for '..tostring(projectileType)..'; that projectile is not flown')
+		return
+	end
+	-- The game makes no local shot for a server-model projectile and never tests a collisionDisabled one.
+	if meta.useServerModel or meta.collisionDisabled then return end
+	if refId == nil or typeof(positionFrom) ~= 'Vector3' or typeof(velocity) ~= 'Vector3'
+		or not knitless.projectileValid(positionFrom, velocity) then
+		knitless.ctrlLog(h, 'a '..projectileType..' shot without a refId or with an invalid position or velocity is not flown')
+		return
+	end
+	local gravity = meta.gravitationalAcceleration
+	if gravity == nil then gravity = 196.2 end
+	if type(gravity) ~= 'number' or gravity ~= gravity or math.abs(gravity) == math.huge then return end
+	-- The game makes no shot while you have no character.
+	local character = h.lplr.Character
+	if not (character and character.PrimaryPart) then return end
+
+	-- The source's relativeOverride; with no source, the config's.
+	local relative
+	if source ~= nil then
+		relative = type(source) == 'table' and source.relativeOverride or nil
+	elseif type(config) == 'table' then
+		relative = config.relativeOverride
+	end
+	local offset = sim.relative
+	if type(relative) == 'table' then
+		offset = Vector3.new(tonumber(relative.relX) or 0, tonumber(relative.relY) or 0, tonumber(relative.relZ) or 0)
+	end
+	local hitscan = tonumber(meta.hitscanRegionMultiplier) or 1
+	local wall = tonumber(meta.wallHitscanRegionMultiplier) or hitscan
+	local lifetime = meta.lifetimeSec
+	if type(lifetime) ~= 'number' or lifetime ~= lifetime then lifetime = 10 end
+	local returnDistance = meta.returnDistance
+	if not (type(returnDistance) == 'number' and returnDistance > 0) then returnDistance = nil end
+
+	local shot = {
+		id = refId,
+		kind = projectileType,
+		from = positionFrom,
+		spawn = (CFrame.new(positionFrom, positionFrom + velocity) * CFrame.new(offset)).Position,
+		velocity = velocity,
+		fall = Vector3.new(0, -gravity / 2, 0),
+		-- The first step's points start at positionFrom itself, not at the spawn.
+		last = positionFrom,
+		first = true,
+		t = 0,
+		count = math.clamp(math.ceil(velocity.Magnitude / 170), 1, 16),
+		entityBox = Vector3.new(3, 1, 3) * hitscan,
+		wallBox = Vector3.new(1, 0.5, 1) * wall,
+		-- Never longer than a minute, whatever the meta says.
+		lifetime = math.min(lifetime, 60),
+		returnDistance = returnDistance,
+		tool = typeof(tool) == 'Instance' and tool or nil,
+		friendlyFire = meta.canHitAllyPlayers == true or knitless.projectileFriendlyFire(h, character),
+		-- The frame it was made in: made after that frame's Stepped, the game's model first moves in the next.
+		frame = sim.frame
+	}
+	local shots = sim.shots
+	if #shots >= sim.cap then
+		local dropped = table.remove(shots, 1)
+		knitless.projectileLog(sim, 'Projectile cap ('..sim.cap..') reached; dropped the oldest shot ('
+			..tostring(dropped.kind)..' '..tostring(dropped.id)..')')
+	end
+	table.insert(shots, shot)
+	if sim.developer then
+		knitless.projectileRemember(sim, shot)
+	end
+	-- onSimulatedShot's listeners, over a copy so one may stop itself.
+	local listeners = h.shotListeners
+	if listeners and #listeners > 0 then
+		for _, entry in table.clone(listeners) do
+			pcall(entry.callback, shot)
+		end
+	end
+end
+
+--[[ The shared state, made at the first shot: the shot list, one Heartbeat that flies every shot and
+one Stepped that counts frames, both dropped with the rest of the layer. ]]
+function knitless.projectileSetup(h)
+	local meta = knitless.ctrlExport(h, 'ReplicatedStorage.TS.projectile.projectile-meta', 'ProjectileMeta')
+	local sim = {
+		shots = {},
+		points = {},
+		cap = 16,
+		frame = 0,
+		meta = type(meta) == 'table' and meta or {},
+		relative = Vector3.new(0.8, -0.6, 0),
+		params = OverlapParams.new(),
+		voidY = -500,
+		terrain = h.workspace:FindFirstChildOfClass('Terrain'),
+		logWindow = -math.huge,
+		logCount = 0,
+		held = 0,
+		developer = shared.PistonwareDeveloper == true,
+		recent = {},
+		remembered = 0,
+		targets = setmetatable({}, {__mode = 'k'})
+	}
+	sim.params.FilterType = Enum.RaycastFilterType.Exclude
+	-- projectile-util's own RelX/RelY/RelZ, which ConstantManager keeps as attributes on the module.
+	pcall(function()
+		local module = h.replicatedStorage.TS.combat['projectile-util']
+		local function read(key, default)
+			local value = module:GetAttribute('ConstantManager_'..key)
+			return type(value) == 'number' and value or default
+		end
+		sim.relative = Vector3.new(read('RelX', 0.8), read('RelY', -0.6), read('RelZ', 0))
+	end)
+	pcall(function()
+		sim.voidY = h.workspace.FallenPartsDestroyHeight
+	end)
+	knitless.projectileSim = sim
+
+	local runService = h.ctx.services.RunService
+	h.ctx.clean(runService.Stepped:Connect(function()
+		sim.frame += 1
+	end))
+	h.ctx.clean(runService.Heartbeat:Connect(function(dt)
+		local ok, err = pcall(knitless.projectileStep, h, sim, dt)
+		if not ok then
+			table.clear(sim.shots)
+			knitless.ctrlLog(h, 'projectile step failed: '..tostring(err))
+		end
+	end))
+	h.ctx.clean(function()
+		sim.closed = true
+		table.clear(sim.shots)
+	end)
+	if sim.developer then
+		local ok, err = pcall(knitless.projectileWatch, h, sim)
+		if not ok then
+			knitless.ctrlLog(h, 'projectile watch failed: '..tostring(err))
+		end
+	end
+	return sim
+end
+
+--[[ One Heartbeat: each shot moves on by dt and is tested along the way, and finished shots leave
+the list. A shot made since this frame's Stepped waits for the next frame. ]]
+function knitless.projectileStep(h, sim, dt)
+	local shots = sim.shots
+	if #shots == 0 then return end
+	local lplr = h.lplr
+	local character = lplr.Character
+	local camera = h.workspace.CurrentCamera
+	if character ~= sim.character or camera ~= sim.camera then
+		sim.character, sim.camera = character, camera
+		local exclude = {}
+		if character then table.insert(exclude, character) end
+		if camera then table.insert(exclude, camera) end
+		sim.params.FilterDescendantsInstances = exclude
+	end
+	sim.root = character and character.PrimaryPart or nil
+	sim.team = lplr:GetAttribute('Team')
+	local team = lplr.Team
+	sim.teamName = team and team.Name or nil
+	sim.vehicle = knitless.projectileVehicle(h, character)
+
+	local index = 1
+	while index <= #shots do
+		local shot = shots[index]
+		local done = false
+		if shot.frame ~= sim.frame then
+			local ok, result = pcall(knitless.projectileAdvance, h, sim, shot, dt)
+			if ok then
+				done = result
+			else
+				done = true
+				knitless.ctrlLog(h, 'projectile '..tostring(shot.kind)..' failed in flight: '..tostring(result))
+			end
+		end
+		if done then
+			table.remove(shots, index)
+		else
+			index += 1
+		end
+	end
+end
+
+--[[ One step of one shot; true once the shot is over. ]]
+function knitless.projectileAdvance(h, sim, shot, dt)
+	shot.t += dt
+	-- The game's lifetime clock starts a frame after its model's first step.
+	shot.age = shot.age and shot.age + dt or 0
+	local t = shot.t
+	local position = shot.spawn + shot.velocity * t + shot.fall * (t * t)
+	if position.Y < sim.voidY then
+		knitless.projectileLog(sim, string.format('Projectile %s fell out of the map after %.2fs without a hit (%s)',
+			tostring(shot.kind), t, tostring(shot.id)))
+		return true
+	end
+	local root = sim.root
+	-- A projectile that comes back skips the step while you have no character, as in the game.
+	if not (shot.returnDistance and not root) then
+		local points = sim.points
+		table.clear(points)
+		local last = shot.last
+		if shot.first then
+			shot.first = false
+			table.insert(points, last)
+		end
+		local count = shot.count
+		local delta = position - last
+		for step = 1, count - 1 do
+			table.insert(points, last + delta * (step / count))
+		end
+		table.insert(points, position)
+		shot.last = position
+		for _, point in points do
+			local part = knitless.projectileTest(h, sim, shot, point)
+			if part then
+				knitless.projectileHit(h, sim, shot, part, point)
+				return true
+			end
+		end
+		if shot.returnDistance and (root.Position - position).Magnitude > shot.returnDistance then
+			knitless.projectileLog(sim, string.format('Projectile %s turned back at %.0f studs without a hit (%s)',
+				tostring(shot.kind), shot.returnDistance, tostring(shot.id)))
+			return true
+		end
+	end
+	if shot.age > shot.lifetime then
+		knitless.projectileLog(sim, string.format('Projectile %s expired after %.2fs without a hit (%s)',
+			tostring(shot.kind), t, tostring(shot.id)))
+		return true
+	end
+	return false
+end
+
+--[[ The game's three tests at one point, in its order: the entity box, the wall box, the terrain.
+The accepted part, or nil. ]]
+function knitless.projectileTest(h, sim, shot, point)
+	local world = h.workspace
+	local frame = CFrame.new(point)
+	for _, part in world:GetPartBoundsInBox(frame, shot.entityBox, sim.params) do
+		local hit = knitless.projectileAccept(h, sim, shot, part, true)
+		if hit then return hit end
+	end
+	for _, part in world:GetPartBoundsInBox(frame, shot.wallBox, sim.params) do
+		local hit = knitless.projectileAccept(h, sim, shot, part, false)
+		if hit then return hit end
+	end
+	local terrain = sim.terrain
+	if terrain and knitless.projectileTerrain(h, sim, terrain, point, shot.wallBox) then
+		return knitless.projectileAccept(h, sim, shot, terrain, false)
+	end
+	return nil
+end
+
+--[[ Whether the 4-stud voxels around the wall box hold anything but air or water. ]]
+function knitless.projectileTerrain(h, sim, terrain, point, size)
+	local half = size / 2
+	local region = Region3.new(point - half, point + half):ExpandToGrid(4)
+	local ok, materials = pcall(terrain.ReadVoxels, terrain, region, 4)
+	if not ok then
+		sim.terrain = nil
+		knitless.ctrlLog(h, 'projectile terrain test off: '..tostring(materials))
+		return false
+	end
+	local air, water = Enum.Material.Air, Enum.Material.Water
+	for x = 1, #materials do
+		local plane = materials[x]
+		for y = 1, #plane do
+			local row = plane[y]
+			for z = 1, #row do
+				local material = row[z]
+				if material ~= air and material ~= water then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+--[[ fireProjectile's test of one part: the part the hit is reported with (an entity's PrimaryPart
+for an entity), or nil when the shot flies on. The same rules in the same order, except that the
+entity box's rule (entities and falling blocks only) runs first, where it costs least. The game's
+three local listeners that cancel a hit are reproduced too: your own team's airbender tornado,
+battle royale's ghost form and the vehicle you sit in. ]]
+function knitless.projectileAccept(h, sim, shot, part, entityOnly)
+	local collection = h.collection
+	local hitbox = collection:HasTag(part, 'Hitbox')
+	local entity = knitless.projectileEntityOf(h, part)
+	if hitbox then
+		local value = part:FindFirstChild('EntityValue')
+		value = value and value:IsA('ObjectValue') and value.Value or nil
+		if value then
+			entity = knitless.projectileEntityFrom(h, value)
+		end
+	end
+	if entityOnly and not entity and not collection:HasTag(part, 'falling-block') then return nil end
+	local tool = shot.tool
+	if tool and (part == tool or part:IsDescendantOf(tool)) then return nil end
+	if part:GetAttribute('gamecore_GameQueryIgnore') == true and not hitbox then
+		-- Except a part in genv.PistonwarePierced: pistonware set that mark, not the game. The server
+		-- never sees it and its copy of the shot still hits the part, so this shot does too.
+		local pierced = genv.PistonwarePierced
+		if not (type(pierced) == 'table' and pierced[part]) then return nil end
+	end
+	if collection:HasTag(part, 'ProjectilesIgnore') or part:GetAttribute('IgnoreProjectileCollision') == true then
+		return nil
+	end
+	local parent = part.Parent
+	if parent and parent.Name == 'ArcParticles' then return nil end
+	if entity then
+		if not knitless.projectileAlive(h, entity) then return nil end
+		if part:IsA('Accessory') or part:FindFirstAncestorWhichIsA('Accessory') then return nil end
+		part = entity:IsA('Model') and entity.PrimaryPart or part
+		local lplr = h.lplr
+		local player = knitless.projectilePlayerOf(h, entity)
+		if entity == lplr.Character or (player and player.UserId == lplr.UserId) then return nil end
+		-- Battle royale's ghost form takes no hits.
+		local ghost = player and entity:GetAttribute('GhostForm')
+		if ghost and ghost ~= 0 and ghost ~= '' and ghost == ghost then return nil end
+		if not shot.friendlyFire and not knitless.projectileEnemy(h, sim, entity, player) then return nil end
+	end
+	-- Another projectile.
+	local model = part:FindFirstAncestorOfClass('Model')
+	if model and sim.meta[model.Name] ~= nil then return nil end
+	if collection:HasTag(part, 'ProjectileShield') then
+		local center = part:GetAttribute('ShieldCenter')
+		if typeof(center) ~= 'Vector3' then center = Vector3.zero end
+		if (tonumber(part:GetAttribute('ShieldRadius')) or 0) / 2 > (shot.from - center).Magnitude then return nil end
+		local shieldTeam = part:GetAttribute('ShieldTeamId')
+		if shieldTeam ~= nil and shieldTeam ~= '' and shieldTeam == sim.team then return nil end
+	end
+	-- An airbender tornado of your own team.
+	local tornado = part:GetAttribute('TornadoTeam')
+	if tornado ~= nil and tornado ~= '' and tornado == sim.teamName then return nil end
+	-- The vehicle you are seated in.
+	local vehicle = sim.vehicle
+	if vehicle and part:IsDescendantOf(vehicle) then return nil end
+	return part
+end
+
+--[[ VehicleController's own-vehicle canceller: a shot made from a seat of a 'vehicle' passes that
+vehicle's parts (VehicleUtil.isInVehicle: a Seat in it that your Humanoid occupies). The vehicle,
+or nil. ]]
+function knitless.projectileVehicle(h, character)
+	local humanoid = character and character:FindFirstChildOfClass('Humanoid')
+	local seat = humanoid and humanoid.SeatPart
+	if not (seat and seat:IsA('Seat')) then return nil end
+	local collection = h.collection
+	local node = seat.Parent
+	while node and not node:IsA('Workspace') do
+		if collection:HasTag(node, 'vehicle') then return node end
+		node = node.Parent
+	end
+	return nil
+end
+
+--[[ EntityUtil:getEntityFromDescendant's instance: the nearest ancestor (or the part) tagged 'entity'. ]]
+function knitless.projectileEntityOf(h, part)
+	local collection = h.collection
+	local node = part
+	while node and not node:IsA('Workspace') do
+		if collection:HasTag(node, 'entity') then return node end
+		node = node.Parent
+	end
+	return nil
+end
+
+--[[ EntityUtil:getEntity's instance for a Hitbox's EntityValue: a player's character, a player's
+model in Workspace, or the nearest ancestor tagged 'entity' or 'inventory-entity'. ]]
+function knitless.projectileEntityFrom(h, value)
+	if typeof(value) ~= 'Instance' then return nil end
+	if value:IsA('Player') then return value.Character end
+	local collection = h.collection
+	local node = value
+	while node and not node:IsA('Workspace') do
+		if knitless.projectilePlayerOf(h, node) or collection:HasTag(node, 'inventory-entity')
+			or collection:HasTag(node, 'entity') then
+			return node
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
+--[[ The player an entity is, by EntityUtil's rule: a Model in Workspace named after a player. ]]
+function knitless.projectilePlayerOf(h, model)
+	local parent = model.Parent
+	if parent and parent:IsA('Workspace') and model:IsA('Model') then
+		local player = h.players:FindFirstChild(model.Name)
+		if player and player:IsA('Player') then return player end
+	end
+	return nil
+end
+
+--[[ Entity:isAlive: a player's character needs its Humanoid, and the Humanoid's health, the Health
+attribute (else the Humanoid's) and the Dead attribute must all say alive. ]]
+function knitless.projectileAlive(h, entity)
+	local humanoid = entity:FindFirstChild('Humanoid')
+	if humanoid and not humanoid:IsA('Humanoid') then humanoid = nil end
+	if h.players:GetPlayerFromCharacter(entity) and (humanoid == nil or humanoid.Parent == nil) then return false end
+	if humanoid and humanoid.Health <= 0 then return false end
+	local health = entity:GetAttribute('Health')
+	if health == nil then health = humanoid and humanoid.Health or 0 end
+	if type(health) == 'number' and health <= 0 then return false end
+	return entity:GetAttribute('Dead') ~= true
+end
+
+--[[ PlayerEntity.canAttack's team test for your shot: a player on your team, a mob whose Team is
+yours, or one placed by a teammate is not hit (the shot flies on). ]]
+function knitless.projectileEnemy(h, sim, entity, player)
+	local team = sim.team
+	if player then
+		return player:GetAttribute('Team') ~= team
+	end
+	if entity:GetAttribute('Team') == team then return false end
+	local owner = entity:GetAttribute('PlacedByUserId')
+	if owner == nil then owner = entity:GetAttribute('PlayerUserId') end
+	if type(owner) == 'number' and owner ~= 0 and owner == owner then
+		local ownerPlayer = h.players:GetPlayerByUserId(owner)
+		if ownerPlayer and ownerPlayer:GetAttribute('Team') == team then return false end
+	end
+	return true
+end
+
+--[[ PlayerEntity.canAttack's friendly-fire cases: the FriendlyFire attribute on your character, or
+a queue whose meta turns friendly fire on. ]]
+function knitless.projectileFriendlyFire(h, character)
+	if character:GetAttribute('FriendlyFire') == true then return true end
+	local queues = knitless.ctrlExport(h, 'ReplicatedStorage.TS.game.queue-meta', 'QueueMeta')
+	local queue = h.workspace:GetAttribute('QueueType')
+	local meta = type(queues) == 'table' and queue ~= nil and queues[queue] or nil
+	return type(meta) == 'table' and meta.enableFriendlyFire == true
+end
+
+--[[ The hit callback: ProjectileHit(refId, model) exactly as the game sends it, model being the
+entity of the reported part or nil, and one log line. ]]
+function knitless.projectileHit(h, sim, shot, part, point)
+	local model = knitless.projectileEntityOf(h, part)
+	local remote = knitless.ctrlRemote(h, 'ProjectileHit')
+	local sent, err = false, 'no ProjectileHit remote'
+	if remote then
+		sent, err = pcall(remote.SendToServer, remote, shot.id, model)
+	end
+	local target
+	if model then
+		target = model.Name
+	elseif part:IsA('Terrain') then
+		target = 'terrain'
+	elseif h.collection:HasTag(part, 'block') then
+		target = 'block '..part.Name
+	else
+		target = 'part '..part.Name
+	end
+	knitless.projectileLog(sim, string.format('ProjectileHit %s -> %s (%s, %.2fs, %.1f studs)%s', tostring(shot.kind),
+		target, tostring(shot.id), shot.t, (point - shot.from).Magnitude, sent and '' or ' NOT SENT: '..tostring(err)))
+	if sim.developer and model then
+		sim.targets[model] = {kind = shot.kind, id = shot.id, at = os.clock()}
+	end
+end
+
+--[[ The log lines, at most 8 a second; the count of any held back goes on the next one. ]]
+function knitless.projectileLog(sim, text)
+	local now = os.clock()
+	if now - sim.logWindow >= 1 then
+		sim.logWindow, sim.logCount = now, 0
+	end
+	if sim.logCount >= 8 then
+		sim.held += 1
+		return
+	end
+	sim.logCount += 1
+	if sim.held > 0 then
+		text = text..' ('..sim.held..' lines held back)'
+		sim.held = 0
+	end
+	knitless.log(text)
+end
+
+--[[ Developer mode: the shots of the last half minute, by the first 8 characters of the id (all the
+server's launch echo carries). ]]
+function knitless.projectileRemember(sim, shot)
+	local recent = sim.recent
+	local now = os.clock()
+	recent[string.sub(tostring(shot.id), 1, 8)] = {kind = shot.kind, id = shot.id, at = now}
+	sim.remembered += 1
+	if sim.remembered > 64 then
+		sim.remembered = 0
+		for key, record in recent do
+			if now - record.at > 30 then
+				recent[key] = nil
+			else
+				sim.remembered += 1
+			end
+		end
+	end
+end
+
+--[[ Developer mode, read only: what the server says back about these shots, from the Zap events the
+layer decodes. The launch echo carries the shot's id and the server's model for it, the impact names
+that model, and the damage event names who dealt it. ]]
+function knitless.projectileWatch(h, sim)
+	local zap = h.ctx.modules['PlayerScripts.TS.lib.network']
+	if type(zap) ~= 'table' then return end
+	local function listen(name, callback)
+		local event = zap[name]
+		if type(event) == 'table' and type(event.On) == 'function' then
+			h.ctx.clean(event.On(function(...)
+				pcall(callback, ...)
+			end))
+		end
+	end
+	listen('ProjectileLaunchZap', function(_, _, model, id)
+		local record = type(id) == 'string' and sim.recent[id] or nil
+		if record and record.model == nil then
+			record.model = model
+			knitless.projectileLog(sim, 'server launched '..tostring(record.kind)..' '..tostring(record.id))
+		end
+	end)
+	listen('ProjectileImpactZap', function(_, kind, model, _, _, player, target)
+		if not (player and player.UserId == h.lplr.UserId) or model == nil then return end
+		for _, record in sim.recent do
+			if record.model == model then
+				knitless.projectileLog(sim, 'server impact '..tostring(record.kind)..' '..tostring(record.id)..' on '
+					..(target and target.Name or 'no entity')..' (kind '..tostring(kind)..')')
+				return
+			end
+		end
+	end)
+	listen('EntityDamageEventZap', function(entity, damage, _, _, from)
+		local character = h.lplr.Character
+		if not (from and character and from == character) then return end
+		local record = sim.targets[entity]
+		if record and os.clock() - record.at < 2 then
+			knitless.projectileLog(sim, 'server damage '..tostring(damage)..' on '..entity.Name..' after the '
+				..tostring(record.kind)..' hit ('..tostring(record.id)..')')
+		end
+	end)
+end
+
+--[[ The controllers the bootstrap waits for besides SwordController, DamageIndicatorController,
+which it indexes, and the knockback pair. ]]
+function knitless.ctrlCore(h)
+	local lplr = h.lplr
+
+	--[[ The launch hooks (calculateImportantLaunchValues, launchProjectileWithValues,
+	launchProjectile) belong to the game's own shots and are left nil, so the modules that wrap them
+	find nothing to wrap. enableBeam is read only for its upvalues. createLocalProjectile takes the
+	game's arguments (source, ammo, projectileType, positionFrom, refId, velocity, options, config,
+	shooter, tool), flies the shot unseen and reports its hit as the game does
+	(knitless.projectileLaunch), and returns nil. ]]
+	local projectile = {Name = 'ProjectileController'}
+	function projectile.enableBeam() end
+	function projectile:createLocalProjectile(...)
+		return knitless.projectileLaunch(h, ...)
+	end
+	--[[ The simulated shot flying under this id, for modules that draw along it (ProjectileTrails):
+	its last field is where it is now. nil once it has landed or expired. ]]
+	function projectile:simulatedShot(refId)
+		local sim = knitless.projectileSim
+		if not (sim and refId) then return nil end
+		for _, shot in sim.shots do
+			if shot.id == refId then
+				return shot
+			end
+		end
+		return nil
+	end
+	--[[ Each simulated shot as it starts, for modules that draw along it from its first frame: the
+	server's launch echo and its reply to the shot come in the same network tick, in either order,
+	so the echo alone can come before the shot exists. callback(shot) runs in a pcall right after
+	the shot is listed (simulatedShot finds it) and must not yield. Returns the function that
+	stops it. ]]
+	local shotListeners = {}
+	h.shotListeners = shotListeners
+	function projectile:onSimulatedShot(callback)
+		if type(callback) ~= 'function' then
+			return function() end
+		end
+		local entry = {callback = callback}
+		table.insert(shotListeners, entry)
+		return function()
+			local index = table.find(shotListeners, entry)
+			if index then table.remove(shotListeners, index) end
+		end
+	end
+	knitless.ctrlPut(h, 'ProjectileController', projectile)
+
+	--[[ BlockBreakController.blockBreaker. Its client manager is the blocks slice's
+	ClientBlockEngine, whose selector reads the block under the mouse. The game paces its own mining
+	inside its own breaker, so setCooldown here only remembers the value; the hit and break effects
+	and the healthbar are the game's and are not drawn. ]]
+	local clientEngine = knitless.ctrlExport(h, 'PlayerScripts.TS.lib.block-engine.client-block-engine', 'ClientBlockEngine')
+	if type(clientEngine) ~= 'table' then
+		local selector = {getMouseInfo = function() return nil end}
+		clientEngine = {
+			getBlockSelector = function() return selector end,
+			getConfig = function() return {} end
+		}
+		knitless.ctrlLog(h, 'no ClientBlockEngine from the blocks slice; the breaker selects nothing')
+	end
+	local breakEffect = {}
+	function breakEffect:playHit() end
+	function breakEffect:playBreak() end
+	local breaker = {
+		clientManager = clientEngine,
+		cooldown = 0.3,
+		range = 18,
+		blockHealth = -1,
+		lastHitTime = 0,
+		breakEffect = breakEffect
+	}
+	function breaker:hitBlock() end
+	function breaker:updateHealthbar() end
+	function breaker:setCooldown(value)
+		self.cooldown = value
+	end
+	function breaker:getCooldown()
+		return self.cooldown
+	end
+	function breaker:setRange(value)
+		self.range = value
+	end
+	function breaker:getRange()
+		return self.range
+	end
+	function breaker:enable() end
+	function breaker:disable() end
+	knitless.ctrlPut(h, 'BlockBreakController', {Name = 'BlockBreakController', blockBreaker = breaker})
+
+	local matchController = {Name = 'MatchController'}
+	function matchController:getMatchState()
+		return knitless.ctrlMatchState(h)
+	end
+	knitless.ctrlPut(h, 'MatchController', matchController)
+
+	--[[ ItemDropController: DropItem by name, with the item from your hand or from a hotbar slot.
+	Auto-pickup (checkForPickup) stays with the game's controller. ]]
+	local drop = {Name = 'ItemDropController'}
+	local function sendDrop(payload)
+		local remote = knitless.ctrlRemote(h, 'DropItem')
+		if not remote then return nil end
+		local ok, dropped = pcall(remote.CallServer, remote, payload)
+		if not (ok and dropped) then return nil end
+		knitless.ctrlPlaySound(h, h.gameSound.DROP_ITEM)
+		if typeof(dropped) == 'Instance' then
+			pcall(dropped.SetAttribute, dropped, 'ClientDropTime', tick())
+		end
+		return dropped
+	end
+	-- Called both ways: task.spawn(ItemDropController.dropItemInHand) passes no self.
+	function drop.dropItemInHand()
+		-- The game drops the hand in its store, the item it has selected (knitless.hotbarSelectedItem),
+		-- which a module's swap leaves where it was. HandInvItem with no tiles to read.
+		local item = knitless.hotbarSelectedItem(h.ctx)
+		local tool = if item == nil then knitless.ctrlHand(h) else item and item.tool
+		if tool then
+			sendDrop({item = tool})
+		end
+	end
+	function drop:dropHotbarItem(slot)
+		local state = knitless.ctrlState(h)
+		local observed = state and state.Inventory and state.Inventory.observedInventory
+		local entry = observed and observed.hotbar and observed.hotbar[(tonumber(slot) or 0) + 1]
+		local item = type(entry) == 'table' and entry.item or nil
+		if not (type(item) == 'table' and item.tool) then return false end
+		return sendDrop({item = item.tool, amount = item.amount}) ~= nil
+	end
+	knitless.ctrlPut(h, 'ItemDropController', drop)
+
+	--[[ The game draws its own damage numbers; this one draws nothing. ]]
+	knitless.ctrlPut(h, 'DamageIndicatorController', {
+		Name = 'DamageIndicatorController',
+		spawnDamageIndicator = function() end
+	})
+
+	--[[ KnockbackController.getLastKnockbackTime: the server time of the last hit on you that
+	carried knockback, from the Zap stand-in's EntityDamageEventZap with the game's own filter (not
+	fall damage, knockback not disabled, 50 ms apart). With no Zap events (no decoder yet), a drop in
+	your Humanoid's health stands in, fall damage included. ]]
+	local knockback = {Name = 'KnockbackController', lastKnockbackTime = 0}
+	function knockback:getLastKnockbackTime()
+		return self.lastKnockbackTime
+	end
+	local function stamp()
+		local now = h.workspace:GetServerTimeNow()
+		if now - knockback.lastKnockbackTime > 0.05 then
+			knockback.lastKnockbackTime = now
+		end
+	end
+	local damageEvent = knitless.ctrlExport(h, 'PlayerScripts.TS.lib.network', 'EntityDamageEventZap')
+	if type(damageEvent) == 'table' and type(damageEvent.On) == 'function' then
+		pcall(function()
+			local stop = damageEvent.On(function(entity, _, damageType, _, _, multiplier)
+				if entity ~= lplr.Character or damageType == 1 then return end
+				if type(multiplier) == 'table' and multiplier.disabled then return end
+				stamp()
+			end)
+			if stop then
+				h.ctx.clean(stop)
+			end
+		end)
+	end
+	knitless.ctrlOnCharacter(h, function(_, humanoid)
+		local last = humanoid.Health
+		return {humanoid.HealthChanged:Connect(function(health)
+			if health < last then
+				stamp()
+			end
+			last = health
+		end)}
+	end)
+	knitless.ctrlPut(h, 'KnockbackController', knockback)
+
+	--[[ Speed writes lastImpulseTime every frame; the game reads its own controller's. ]]
+	knitless.ctrlPut(h, 'StatefulEntityKnockbackController', {Name = 'StatefulEntityKnockbackController', lastImpulseTime = 0})
+end
+
+--[[ Controllers the loader and payload read outside the swing: placement, input, names, honor,
+queue and the HUD hooks. ]]
+function knitless.ctrlGeneral(h)
+	local lplr = h.lplr
+
+	--[[ BlockPlacementController: disabled is the DenyBlockPlace attribute (kit controllers that
+	disable the placer are not seen). blockPlacer is there while the item the game has selected is a
+	block, as the game's is: one blocks-slice BlockPlacer whose blockType follows that item
+	(knitless.hotbarSelectedItem), which a module's swap leaves where it was; with no tiles to read
+	it follows the hand. ]]
+	local BlockPlacer = knitless.ctrlExport(h, 'ReplicatedStorage.rbxts_include.node_modules.@easy-games.block-engine.out.client.placement.block-placer', 'BlockPlacer')
+	local clientEngine = knitless.ctrlExport(h, 'PlayerScripts.TS.lib.block-engine.client-block-engine', 'ClientBlockEngine')
+	local placer
+	if type(BlockPlacer) == 'table' and type(BlockPlacer.new) == 'function' and clientEngine then
+		local ok, made = pcall(BlockPlacer.new, clientEngine, 'wool_white')
+		placer = ok and made or nil
+	end
+	knitless.ctrlPut(h, 'BlockPlacementController', setmetatable({Name = 'BlockPlacementController'}, {
+		__index = function(_, key)
+			if key == 'disabled' then
+				return lplr:GetAttribute('DenyBlockPlace') == true
+			elseif key == 'blockPlacer' and placer then
+				local item = knitless.hotbarSelectedItem(h.ctx)
+				local tool, meta
+				if item == nil then
+					tool, meta = knitless.ctrlHand(h)
+				elseif item and item.tool then
+					tool, meta = item.tool, knitless.ctrlItemMeta(h, item.tool.Name)
+				end
+				if not (meta and meta.block) then return nil end
+				placer.blockType = tool.Name
+				return placer
+			end
+			return nil
+		end
+	}))
+
+	--[[ The blocks slice's placer stamps lastPlaceTimestamp on its own placements. Placements the
+	game makes for you are paced by the game's own controller and are not stamped here. ]]
+	knitless.ctrlPut(h, 'BlockCpsController', {Name = 'BlockCpsController', lastPlaceTimestamp = 0})
+
+	--[[ DaoController.chargingMaid: set while a dao sword is charging, which is when the game sets
+	IsCasting with one in hand. A stand-in object, nothing to clean. ]]
+	local charging = {DoCleaning = function() end}
+	knitless.ctrlPut(h, 'DaoController', setmetatable({Name = 'DaoController'}, {
+		__index = function(_, key)
+			if key ~= 'chargingMaid' then return nil end
+			local casting = lplr:GetAttribute('IsCasting')
+			if casting == nil or casting == false or casting == 0 then return nil end
+			local _, meta = knitless.ctrlHand(h)
+			return meta and meta.daoSword and charging or nil
+		end
+	}))
+
+	--[[ HangGliderController.hangGliderActive: the glider's LiftForce is under your root part while
+	it is open. ]]
+	knitless.ctrlPut(h, 'HangGliderController', setmetatable({Name = 'HangGliderController'}, {
+		__index = function(_, key)
+			if key ~= 'hangGliderActive' then return nil end
+			local character = lplr.Character
+			local root = character and (character:FindFirstChild('HumanoidRootPart') or character.PrimaryPart)
+			return root ~= nil and root:FindFirstChild('LiftForce') ~= nil
+		end
+	}))
+
+	--[[ StreamerModeController.getDisplayName, the game's formula: the kit's name ('Player' before
+	the match), then on a match server '-', the team id and two digits from
+	Random.new(startTime + UserId). Without the match's startTime it gives the kit's name only. ]]
+	local streamer = {Name = 'StreamerModeController'}
+	function streamer:getDisplayName(player)
+		local kits = player:GetAttribute('PlayingAsKits')
+		local kit = type(kits) == 'string' and kits:split(',')[1] or 'none'
+		if kit == '' then kit = 'none' end
+		local meta = h.kitMeta[kit]
+		local name = type(meta) == 'table' and meta.name or kit
+		if knitless.ctrlMatchState(h) == 0 then
+			name = 'Player'
+		end
+		local state = knitless.ctrlState(h)
+		local startTime = state and state.Game and tonumber(state.Game.startTime)
+		if not startTime then return name end
+		local random = Random.new(startTime + player.UserId)
+		return name..'-'..tostring(player:GetAttribute('Team') or '')..tostring(random:NextInteger(0, 9))..tostring(random:NextInteger(0, 9))
+	end
+	knitless.ctrlPut(h, 'StreamerModeController', streamer)
+
+	--[[ HonorController.honorPlayer: TryGiveMatchHonorPoints, answered as a promise. The honored list
+	in the game's store is not updated. ]]
+	local honor = {Name = 'HonorController'}
+	function honor:honorPlayer(userId)
+		local remote = knitless.ctrlRemote(h, 'TryGiveMatchHonorPoints')
+		if not remote then
+			return h.ctx.Promise.reject('TryGiveMatchHonorPoints is unavailable')
+		end
+		return remote:CallServerAsync({toPlayerId = userId})
+	end
+	knitless.ctrlPut(h, 'HonorController', honor)
+
+	--[[ KeybindLoadController: the stock bindings, then your saved ones from
+	RetrieveProfileDataKeybinds. Every set keeps an Attack binding, as the readers expect. ]]
+	local function normalize(definition, attack)
+		local result = type(definition) == 'table' and table.clone(definition) or {}
+		local actions = type(result.controlActions) == 'table' and table.clone(result.controlActions) or {}
+		if typeof(actions.Attack) ~= 'EnumItem' then
+			actions.Attack = attack
+		end
+		result.controlActions = actions
+		return result
+	end
+	local keybinds = {
+		Name = 'KeybindLoadController',
+		loadedKeybinds = {
+			keyboard = normalize(nil, Enum.UserInputType.MouseButton1),
+			gamepad = normalize(nil, Enum.KeyCode.ButtonR2)
+		}
+	}
+	function keybinds:getKeybinds()
+		return self.loadedKeybinds
+	end
+	function keybinds:waitForKeybinds()
+		return self.loadedKeybinds
+	end
+	task.spawn(function()
+		local ok, reply = pcall(function()
+			return h.ctx.net:Get('RetrieveProfileDataKeybinds'):CallServer()
+		end)
+		if ok and type(reply) == 'table' then
+			keybinds.loadedKeybinds = {
+				keyboard = normalize(reply.keyboardKeybindDefinition, Enum.UserInputType.MouseButton1),
+				gamepad = normalize(reply.gamepadKeybindDefinition, Enum.KeyCode.ButtonR2)
+			}
+		elseif not ok then
+			knitless.ctrlLog(h, 'RetrieveProfileDataKeybinds failed: '..tostring(reply))
+		end
+	end)
+	knitless.ctrlPut(h, 'KeybindLoadController', keybinds)
+
+	--[[ QueueController: the lobby-events queue remotes, as LobbyQueueController sends them. ]]
+	local LOBBY = '@easy-games/lobby:shared/event/lobby-events@getEvents.Events'
+	local queue = {Name = 'QueueController'}
+	function queue:joinQueue(queueType)
+		knitless.ctrlFire(h, LOBBY, 'joinQueue', {queueType = queueType})
+	end
+	function queue:leaveQueue()
+		knitless.ctrlFire(h, LOBBY, 'leaveQueue')
+	end
+	knitless.ctrlPut(h, 'QueueController', queue)
+
+	--[[ UserInputController, as in the lobby: the game's own rule, and a type set on it by
+	DeviceSpoofer is sent again a frame after the game answers RequestUserInputType. ]]
+	local userInput = {Name = 'UserInputController'}
+	function userInput:getUserInputType()
+		if h.inputService.GamepadEnabled then return 'GAMEPAD' end
+		if h.inputService.TouchEnabled and not h.inputService.MouseEnabled then return 'MOBILE' end
+		return 'PC'
+	end
+	local realInputType = userInput.getUserInputType
+	knitless.ctrlListen(h, 'RequestUserInputType', function()
+		if userInput.getUserInputType == realInputType then return end
+		task.defer(function()
+			local remote = knitless.ctrlRemote(h, 'SendUserInputType')
+			if remote then
+				pcall(remote.SendToServer, remote, {userInputType = userInput:getUserInputType()})
+			end
+		end)
+	end)
+	knitless.ctrlPut(h, 'UserInputController', userInput)
+
+	--[[ GuidedProjectileController.fireGuidedProjectile, the remote the game's controller holds.
+	The drone being guided is the game's own state, so getCurrentGuidedProjectile is left nil. ]]
+	knitless.ctrlPut(h, 'GuidedProjectileController', setmetatable({Name = 'GuidedProjectileController'}, {
+		__index = function(self, key)
+			if key ~= 'fireGuidedProjectile' then return nil end
+			local remote = knitless.ctrlRemote(h, 'FireGuidedProjectile')
+			if remote then
+				rawset(self, key, remote)
+			end
+			return remote
+		end
+	}))
+
+	--[[ The game keeps its kill effect classes here; FPS Boost walks the table. ]]
+	knitless.ctrlPut(h, 'KillEffectController', {Name = 'KillEffectController', killEffects = {}})
+end
+
+--[[ BalloonController and NametagController: their switches watched (ctrlWatched) so that turning
+a game behaviour off works through what the game itself reads. ]]
+function knitless.ctrlWatchers(h)
+	local lplr = h.lplr
+
+	--[[ Holding deflateBalloon (Fly) sets BalloonPopDisabled, which the game reads when your
+	balloons go up to decide whether to offer the pop button; balloons already up keep theirs. The
+	inflate cooldown is the game's UI and is not checked. ]]
+	local balloonMethods = {}
+	local function balloonSend(name)
+		local viewmodel = h.ctx.controllers.ViewmodelController
+		if viewmodel then
+			pcall(viewmodel.playAnimation, viewmodel, h.animationType.FP_USE_ITEM)
+		end
+		local remote = knitless.ctrlRemote(h, name)
+		if remote then
+			remote:SendToServer()
+		end
+	end
+	function balloonMethods:inflateBalloon()
+		balloonSend('InflateBalloon')
+	end
+	function balloonMethods:deflateBalloon()
+		balloonSend('DeflateBalloon')
+	end
+	local ownPopFlag = false
+	knitless.ctrlPut(h, 'BalloonController', knitless.ctrlWatched({Name = 'BalloonController'}, balloonMethods, function(key, replaced)
+		if key ~= 'deflateBalloon' then return end
+		if replaced and lplr:GetAttribute('BalloonPopDisabled') == nil then
+			ownPopFlag = true
+			lplr:SetAttribute('BalloonPopDisabled', true)
+		elseif not replaced and ownPopFlag then
+			ownPopFlag = false
+			lplr:SetAttribute('BalloonPopDisabled', nil)
+		end
+	end))
+
+	--[[ Swapping addGameNametag out (NameTags, FPS Boost) sets NoNametag on every entity, which the
+	game's nametag controller watches: it takes the tag down and keeps it down. Putting the method
+	back clears the ones set here, and the game brings the tags back. addGameNametag and
+	removeGameNametag do the same for one model. ]]
+	local hidden = false
+	local owned = setmetatable({}, {__mode = 'k'})
+	local function hide(model)
+		if typeof(model) == 'Instance' and model:GetAttribute('NoNametag') == nil then
+			owned[model] = true
+			model:SetAttribute('NoNametag', true)
+		end
+	end
+	local function show(model)
+		if typeof(model) == 'Instance' and owned[model] then
+			owned[model] = nil
+			model:SetAttribute('NoNametag', nil)
+		end
+	end
+	local nametagMethods = {}
+	function nametagMethods:addGameNametag(model)
+		show(model)
+	end
+	function nametagMethods:removeGameNametag(model)
+		hide(model)
+	end
+	knitless.ctrlPut(h, 'NametagController', knitless.ctrlWatched({Name = 'NametagController'}, nametagMethods, function(key, replaced)
+		if key ~= 'addGameNametag' or replaced == hidden then return end
+		hidden = replaced
+		for _, model in h.collection:GetTagged('entity') do
+			if hidden then
+				hide(model)
+			else
+				show(model)
+			end
+		end
+	end))
+	h.ctx.clean(h.collection:GetInstanceAddedSignal('entity'):Connect(function(model)
+		if hidden then
+			task.defer(hide, model)
+		end
+	end))
+end
+
+--[[ AbilityController, after game-core's ability-controller. Cooldowns are known only when the
+server sends them (abilityCooldownUpdate) or when a dump carries AbilityMeta; otherwise an ability
+used here waits half a second before canUseAbility says yes again, so the polling modules do not
+fire it every frame. Blocking status effects come from AbilityMeta, or silence alone without it.
+enabledAbilities holds your kits' innate abilities (BedwarsKitMeta, PlayingAsKits and ExtraKit_
+attributes) and any ability the server has reported for you; item abilities appear once reported.
+getExtraData of the game's ability entries is not known, so useAbility sends only the data it is
+given. The game's cooldownController (its UI) is not offered. ]]
+function knitless.ctrlAbility(h)
+	local GAME_CORE = '@easy-games/game-core:shared/game-core-networking@getEvents.Events'
+	local LOCAL_GAP = 0.5
+	local lplr, workspace = h.lplr, h.workspace
+	local cooldownUntil, observed = {}, {}
+	local ability = {
+		Name = 'AbilityController',
+		enabledAbilities = {},
+		blockedAbilities = {},
+		abilityProgressValues = {}
+	}
+
+	local function metaOf(id)
+		local meta = type(h.abilityMeta) == 'table' and h.abilityMeta[id] or nil
+		return type(meta) == 'table' and meta or nil
+	end
+
+	local function rebuild()
+		local kits = {}
+		local list = lplr:GetAttribute('PlayingAsKits')
+		if type(list) == 'string' then
+			for _, kit in list:split(',') do
+				kits[kit] = true
+			end
+		end
+		for name, value in lplr:GetAttributes() do
+			if value == true and name:sub(1, 9) == 'ExtraKit_' then
+				kits[name:sub(10)] = true
+			end
+		end
+		local enabled = {}
+		for kit in kits do
+			local meta = h.kitMeta[kit]
+			for _, entry in (type(meta) == 'table' and type(meta.abilities) == 'table' and meta.abilities or {}) do
+				if type(entry) == 'table' and entry.innate == true and entry.abilityId then
+					enabled[entry.abilityId] = true
+				end
+			end
+		end
+		for id in observed do
+			enabled[id] = true
+		end
+		-- In place: modules keep the table they read.
+		local map = ability.enabledAbilities
+		for id in map do
+			if not enabled[id] then
+				map[id] = nil
+			end
+		end
+		for id in enabled do
+			map[id] = map[id] or {abilityId = id}
+		end
+	end
+
+	local function observe(id)
+		if type(id) == 'string' and not observed[id] then
+			observed[id] = true
+			rebuild()
+		end
+	end
+
+	function ability:getEnabledAbility(id)
+		return self.enabledAbilities[id]
+	end
+
+	function ability:getEnabledAbilities()
+		return self.enabledAbilities
+	end
+
+	function ability:getProgress(id)
+		return self.abilityProgressValues[id]
+	end
+
+	function ability:isAbilityBlocked(id)
+		local character = lplr.Character
+		if not character then return false end
+		local meta = metaOf(id)
+		local effects = meta and type(meta.blockingStatusEffects) == 'table' and meta.blockingStatusEffects or {'silence'}
+		for _, effect in effects do
+			if character:GetAttribute('StatusEffect_'..tostring(effect)) ~= nil then
+				return true
+			end
+		end
+		return false
+	end
+
+	function ability:getBlockedAbilities()
+		local blocked = {}
+		for id in self.enabledAbilities do
+			if self:isAbilityBlocked(id) then
+				table.insert(blocked, id)
+			end
+		end
+		return blocked
+	end
+
+	function ability:canUseAbility(id)
+		if type(id) ~= 'string' or self:isAbilityBlocked(id) then return false end
+		if (cooldownUntil[id] or 0) > workspace:GetServerTimeNow() then return false end
+		local meta = metaOf(id)
+		local progress = meta and meta.usableProgress
+		if type(progress) == 'table' and (self.abilityProgressValues[id] or 0) < (progress.progressNeededPerUse or 0) then
+			return false
+		end
+		return knitless.ctrlAlive(lplr.Character)
+	end
+
+	--[[ useAbility(id, token, data): token is the game's local AbilityUsed handle and has no use
+	here. ]]
+	function ability:useAbility(id, _, data)
+		if not self:canUseAbility(id) then return nil end
+		local meta = metaOf(id)
+		local cooldown = meta and meta.cooldown
+		local duration = type(cooldown) == 'table' and tonumber(cooldown.duration) or LOCAL_GAP
+		if knitless.ctrlFire(h, GAME_CORE, 'useAbility', id, data) then
+			cooldownUntil[id] = workspace:GetServerTimeNow() + duration
+		end
+		return nil
+	end
+
+	knitless.ctrlListenFolder(h, GAME_CORE, 'abilityCooldownUpdate', function(id, seconds)
+		if type(id) ~= 'string' then return end
+		cooldownUntil[id] = workspace:GetServerTimeNow() + (tonumber(seconds) or 0)
+		observe(id)
+	end)
+	knitless.ctrlListenFolder(h, GAME_CORE, 'abilityProgressUpdate', function(id, value)
+		if type(id) ~= 'string' then return end
+		ability.abilityProgressValues[id] = tonumber(value) or 0
+		observe(id)
+	end)
+	knitless.ctrlListenFolder(h, GAME_CORE, 'abilityUsed', function(character, id)
+		if character == lplr.Character then
+			observe(id)
+		end
+	end)
+	h.ctx.clean(lplr.AttributeChanged:Connect(function(name)
+		if name == 'PlayingAsKits' or name:sub(1, 9) == 'ExtraKit_' then
+			rebuild()
+		end
+	end))
+	rebuild()
+	return ability
+end
+
+--[[ Flamework's resolver for the ids the bootstrap and loader ask for: AbilityController,
+KillFeedController (addToKillFeed draws nothing: the feed is the game's UI), PartyController
+(leaveParty through lobby-events) and AppController (the registry's). Any other id goes to a
+resolver an earlier slice put there, then to the stand-in controller of that name. ]]
+function knitless.ctrlFlamework(h, ability)
+	local PATH = 'ReplicatedStorage.rbxts_include.node_modules.@flamework.core.out'
+	local LOBBY = '@easy-games/lobby:shared/event/lobby-events@getEvents.Events'
+	local party = {Name = 'PartyController'}
+	function party:leaveParty()
+		knitless.ctrlFire(h, LOBBY, 'leaveParty')
+	end
+	local dependencies = {
+		['@easy-games/game-core:client/controllers/ability/ability-controller@AbilityController'] = ability,
+		['client/controllers/game/kill-feed/kill-feed-controller@KillFeedController'] = {
+			Name = 'KillFeedController',
+			addToKillFeed = function() end
+		},
+		['@easy-games/lobby:client/controllers/party-controller@PartyController'] = party
+	}
+	local previous = h.ctx.modules[PATH]
+	previous = type(previous) == 'table' and type(previous.Flamework) == 'table' and previous.Flamework.resolveDependency or nil
+
+	local Flamework = {}
+	function Flamework.resolveDependency(id)
+		local found = dependencies[id]
+		if found ~= nil then return found end
+		id = tostring(id)
+		local name = id:match('@([%w_]+)$')
+		if name == 'AppController' then
+			local app = knitless.ctrlExport(h, 'ReplicatedStorage.rbxts_include.node_modules.@easy-games.game-core.out.client.controllers.app-controller', 'AppController')
+			if app ~= nil then return app end
+		end
+		if type(previous) == 'function' then
+			local ok, value = pcall(previous, id)
+			if ok and value ~= nil then return value end
+		end
+		found = name and h.ctx.controllers[name]
+		if found == nil then
+			knitless.ctrlLog(h, 'Flamework has no stand-in for '..id)
+		end
+		return found
+	end
+	h.ctx.modules[PATH] = {Flamework = Flamework}
+end
+
+--[[ Kit controllers the payload calls without a guard, built on their remotes, and empty ones for
+the kit controllers whose methods the payload only replaces: the game never calls those
+replacements, so the modules that install them do nothing here instead of failing. ]]
+function knitless.ctrlKits(h, ability)
+	local lplr, workspace = h.lplr, h.workspace
+
+	knitless.ctrlPut(h, 'RavenController', {
+		Name = 'RavenController',
+		detonateRaven = function()
+			ability:useAbility('raven_detonate')
+		end
+	})
+
+	--[[ SummonerClawHandController:attack, after summoner-claw-hand-controller: not while frozen,
+	CLAW_COOLDOWN apart, then SummonerClawAttackRequest from your root along the camera. The game's
+	0.1 s after equipping is not seen (enableTime stays 0). ]]
+	local balance = knitless.ctrlExport(h, 'ReplicatedStorage.TS.games.bedwars.kit.kits.summoner.summoner-kit-balance', 'SummonerKitBalance')
+	local claw = {Name = 'SummonerClawHandController', lastAttackTime = 0, enableTime = 0}
+	function claw:attack(itemType)
+		local character = lplr.Character
+		local root = character and character.PrimaryPart
+		local camera = workspace.CurrentCamera
+		if not (root and camera and knitless.ctrlAlive(character)) then return nil end
+		if character:GetAttribute('StatusEffect_frozen') ~= nil then return nil end
+		local cooldown = type(balance) == 'table' and tonumber(balance.CLAW_COOLDOWN) or 0.55
+		local now = workspace:GetServerTimeNow()
+		if now - self.enableTime < 0.1 or now - self.lastAttackTime < cooldown then return nil end
+		self.lastAttackTime = now
+		local look, position = camera.CFrame.LookVector, root.Position
+		task.spawn(function()
+			local visual = h.ctx.controllers.SummonerClawController
+			if visual then
+				pcall(visual.clawAttack, visual, lplr, position, look, itemType)
+			end
+		end)
+		local remote = knitless.ctrlRemote(h, 'SummonerClawAttackRequest')
+		if remote then
+			remote:SendToServer({position = position, direction = look, clientTime = workspace:GetServerTimeNow()})
+		end
+		return nil
+	end
+	knitless.ctrlPut(h, 'SummonerClawHandController', claw)
+	-- The claw swipe is a local effect of the game's controller; nothing is drawn here.
+	knitless.ctrlPut(h, 'SummonerClawController', {Name = 'SummonerClawController', clawAttack = function() end})
+
+	--[[ DragonSlayerController.dragonEmblems[target] = {stackCount}, kept from
+	UpdateDragonSlayerStacks for your own punches. ]]
+	local dragon = {Name = 'DragonSlayerController', dragonEmblems = {}}
+	knitless.ctrlListen(h, 'UpdateDragonSlayerStacks', function(data)
+		if type(data) ~= 'table' or data.kitUser ~= lplr.UserId or typeof(data.target) ~= 'Instance' then return end
+		local emblems = dragon.dragonEmblems
+		for target in emblems do
+			if not target.Parent then
+				emblems[target] = nil
+			end
+		end
+		if data.stacks == 0 then
+			emblems[data.target] = nil
+			return
+		end
+		local entry = emblems[data.target] or {stackCount = 0}
+		entry.stackCount = tonumber(data.stacks) or 0
+		emblems[data.target] = entry
+	end)
+	knitless.ctrlPut(h, 'DragonSlayerController', dragon)
+
+	--[[ collectEntity(player, entity, name), as the collectable entity controllers send it. ]]
+	local function collector(name, sound)
+		return {Name = name, collectEntity = function(_, player, entity, collectableName)
+			if player ~= lplr or typeof(entity) ~= 'Instance' then return nil end
+			if sound then
+				knitless.ctrlPlaySound(h, sound)
+			end
+			local remote = knitless.ctrlRemote(h, 'CollectCollectableEntity')
+			if remote then
+				remote:SendToServer({id = entity:GetAttribute('Id'), collectableName = collectableName})
+			end
+			return nil
+		end}
+	end
+	knitless.ctrlPut(h, 'StarCollectorController', collector('StarCollectorController', h.gameSound.STAR_PICKUP))
+	knitless.ctrlPut(h, 'JailorController', collector('JailorController'))
+
+	--[[ GrimReaperController.soulsByPosition: the soul models, which the game's controller tags
+	GrimSoul as it places them. ]]
+	knitless.ctrlPut(h, 'GrimReaperController', setmetatable({Name = 'GrimReaperController'}, {
+		__index = function(_, key)
+			if key ~= 'soulsByPosition' then return nil end
+			return h.collection:GetTagged('GrimSoul')
+		end
+	}))
+
+	--[[ SpiritAssassinController:useSpirit(player, orb): not while grounded or frosted, then
+	UseSpirit with the orb's secret; the orb goes 0.7 s later, as the game removes it. The speed boost
+	the game adds on its side of a use is not added. ]]
+	local spirit = {Name = 'SpiritAssassinController'}
+	function spirit:useSpirit(player, orb)
+		local character = player and player.Character
+		if character and (character:GetAttribute('StatusEffect_grounded') ~= nil or character:GetAttribute('StatusEffect_frosted') ~= nil) then
+			return false
+		end
+		local remote = typeof(orb) == 'Instance' and knitless.ctrlRemote(h, 'UseSpirit')
+		if not remote then return false end
+		local ok, used = pcall(remote.CallServer, remote, {secret = orb:GetAttribute('SpiritSecret')})
+		if ok and used then
+			task.delay(0.7, function()
+				if orb.Parent then
+					orb:Destroy()
+				end
+			end)
+		end
+		return ok and used or false
+	end
+	knitless.ctrlPut(h, 'SpiritAssassinController', spirit)
+
+	--[[ MapController, for the blocks slice and AutoTrap: map bounds from Workspace.MapCFrames
+	(bound_1/bound_2, else corner_1/corner_2) in block cells. The no-build regions come through Zap
+	map data this file has no reader for, so isInDenyRegion says no and the server decides. ]]
+	local map = {Name = 'MapController'}
+	function map:getMapName()
+		return workspace:GetAttribute('MapName')
+	end
+	function map:getCFrameWithoutYield(name)
+		local folder = workspace:FindFirstChild('MapCFrames')
+		local value = folder and folder:FindFirstChild(name)
+		return value and value:IsA('CFrameValue') and value.Value or nil
+	end
+	function map:cacheMapBounds()
+		local one = self:getCFrameWithoutYield('bound_1') or self:getCFrameWithoutYield('corner_1')
+		local two = self:getCFrameWithoutYield('bound_2') or self:getCFrameWithoutYield('corner_2')
+		if not (one and two) then return end
+		local function cell(position)
+			return Vector3.new(math.round(position.X / 3), math.round(position.Y / 3), math.round(position.Z / 3))
+		end
+		local a, b = cell(one.Position), cell(two.Position)
+		self.minMapCorner = a:Min(b)
+		self.maxMapCorner = a:Max(b)
+	end
+	function map:isInDenyRegion()
+		return false
+	end
+	function map:isOutOfBounds(cell)
+		if typeof(cell) ~= 'Vector3' then return false end
+		if not (self.minMapCorner and self.maxMapCorner) then
+			self:cacheMapBounds()
+		end
+		local low, high = self.minMapCorner, self.maxMapCorner
+		if not (low and high) then return false end
+		return cell.X < low.X or cell.X > high.X or cell.Y < low.Y or cell.Y > high.Y or cell.Z < low.Z or cell.Z > high.Z
+	end
+	knitless.ctrlPut(h, 'MapController', map)
+
+	for name, fields in {
+		CatController = {},
+		CannonHandController = {},
+		LaunchPadController = {lastLaunch = 0},
+		TripleShotProjectileController = {overchargeStartTime = 0},
+		FishingMinigameController = {},
+		FishingRodController = {activeFishing = false},
+		BlockKickerKitController = {},
+		BatteryEffectsController = {liveBatteries = {}, getBatteryInfo = function() return nil end}
+	} do
+		fields.Name = name
+		knitless.ctrlPut(h, name, fields)
+	end
+end
+
+--[[ KnockbackUtil (knockback-util), called with '.': the game's formula, with the constants the
+game registers through ConstantManager read off the module's attributes. applyKnockback is the
+game's to call on its own hits; this one is called by nothing and does nothing. ]]
+function knitless.ctrlKnockbackUtil(h)
+	local defaults = {
+		kbUpwardStrength = 10000,
+		kbDirectionStrength = 11750,
+		kbStandardMass = 300,
+		nonGroundedHorizontalResistence = 0.6,
+		nonGroundedVerticalResistence = 0.75
+	}
+	local moduleScript
+	pcall(function()
+		moduleScript = h.replicatedStorage.TS.damage['knockback-util']
+	end)
+	local constants = setmetatable({}, {__index = function(_, key)
+		local value = moduleScript and moduleScript:GetAttribute('ConstantManager_'..tostring(key))
+		return type(value) == 'number' and value or defaults[key]
+	end})
+
+	local util = {}
+	function util.getDirection(from, to)
+		if not to then return Vector3.zero end
+		local away = Vector3.new(from.X, 0, from.Z) - Vector3.new(to.X or 0, 0, to.Z or 0)
+		if away.Magnitude == 0 then return Vector3.zero end
+		return away.Unit
+	end
+	function util.calculateKnockbackVelocity(direction, mass, options)
+		if typeof(direction) ~= 'Vector3' or direction.Magnitude == 0 then return Vector3.zero end
+		local vertical = type(options) == 'table' and options.vertical or 1
+		local horizontal = type(options) == 'table' and options.horizontal or 1
+		local velocity = (Vector3.new(0, constants.kbUpwardStrength * vertical, 0) + direction.Unit * (constants.kbDirectionStrength * horizontal))
+			* ((tonumber(mass) or 0) / constants.kbStandardMass)
+		local multiplier = h.workspace:GetAttribute('kbmultiplier')
+		return velocity * (tonumber(multiplier) or 1) * 0.9
+	end
+	function util.calculateKnockbackVelocityRelative(part, mass, from, options)
+		return util.calculateKnockbackVelocity(util.getDirection(part.Position, from), mass, options)
+	end
+	function util.applyKnockback() end
+	function util.applyKnockbackDirection(_, mass, direction, options)
+		return util.calculateKnockbackVelocity(direction, mass, options)
+	end
+	knitless.ctrlModule(h, 'ReplicatedStorage.TS.damage.knockback-util', {KnockbackUtil = util, KnockbackConstants = constants})
+end
+
+--[[ StatusEffectUtil (status-effect-util), called with ':': a status effect is the entity's
+StatusEffect_<type> attribute (its expiry, -1 for none), with _stacks, _extraNumbers and
+_extraBooleans beside it. ]]
+function knitless.ctrlStatusEffectUtil(h)
+	local util = {}
+	function util:getAttributeName(effect)
+		return 'StatusEffect_'..tostring(effect)
+	end
+	function util:getActive(entity, effect)
+		if typeof(entity) ~= 'Instance' then return nil end
+		local name = self:getAttributeName(effect)
+		local expiry = entity:GetAttribute(name)
+		if expiry == nil then return nil end
+		local numbers, booleans = {}, {}
+		local rawNumbers = entity:GetAttribute(name..'_extraNumbers')
+		if type(rawNumbers) == 'string' then
+			for _, part in rawNumbers:split(',') do
+				local number = tonumber(part)
+				if number then
+					table.insert(numbers, number)
+				end
+			end
+		end
+		local rawBooleans = entity:GetAttribute(name..'_extraBooleans')
+		if type(rawBooleans) == 'string' then
+			for _, part in rawBooleans:split(',') do
+				if part ~= '' then
+					table.insert(booleans, part == '1')
+				end
+			end
+		end
+		return {
+			statusEffect = effect,
+			expireTime = if expiry == -1 then nil else expiry,
+			stacks = entity:GetAttribute(name..'_stacks'),
+			extraNumbers = if #numbers > 0 then numbers else nil,
+			extraBooleans = if #booleans > 0 then booleans else nil
+		}
+	end
+	function util:isActive(entity, effect)
+		if typeof(entity) ~= 'Instance' then return false end
+		return entity:GetAttribute(self:getAttributeName(effect)) ~= nil
+	end
+	function util:hasAnyActive(entity, effects)
+		for _, effect in (type(effects) == 'table' and effects or {}) do
+			if self:isActive(entity, effect) then return true end
+		end
+		return false
+	end
+	function util:getStacks(entity, effect)
+		local active = self:getActive(entity, effect)
+		return active and active.stacks or 0
+	end
+	function util:getAllActive(entity)
+		local types = knitless.ctrlExport(h, 'ReplicatedStorage.TS.status-effect.status-effect-type', 'StatusEffectType')
+		local list = {}
+		for _, effect in (type(types) == 'table' and types or {}) do
+			local active = self:getActive(entity, effect)
+			if active then
+				table.insert(list, active)
+			end
+		end
+		return list
+	end
+	knitless.ctrlModule(h, 'ReplicatedStorage.TS.status-effect.status-effect-util', {StatusEffectUtil = util})
+end
+
+--[[ Builds every stand-in into ctx.controllers and the three modules into ctx.modules. Each part
+runs on its own, so one that fails costs only its own controllers; the five the bootstrap waits for
+and DamageIndicatorController are made empty if their part failed. ]]
+function knitless.buildControllers(ctx)
+	local h = knitless.ctrlShared(ctx)
+	local function part(name, ...)
+		local ok, result = pcall(knitless[name], h, ...)
+		if not ok then
+			ctx.log('controllers: '..name..' failed: '..tostring(result))
+			return nil
+		end
+		return result
+	end
+
+	part('ctrlCamera')
+	part('ctrlSword')
+	part('ctrlSprint')
+	part('ctrlCore')
+	part('ctrlGeneral')
+	part('ctrlWatchers')
+	local ability = part('ctrlAbility')
+	if ability then
+		part('ctrlFlamework', ability)
+	end
+	-- Most kit stand-ins do not need the ability tracker; a failure there costs only its own.
+	part('ctrlKits', ability)
+	part('ctrlKnockbackUtil')
+	part('ctrlStatusEffectUtil')
+
+	for _, name in {'SwordController', 'ProjectileController', 'BlockBreakController', 'MatchController',
+		'ItemDropController', 'DamageIndicatorController'} do
+		if ctx.controllers[name] == nil then
+			ctx.log('controllers: '..name..' could not be built; an empty one stands in')
+			ctx.controllers[name] = {Name = name, lastAttack = 0, lastSwing = 0}
+		end
+	end
+end
+
+-- Developer log: kept in the session log, printed in developer mode.
+function knitless.log(message)
+	bufferCall('print', 'bedwars.knitless', tostring(message))
+end
+
+--[[ Builds what the bootstrap runs on and returns what the Knit path gets: true and the Knit
+stand-in. Each section builder gets ctx and fills ctx.modules[path] and ctx.controllers[name]; one
+that fails costs its own stand-ins and is logged. Errors only where the bootstrap could not go on:
+no exec.net (a universal.lua from before the layer), no remotes folders within 30 s, or an export
+the bootstrap indexes into missing. ]]
+function knitless.build()
+	assert(type(exec.net) == 'table' and type(exec.net.client) == 'function' and type(exec.Promise) == 'table'
+		and type(exec.loadData) == 'function',
+		'Knit is out of reach, and the layer that stands in for it needs exec.net, exec.Promise and exec.loadData from games/universal.lua')
+
+	--[[ The remotes folders, and the remotes the stand-ins take as they are built, which on a fresh
+	server replicate after their folder. All in one 30 s budget. ]]
+	local deadline = os.clock() + 30
+	local function waitPath(node, steps)
+		for _, step in steps do
+			node = node:FindFirstChild(step) or node:WaitForChild(step, math.max(deadline - os.clock(), 0.1))
+			if not node then return nil end
+		end
+		return node
+	end
+	local netFolder = waitPath(replicatedStorage, {'rbxts_include', 'node_modules', '@rbxts', 'net', 'out', '_NetManaged'})
+	local blockFolder = waitPath(replicatedStorage, {'rbxts_include', 'node_modules', '@easy-games', 'block-engine',
+		'node_modules', '@rbxts', 'net', 'out', '_NetManaged'})
+	assert(netFolder and blockFolder, 'the remotes folders (_NetManaged) did not appear within 30s')
+	for _, name in {'SwordHit', 'MatchStateEvent', 'SetInvItem', 'Inventory/GetSlotState'} do
+		waitPath(netFolder, {name})
+	end
+	for _, name in {'PlaceBlock', 'DamageBlock'} do
+		waitPath(blockFolder, {name})
+	end
+
+	local ctx = {
+		services = {
+			Players = playersService,
+			ReplicatedStorage = replicatedStorage,
+			CollectionService = collectionService,
+			RunService = runService,
+			HttpService = httpService,
+			Workspace = cloneref(game:GetService('Workspace')),
+			UserInputService = inputService,
+			TweenService = tweenService,
+			Debris = cloneref(game:GetService('Debris')),
+			SoundService = cloneref(game:GetService('SoundService'))
+		},
+		lplr = lplr,
+		net = exec.net.client(netFolder),
+		blockNet = exec.net.client(blockFolder),
+		events = exec.net.events,
+		Promise = exec.Promise,
+		data = function(name)
+			return exec.loadData('match', name)
+		end,
+		sharedData = function(name)
+			return exec.loadData('shared', name)
+		end,
+		clean = function(item)
+			vape:Clean(item)
+		end,
+		log = knitless.log,
+		modules = {},
+		controllers = {}
+	}
+	knitless.ctx = ctx
+
+	for _, step in {'buildRegistry', 'buildStore', 'buildBlocks', 'buildControllers'} do
+		local builder = knitless[step]
+		local ok, err = false, 'not included'
+		if type(builder) == 'function' then
+			ok, err = xpcall(builder, errorTrace, ctx)
+		end
+		if not ok then
+			bufferCall('error', 'bedwars.knitless', step..': '..tostring(err), {traceback = err})
+		end
+	end
+
+	local modules, controllers = ctx.modules, ctx.controllers
+	--[[ What is made of ctx alone, in case a section left it out: both remotes clients the way the
+	game's modules export them, Flamework's resolver over the stand-in controllers (by the name after
+	the '@'), and a Zap whose events stay silent. ]]
+	local remotesPath = 'ReplicatedStorage.TS.remotes'
+	local blockRemotesPath = 'ReplicatedStorage.rbxts_include.node_modules.@easy-games.block-engine.out.shared.remotes'
+	local flameworkPath = 'ReplicatedStorage.rbxts_include.node_modules.@flamework.core.out'
+	local zapPath = 'PlayerScripts.TS.lib.network'
+	modules[remotesPath] = modules[remotesPath] or {default = {Client = ctx.net}}
+	modules[blockRemotesPath] = modules[blockRemotesPath] or {BlockEngineRemotes = {Client = ctx.blockNet}}
+	modules[flameworkPath] = modules[flameworkPath] or {Flamework = {resolveDependency = function(id)
+		return controllers[tostring(id):match('@([%w_]+)$') or '']
+	end}}
+	if modules[zapPath] == nil then
+		local silent = {On = function()
+			return function() end
+		end}
+		modules[zapPath] = setmetatable({}, {__index = function()
+			return silent
+		end})
+		knitless.log('no Zap stand-in: damage, launch and block events stay silent')
+	end
+	--[[ The bootstrap waits for the first five and indexes into the sixth. An empty one keeps it
+	going with that controller's part dead; the log names it. ]]
+	for _, name in {'SwordController', 'ProjectileController', 'BlockBreakController', 'MatchController',
+		'ItemDropController', 'DamageIndicatorController'} do
+		if controllers[name] == nil then
+			controllers[name] = {Name = name, lastAttack = 0, lastSwing = 0}
+			bufferCall('warn', 'bedwars.knitless', 'no '..name..' stand-in; an empty one stands in')
+		end
+	end
+	--[[ Exports the bootstrap indexes past, calls or assigns into: missing, it would stop on an error
+	that names no module, so they are named here. ]]
+	local missing = {}
+	for path, keys in {
+		['ReplicatedStorage.rbxts_include.node_modules.@easy-games.block-engine.out'] = {'BlockEngine'},
+		['ReplicatedStorage.rbxts_include.node_modules.@easy-games.block-engine.out.client.placement.block-placer'] = {'BlockPlacer', 'new'},
+		['ReplicatedStorage.TS.games.bedwars.team-upgrade.team-upgrade-meta'] = {'getTeamUpgradeMetaForQueue'},
+		['ReplicatedStorage.TS.item.item-meta'] = {'items'},
+		['PlayerScripts.TS.ui.store'] = {'ClientStore', 'changed'}
+	} do
+		local value = modules[path]
+		for _, key in keys do
+			value = type(value) == 'table' and value[key] or nil
+		end
+		if value == nil then
+			table.insert(missing, path..' ('..table.concat(keys, '.')..')')
+		end
+	end
+	assert(#missing == 0, 'no stand-in for '..table.concat(missing, ', '))
+
+	--[[ BowConstantsTable without upvalues: the projectile controller registers its constants with
+	ConstantManager, which keeps each as a ConstantManager_<key> attribute on the ModuleScript and
+	copies changes into the live table. Read once; nil leaves the bootstrap's own defaults. ]]
+	pcall(function()
+		local module = lplr.PlayerScripts.TS.controllers.global.combat.projectile['projectile-controller']
+		local constants = {BeamGrowthMultiplier = 0.08, CameraMultiplier = 10, RelX = 0.8, RelY = -0.6, RelZ = 0, YTargetOffset = 0.05}
+		for key in constants do
+			local value = module:GetAttribute('ConstantManager_'..key)
+			if type(value) == 'number' then
+				constants[key] = value
+			end
+		end
+		knitless.BowConstants = constants
+	end)
+
+	knitless.Knit = {
+		Controllers = controllers,
+		-- Started already: everything is built before the bootstrap asks.
+		OnStart = function()
+			return exec.Promise.resolve()
+		end
+	}
+	if shared.PistonwareDeveloper == true then
+		-- For a look from outside (roblox-mcp) while testing; gone on uninject.
+		shared.PistonwareKnitless = knitless
+		vape:Clean(function()
+			if shared.PistonwareKnitless == knitless then
+				shared.PistonwareKnitless = nil
+			end
+		end)
+	end
+	return true, knitless.Knit
+end
+
+--[[ require inside the bootstrap while knitless.active. A module's path is its full name, with the
+"Players.<name>." in front of the local player's scripts left off; a path with no stand-in gets an
+empty table, the same one each time, and one log line. ]]
+function knitless.require(module)
+	local path = typeof(module) == 'Instance' and module:GetFullName() or tostring(module)
+	local prefix = 'Players.'..lplr.Name..'.'
+	if path:sub(1, #prefix) == prefix then
+		path = path:sub(#prefix + 1)
+	end
+	local export = knitless.ctx and knitless.ctx.modules[path]
+	if export ~= nil then return export end
+	if not knitless.empty[path] then
+		knitless.empty[path] = {}
+		knitless.log('no stand-in for '..path)
+	end
+	return knitless.empty[path]
+end
+
+--[[ ConsumeItem sent the way the game's ConsumeController sends it (consume-controller onEnable):
+StartConsume with the item when eating starts, then ConsumeItem with the same item once the item's
+consumeTime has run. Callers ask for ConsumeItem alone and get both. Knitless this is what Client.Get
+hands back for ConsumeItem; on the Knit path AutoConsume gets it from bedwars.getConsumeRemote, which
+passes via: the remotes client, Promise and log to use. Without via they are the layer's. Both
+paths settle a status item (a potion, a shield) for a second after it is eaten (via.settle).
+The game eats only the item in hand (ConsumeController is a HandKnitController). So a consume goes
+with the item where it is first, and if the server does not eat it, once more with the item in hand
+(knitless.consumeOnce); once that has worked, every consume holds the item.
+One consume at a time, as the game's ClickHold allows: a request made while one is under way sends
+nothing and gets nil. An item the server turned down both ways rests: 5 s, twice as long each time
+in a row that nothing is eaten, up to 30 s. So triggers that keep firing, and AutoConsume's look
+once a second, do not keep swapping the hand. ]]
+function knitless.consumeRemote(call, via)
+	via = via or {net = knitless.ctx.net, Promise = knitless.ctx.Promise, log = knitless.log, settle = 1}
+	knitless.consumeRefused = knitless.consumeRefused or setmetatable({}, {__mode = 'k'})
+	local function consume(args)
+		local item = type(args) == 'table' and args.item or nil
+		if typeof(item) ~= 'Instance' or not item.Parent or os.clock() < (knitless.consumeBusy or 0)
+			or os.clock() < (knitless.consumeRefused[item] or 0) then
+			return nil
+		end
+		local meta = bedwars.ItemMeta and bedwars.ItemMeta[item.Name]
+		local consumable = type(meta) == 'table' and meta.consumable or nil
+		local seconds = type(consumable) == 'table' and tonumber(consumable.consumeTime) or 0.8
+		-- A deadline rather than a flag, so a thread that never comes back cannot hold the rest.
+		local deadline = os.clock() + (seconds + 5) * 2
+		knitless.consumeBusy = deadline
+		local ok, result = pcall(function()
+			local held = knitless.consumeHold == true
+			--[[ Already in hand for the first try (you were holding it, eating it yourself, say): the
+			try in hand is then only a second try, and its working says nothing about the hand, so
+			it is not learned. Learning it there made every later consume take the hand. ]]
+			local link = lplr.Character and lplr.Character:FindFirstChild('HandInvItem')
+			local inHand = link ~= nil and link:IsA('ObjectValue') and link.Value == item
+			local answer, eaten, moved, busy = knitless.consumeOnce(call, args, item, seconds, held, via)
+			-- Not started (another action has the hand, knitless.holdHand) or dropped mid-drink. Nothing
+			-- was refused, so nothing rests; AutoConsume's next look tries again.
+			if busy then return nil end
+			if not eaten and not held and item.Parent then
+				--[[ A hand that moved during the drink is what it was refused for, and says nothing
+				about where the item has to be: the next try goes the same way. Only a refusal with
+				the hand still sends it in hand, and only that can teach that every consume holds it. ]]
+				local still = moved == 0
+				via.log('ConsumeItem '..item.Name..(not still and ': not eaten, the hand moved; once more'
+					or inHand and ': not eaten in hand; once more'
+					or ': not eaten from the inventory; once more in hand'))
+				local busyAgain
+				answer, eaten, moved, busyAgain = knitless.consumeOnce(call, args, item, seconds, still, via)
+				-- Not started this time either (LongJump or a pearl has the hand now) or dropped: no rest.
+				if busyAgain then return nil end
+				if eaten and still and not inHand then
+					knitless.consumeHold = true
+					via.log('ConsumeItem: the server eats only what is in hand; every consume holds the item now')
+				end
+			end
+			if eaten then
+				knitless.consumeStrikes = 0
+				--[[ via.settle (1 s on both paths): the same item waits that long after it is eaten,
+				until the status it gives (StatusEffect_speed, Shield_POTION) has come in, so
+				AutoConsume's look in between cannot drink a second one. Not a heal that needs missing
+				health (apple, orange): another while health is still low is what AutoConsume is
+				for, and settling those halved the healing pace. Not logged: nothing was refused. ]]
+				if via.settle and item.Parent and not (type(consumable) == 'table' and consumable.requiresMissingHealth) then
+					knitless.consumeRefused[item] = os.clock() + via.settle
+				end
+			else
+				knitless.consumeStrikes = (knitless.consumeStrikes or 0) + 1
+				local rest = math.min(5 * 2 ^ (knitless.consumeStrikes - 1), 30)
+				knitless.consumeRefused[item] = os.clock() + rest
+				via.log('ConsumeItem '..item.Name..': rests '..rest..' s')
+			end
+			-- Eaten is what callers go by: AutoConsume's speed potion tries again on a falsy answer.
+			return if eaten and not answer then true else answer
+		end)
+		-- Only its own: a reply that came back after its deadline leaves the next consume's alone.
+		if knitless.consumeBusy == deadline then
+			knitless.consumeBusy = nil
+		end
+		if not ok then
+			via.log('ConsumeItem '..item.Name..' failed: '..tostring(result))
+			error(result, 0)
+		end
+		return result
+	end
+	return setmetatable({
+		CallServer = function(_, args)
+			return consume(args)
+		end,
+		CallServerAsync = function(_, args)
+			return via.Promise.new(function(resolve)
+				resolve(consume(args))
+			end)
+		end
+	}, {__index = call})
+end
+
+--[[ The hand for one drink (knitless.consumeOnce): AutoConsume's claim on the hand every module
+shares (genv.claimItem), and store.handLock, which switchItem, hotbarSwitch and every module's own
+swap path go by (store.handHeld). autoconsume ranks above the auras and the kit abilities and
+below LongJump, AutoPearl and a manual claim: those are your own jump and your void save, and
+either one may take the hand mid-drink. The hold then ends for them at once (lock.owned), and the
+drink, refused, is tried again once they are done. An aura's shot under way is taken over: the
+auras stand back from a higher owner, and their swap back is what the hold stops. Anything else
+that has the hand mid-swap -- LongJump, a pearl, a kit ability, a jade slam -- is waited out
+instead, since a drink started then is a drink refused: nil and what has the hand. A claim the
+same holder has kept 3 s is taken as left behind; one that ranks above the drink cannot be taken
+over, so the drink then goes ahead on the lock alone (never past a manual claim). Returns the
+release, which can be called any number of times and ends only this hold, and the hold; `hard`
+seconds on, the hold ends whatever happens to the drink. The release is also store.handRelease
+while the hold lasts, for AutoConsume's death and toggle-off, which sit outside this block;
+release(true) drops the drink as well (knitless.consumeOnce). ]]
+function knitless.holdHand(item, hard)
+	local owner = genv.ItemOwner
+	local pinned = (genv.JadeSlamLock and 'jade slam')
+		or (genv.IsLongJumping and not genv.LongJumpFireballThrown and 'longjump') or nil
+	if pinned then return nil, pinned end
+	local stale = false
+	if owner ~= nil and owner ~= 'none' and owner ~= 'autoconsume' and owner ~= 'projectileaura'
+		and owner ~= 'killaura' then
+		local now, seen = os.clock(), knitless.handBusy
+		if not (seen and seen.owner == owner and seen.token == genv.ItemOwnerToken) then
+			knitless.handBusy = {owner = owner, token = genv.ItemOwnerToken, since = now}
+			return nil, owner
+		elseif now - seen.since < 3 then
+			return nil, owner
+		end
+		stale = owner ~= 'manual'
+	end
+	knitless.handBusy = nil
+	local priorities = genv.ITEM_PRIORITY
+	if type(priorities) == 'table' and priorities.autoconsume == nil then
+		priorities.autoconsume = 2.5
+	end
+	local claimed, token = false, nil
+	if type(genv.claimItem) == 'function' then
+		local fine, ok, value = pcall(genv.claimItem, 'autoconsume')
+		if fine and ok then
+			claimed, token = true, value
+		elseif stale then
+			-- On the lock alone, and only until anything claims the hand again (the token moves on).
+			token = genv.ItemOwnerToken
+		else
+			return nil, tostring(genv.ItemOwner)
+		end
+	end
+	local lock = {item = item, since = os.clock(), deadline = os.clock() + hard}
+	if token ~= nil then
+		-- The hold is the drink's only while the claim is: a higher owner's claim moves the token on.
+		lock.owned = function()
+			return genv.ItemOwnerToken == token
+		end
+	end
+	store.handLock = lock
+	local function release(drop)
+		if drop then lock.dropped = true end
+		if not lock.ended then lock.ended = os.clock() end
+		if store.handLock == lock then store.handLock = nil end
+		if store.handRelease == release then store.handRelease = nil end
+		if claimed then
+			claimed = false
+			if type(genv.releaseItem) == 'function' then pcall(genv.releaseItem, 'autoconsume', token) end
+		end
+	end
+	store.handRelease = release
+	task.delay(hard, release)
+	return release, lock
+end
+
+--[[ One StartConsume and ConsumeItem for knitless.consumeRemote. With hold, the item goes in hand
+first the way the game's equipItem puts it there (HandInvItem here, then SetInvItem, whose reply is
+waited for), and the previous hand goes back after unless something else took the hand. Returns
+the server's answer, whether the item was eaten (a truthy answer, or the item gone or fewer within
+half a second of it), how often the hand moved between StartConsume and ConsumeItem, and true
+when the drink was not started because another action has the hand, or was dropped because its
+hold was let go from outside. via is consumeRemote's: the remotes client StartConsume goes
+through, and the log.
+The hand is held for the drink (knitless.holdHand), from before StartConsume until just after the
+reply: since the game's 10-24 update the server times a drink from StartConsume, and a swap in
+between -- Killaura's sword, the aura's bow or raven -- spoils it. Putting the item back in hand
+after such a swap is one more swap, so a moved hand is only counted. ]]
+function knitless.consumeOnce(call, args, item, seconds, hold, via)
+	local link = lplr.Character and lplr.Character:FindFirstChild('HandInvItem')
+	if not (link and link:IsA('ObjectValue')) then link = nil end
+	-- The store's hand is this link a Heartbeat later; right after a swap back it is still stale.
+	local previous = if link then link.Value else store.hand and store.hand.tool
+	local swap = hold and link ~= nil and link.Value ~= item
+	local release, taken = knitless.holdHand(item, seconds + (swap and 1.2 or 0.7))
+	if not release then
+		-- Once per holder, not once a look.
+		local key = tostring(taken)..'#'..tostring(genv.ItemOwnerToken)
+		if knitless.handBusyLogged ~= key then
+			knitless.handBusyLogged = key
+			via.log('ConsumeItem '..item.Name..': not started, the hand is busy ('..tostring(taken)..')')
+		end
+		return nil, false, 0, true
+	end
+	knitless.handBusyLogged = nil
+	local function hand(tool)
+		link.Value = tool
+		local fine, err = pcall(function()
+			bedwars.Client:Get(remotes.EquipItem):CallServer({hand = tool or false})
+		end)
+		if not fine then
+			via.log('ConsumeItem: SetInvItem failed: '..tostring(err))
+		end
+	end
+	local moved, watch = 0, nil
+	local ok, answer, eaten, dropped = pcall(function()
+		--[[ A frame first: a swap another module sent before the hold goes out ahead of
+		StartConsume, and AutoConsume can be called from inside the character's AttributeChanged,
+		while HandInvItem is a property write. ]]
+		task.wait()
+		if swap then
+			hand(item)
+		end
+		if link then
+			-- Counts only, nothing is written in here. Our own write can still arrive late, as the same value.
+			local expect = link.Value
+			watch = link.Changed:Connect(function(value)
+				if value ~= expect then moved += 1 end
+			end)
+		end
+		local amount = item:GetAttribute('Amount')
+		local started = pcall(function()
+			via.net:Get('StartConsume'):SendToServer({item = item})
+		end)
+		if started then
+			-- A little past the item's time: the game's own request arrives after it, too.
+			task.wait(seconds + 0.1)
+		else
+			via.log('StartConsume could not be sent; ConsumeItem goes alone')
+		end
+		--[[ Let go from outside (a death, AutoConsume turned off): the drink is dropped, as the
+		game's own drops one. Nothing is sent, so nothing rests either; the hand still goes back. ]]
+		local dropping = taken.dropped == true
+		local sent, reply, done = true, nil, false
+		if not dropping then
+			sent, reply = pcall(call.CallServer, call, args)
+		end
+		if watch then watch:Disconnect() end
+		-- The hand is the other modules' again a moment after the reply.
+		task.delay(0.1, release)
+		local function gone()
+			local left = item:GetAttribute('Amount')
+			return item.Parent == nil or (type(amount) == 'number' and type(left) == 'number' and left < amount)
+		end
+		if not dropping then
+			done = sent and (reply and true or gone())
+			if sent and not done then
+				-- The new amount can come in just after the answer.
+				local stop = os.clock() + 0.5
+				repeat
+					task.wait()
+					done = gone()
+				until done or os.clock() > stop
+			end
+		end
+		if swap and link.Parent and (link.Value == item or link.Value == nil) then
+			local back = previous ~= item and previous and previous.Parent and previous or nil
+			if link.Value ~= back then
+				task.spawn(hand, back)
+			end
+		end
+		if not sent then error(reply, 0) end
+		return reply, done, dropping
+	end)
+	if watch then watch:Disconnect() end
+	if not ok then
+		release()
+		error(answer, 0)
+	end
+	if dropped then
+		via.log('ConsumeItem '..item.Name..': dropped, the hand was let go mid-drink')
+		return nil, false, moved, true
+	end
+	via.log('ConsumeItem '..item.Name..(swap and ' (in hand)' or '')..': '..tostring(answer)
+		..(eaten and ', eaten' or ', not eaten')
+		..string.format('; hand held %.2f s', (taken.ended or os.clock()) - taken.since)
+		..(moved > 0 and ', the hand moved '..moved..'x during the drink' or ''))
+	return answer, eaten, moved
+end
+
+--[[ SetInvItem during a jade slam, knitless with no namecall hook to hold it back (Xeno). The slam
+lands only with the hammer still in hand, and where the hook is in, it swallows any other equip
+until the landing; here the send stands back the same way while genv.JadeSlamHold (the hammer, and
+when the hold lapses at the latest) is up. The caller gets what a swallowed send gives: nothing, or
+a promise of nothing. Every other member is the remote's own, called on the remote. ]]
+function knitless.jadeEquipGate(call)
+	return setmetatable({}, {__index = function(_, key)
+		local value = call[key]
+		if type(value) ~= 'function' then return value end
+		return function(_, ...)
+			local hold = genv.JadeSlamHold
+			if (key == 'CallServerAsync' or key == 'CallServer' or key == 'SendToServer') and type(hold) == 'table'
+				and os.clock() < (tonumber(hold.expires) or 0) then
+				local args = ...
+				if not (type(args) == 'table' and args.hand == hold.tool) then
+					traceEquip(type(args) == 'table' and args.hand or nil, 'EquipItem:'..key..' held back for a jade slam')
+					if key == 'CallServerAsync' then return exec.Promise.resolve(nil) end
+					return nil
+				end
+			end
+			return value(call, ...)
+		end
+	end})
+end
+
+--[[ The Knit path below needs the debug library or Roblox's own require; Solara and Xeno have
+neither. The owner can take this path on a full executor too, to test it: developer mode plus
+shared.PistonwareForceKnitless. The stand-ins are not the game's modules, so exec.Live is off with
+them, as it already is on Solara, and fieldPatch and netGuard leave them alone. ]]
+knitless.active = (type(debug.getupvalue) ~= 'function' and not (exec.Require and exec.NativeRequire))
+	or (shared.PistonwareForceKnitless == true and shared.PistonwareDeveloper == true)
+if knitless.active then
+	exec.Live = false
+	-- Stand-ins are not the game's functions: nothing patches their constants or upvalues.
+	fieldPatch.constants = false
+	--[[ Force mode (a full executor testing this path): answer as Solara does from here on, so the
+	modules below take the routes Solara takes. ]]
+	if shared.PistonwareForceKnitless == true then
+		exec.Debug, exec.Connections, exec.HookFunction = false, false, false
+		exec.HookMetamethod, exec.FireSignal, exec.Full = false, false, false
+	end
+	--[[ store.hand is HandInvItem here, which every module's swap moves; with Knit it is the item the
+	game has selected. The checks that mean the selected item (Limit to Items and the blacklist, the
+	block a click or AutoSuffocate places) read this instead, in store.hand's shape: the store's item
+	in the slot the game draws as selected (knitless.hotbarSelectedItem). nil with no tiles to read,
+	and they read store.hand. Looked up ten times a second at most: Killaura asks every frame. ]]
+	store.selectedHand = function()
+		local now, seen = os.clock(), knitless.selectedHandSeen
+		if seen and now < seen.expires then return seen.hand end
+		local item = knitless.ctx and knitless.hotbarSelectedItem(knitless.ctx)
+		if item == nil or not (seen and seen.item == item) then
+			local hand
+			if item ~= nil then
+				-- As updateStore builds store.hand.
+				hand = {tool = nil, amount = 0, toolType = ''}
+				if item then
+					local meta = bedwars.ItemMeta and bedwars.ItemMeta[item.itemType] or {}
+					hand.tool, hand.amount = item.tool, item.amount or 0
+					hand.toolType = meta.sword and 'sword' or meta.block and 'block' or item.itemType:find('bow') and 'bow'
+				end
+			end
+			seen = {item = item, hand = hand}
+			knitless.selectedHandSeen = seen
+		end
+		seen.expires = now + 0.1
+		return seen.hand
+	end
+end
 if shared.VapeSmoothBoot and os.clock() - lastBootYield > FRAME_BUDGET then
 	task.wait()
 	lastBootYield = os.clock()
 end
 local bootstrapOk, bootstrapError = callWithThreadFix(function()
-	local Knit = require(
-		replicatedStorage.rbxts_include.node_modules['@easy-games'].knit.src.Knit.KnitClient
-	)
+	-- Knitless: every require below hands back the layer's stand-in for that module.
+	local require = knitless.active and knitless.require or require
+	local knitLoaded, Knit
+	if knitless.active then
+		knitLoaded, Knit = knitless.build()
+	else
+		--[[ In a thread of its own (exec.isolatedRequire): on Solara KnitClient errors, and a require that
+		errors leaves the thread that made it without its executor capabilities. The 60s matches the wait
+		for Knit below; a failure goes out through this bootstrap's error path like any other. ]]
+		knitLoaded, Knit = exec.isolatedRequire(
+			replicatedStorage.rbxts_include.node_modules['@easy-games'].knit.src.Knit.KnitClient, 60
+		)
+	end
+	if not knitLoaded then
+		error('KnitClient did not load: '..(Knit ~= nil and tostring(Knit) or 'still loading after 60s'), 0)
+	end
 	assert(type(Knit) == 'table', 'KnitClient returned no controller table')
 	local knitDeadline = os.clock() + 60
 	assert(type(Knit.OnStart) == 'function', 'Knit.OnStart is unavailable')
@@ -2800,8 +10932,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		task.wait(0.1)
 	end
 
-	local BowConstantsTable
-	for i = 1, 32 do
+	--[[ Knitless: no upvalues to read. The projectile controller's ConstantManager attributes stand in,
+	read by knitless.build; the defaults below cover a miss. ]]
+	local BowConstantsTable = knitless.active and knitless.BowConstants or nil
+	for i = 1, knitless.active and 0 or 32 do
 		local ok, value = pcall(debug.getupvalue, Knit.Controllers.ProjectileController.enableBeam, i)
 		if not ok then break end
 		if type(value) == 'table' and type(rawget(value, 'RelX')) == 'number' then
@@ -2819,6 +10953,12 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	}
 
 	local Flamework = require(replicatedStorage['rbxts_include']['node_modules']['@flamework'].core.out).Flamework
+	-- Knit started through require above, so this KnitClient is the game's own and require hands
+	-- back the modules the game runs, not copies (exec.Live, which an early injection could not see).
+	-- Not so with stand-ins: they are not the game's modules.
+	if not knitless.active then
+		exec.Live = true
+	end
 	local InventoryUtil = require(replicatedStorage.TS.inventory['inventory-util']).InventoryUtil
 	local Client = require(replicatedStorage.TS.remotes).default.Client
 	local EffectUtil = require(replicatedStorage.TS.util.effect['effect-util']).EffectUtil
@@ -2896,7 +11036,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		Roact = require(replicatedStorage['rbxts_include']['node_modules']['@rbxts']['roact'].src),
 		RuntimeLib = require(replicatedStorage['rbxts_include'].RuntimeLib),
 		SoundList = require(replicatedStorage.TS.sound['game-sound']).GameSound,
-		SoundManager = resolveSoundManager(),
+		SoundManager = resolveSoundManager(require),
 		StatusEffectUtil = require(replicatedStorage.TS['status-effect']['status-effect-util']).StatusEffectUtil,
 		StatusEffectMeta = require(replicatedStorage.TS['status-effect']['status-effect-type']).StatusEffectType,
 		StatusEffectType = require(replicatedStorage.TS['status-effect']['status-effect-type']).StatusEffectType,
@@ -2992,6 +11132,12 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			return {SendToServer = function() end}
 		elseif remoteName == 'SwordSwingMiss' and vape.Modules and vape.Modules.NoClickDelay and vape.Modules.NoClickDelay.Enabled then
 			return {SendToServer = function() end}
+		-- Knitless with no namecall hook to hold it back (Xeno): SetInvItem during a jade slam
+		-- (knitless.jadeEquipGate), while its hold is up. Where the hook is in, it does this itself.
+		-- A hold a reload left behind is past its expiry, so the developer trace below runs again.
+		elseif remoteName == remotes.EquipItem and knitless.active and not namecallGuard.supported
+			and type(genv.JadeSlamHold) == 'table' and os.clock() < (tonumber(genv.JadeSlamHold.expires) or 0) then
+			return knitless.jadeEquipGate(call)
 		elseif remoteName == remotes.EquipItem and shared.PistonwareDeveloper then
 			-- Developer trace for equips that bypass switchItem. Every method is forwarded
 			-- to the real object with the real self; only the three that send are logged,
@@ -3011,9 +11157,35 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 					return value(call, ...)
 				end
 			end})
+		-- Knitless: the game's StartConsume, then ConsumeItem (knitless.consumeRemote). The Knit
+		-- path leaves ConsumeItem as it is here: see bedwars.getConsumeRemote below.
+		elseif knitless.active and remoteName == remotes.ConsumeItem then
+			return knitless.consumeRemote(call)
 		end
 
 		return call
+	end
+
+	--[[ ConsumeItem for AutoConsume, on both paths: StartConsume, the item's consumeTime, then
+	ConsumeItem, as the game's ConsumeController sends them (knitless.consumeRemote). ConsumeItem
+	alone, with the item in the inventory, is what AutoConsume sent before, and it is not eaten any
+	more. Knitless this is what Client.Get hands back. On the Knit path the game's own
+	ConsumeController asks Client:Get for ConsumeItem when you eat, after its own StartConsume and
+	consumeTime, so Client.Get leaves it alone there and AutoConsume asks here instead: the real
+	remote, wrapped, with the game's remotes client and Promise. A status item eaten here settles
+	for a second before it is eaten again (via.settle), as knitless. ]]
+	bedwars.getConsumeRemote = function()
+		if knitless.active then
+			return Client:Get(remotes.ConsumeItem)
+		end
+		return knitless.consumeRemote(OldGet(Client, remotes.ConsumeItem), {
+			net = Client,
+			Promise = bedwars.RuntimeLib.Promise,
+			settle = 1,
+			log = function(message)
+				bufferCall('print', 'bedwars.consume', tostring(message))
+			end
+		})
 	end
 
 	bedwars.BlockController.isBlockBreakable = function(self, breakTable, plr)
@@ -3448,7 +11620,9 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		if not getItem(item) then return end
 
 		store.blockPlacer.blockType = item
-		local suppressed = animate == false and suppressPlaceAnimation()
+		-- Knitless, the stand-in placer plays no place animation, so there is nothing to hush, and a
+		-- stub held for the round trip would hush every animation the layer plays meanwhile.
+		local suppressed = animate == false and not exec.Knitless and suppressPlaceAnimation()
 
 		local ok, result = pcall(function()
 			return store.blockPlacer:placeBlock(bedwars.BlockController:getBlockPosition(pos))
@@ -4071,13 +12245,23 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		--[[ Delta: required at the identity this thread already has, with no get/set identity pair.
 		bedwars-shop is in the module cache by now: builder-util, required above at this same
 		identity, imports it, and so do the game's own shop controllers. ]]
-		local deltaExecutor = store.deltaExecutor
+		--[[ Knitless: bedwars-shop is the layer's stand-in over the dumped ShopItems. It is taken the way
+		Delta takes the game's: at this identity, with no identity switch and no item shop to open. ]]
+		local deltaExecutor = store.deltaExecutor or knitless.active
+		--[[ Without require the shop cannot be read at all (Xeno), so there is nothing to retry: the
+		loop below would fail every half second for a minute and then report it. Knit having started
+		through require (exec.Live) shows require works even where the probe had no module to try. ]]
+		if not deltaExecutor and not (exec.Require or exec.Live) then
+			bufferCall('error', 'bedwars.shop.initialize', 'require is unavailable on this executor')
+			return
+		end
 		local deadline = os.clock() + 60
 		local lastError = 'shop initialization has not completed'
 		while vape.Loaded ~= nil do
 			local oldIdentity
 			local shop
 			local canSetIdentity = not deltaExecutor
+				and exec.Identity
 				and type(getthreadidentity) == 'function'
 				and type(setthreadidentity) == 'function'
 			local ok, err = xpcall(function()
@@ -4149,7 +12333,16 @@ if not bootstrapOk then
 		error = tostring(bootstrapError)
 	}
 end
+--[[ Read by the modules below and by bedwars.lua (bw.exec): true while BedWars runs on the layer's
+stand-ins, so what has none is left out. knitlessRequire is knitless.require, for their own
+requires of game modules, which must not reach the executor's require there. ]]
+exec.Knitless = knitless.active == true
+exec.knitlessRequire = knitless.active and knitless.require or nil
 end
+--[[ Knitless (exec.Knitless): the modules below require game modules too. Theirs go to the layer's
+stand-ins, never to the executor's require, which re-runs the module (on Solara one that errors strips
+the thread it runs on) or has none (Xeno). ]]
+local require = exec.Knitless and exec.knitlessRequire or require
 
 for _, v in {'AntiRagdoll', 'TriggerBot', 'SilentAim', 'AutoRejoin', 'Rejoin', 'Disabler', 'Timer', 'ServerHop', 'MouseTP', 'MurderMystery', 'Swim', 'Jesus', 'Invisible', 'Desync', 'Waypoints', 'PlayerModel', 'Schematica'} do
 	vape:Remove(v)
@@ -4476,8 +12669,13 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('NoClickDelay') then return end
 	local old
 	
+	if exec.Knitless then
+		exec.hide('NoClickDelay', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
 	vape.Categories.Combat:CreateModule({
 		Name = 'NoClickDelay',
 		DisplayName = 'No Hit Delay',
@@ -4497,6 +12695,11 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('Reach') then return end
+	if exec.Knitless then
+		exec.hide('Reach', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
 	local Value
 	local PlaceBlocks
 	local PlaceRange
@@ -4919,6 +13122,12 @@ run(function()
 			else
 				bedwars.SprintController.stopSprinting = old
 				bedwars.SprintController:stopSprinting()
+				if exec.Knitless then
+					--[[ The stand-in would sprint again on its next modifier change (a respawn clears
+					them) while it is still attempting. Letting go of shift ends that in the game's own
+					controller and never reaches the stand-in, so it ends here. ]]
+					bedwars.SprintController.attemptingSprint = false
+				end
 			end
 		end,
 		Tooltip = 'Automatically sprints for you.'
@@ -5003,6 +13212,328 @@ run(function()
 	local AFKCheck
 	local rand, old = Random.new()
 
+	--[[ Without Knit (Solara, Xeno) there is no applyKnockback to wrap: the game's own
+	KnockbackController still pushes your root part with ApplyImpulse when a hit lands, straight
+	after it turns your Humanoid's PlatformStand on for 65 ms (applyKnockbackPlatformStand). This
+	takes the same hit from the Zap stand-in's EntityDamageEventZap and puts it through that
+	controller's checks (your character, not fall damage, knockback not disabled, one attacker at a
+	time for 0.3 s, 50 ms apart). Their state is kept here from every hit of the match, Velocity on
+	or off, so it stays the controller's own. It works out the push with the game's formula
+	(KnockbackUtil.calculateKnockbackVelocityRelative) and puts the share the sliders take off in
+	the other way once the game's push is in: at once when PlatformStand is already on, else at the
+	first PreSimulation that finds it on. Zap's remote is handled before PreSimulation, newest
+	connection first, so this listener runs just before the game's, and both impulses land in the
+	same physics step. A hit the game does not push never turns PlatformStand on, so its counter is
+	dropped. The server gets nothing new: the game still acks the hit. ]]
+	local noKnit = {lastAt = 0, attacker = nil, attackerUntil = 0, on = false, hits = 0, recent = {}}
+
+	--[[ As on the Knit path: each hit rolls Chance, and is left alone while you are AFK or, with
+	the toggle on, while no enemy is within 50 studs. ]]
+	local function reduceThisHit()
+		if rand:NextNumber(0, 100) > Chance:GetRandomValue() or (AFKCheck.Enabled and isLocalAfk()) then
+			return false
+		end
+		return (not TargetCheck.Enabled) or entitylib.EntityPosition({
+			Range = 50,
+			Part = 'RootPart',
+			Players = true
+		}) ~= nil
+	end
+
+	--[[ Developer mode only: an F9 line, also kept in the session log, for each step of a hit, so one
+	live hit shows whether it arrived, whether the counter went in, when, and what landed. Every
+	argument goes in as %s; vectors are velocity changes in studs/s. ]]
+	local function trace(text, ...)
+		if shared.PistonwareDeveloper ~= true then return end
+		local args = table.pack(...)
+		for index = 1, args.n do
+			local value = args[index]
+			if typeof(value) == 'Vector3' then
+				args[index] = string.format('(%.1f, %.1f, %.1f)', value.X, value.Y, value.Z)
+			elseif type(value) == 'number' then
+				args[index] = tostring(math.round(value * 100) / 100)
+			else
+				args[index] = tostring(value)
+			end
+		end
+		bufferCall('print', 'bedwars.velocity', 'Velocity: '..string.format(text, table.unpack(args, 1, args.n)))
+	end
+
+	--[[ The controller's own checks on a hit on you, in its order: nil when the game pushes you for
+	it, else why it does not. Run for every hit, so its state is the controller's when Velocity is
+	turned on in the middle of a fight. ]]
+	local function gameSkips(damageType, fromEntity, multiplier)
+		-- DamageType.FALL is 1.
+		if damageType == 1 then return 'fall damage' end
+		if type(multiplier) == 'table' and multiplier.disabled then return 'knockback disabled' end
+		local attacker = fromEntity and playersService:GetPlayerFromCharacter(fromEntity)
+		local now = os.clock()
+		if attacker and noKnit.attacker and noKnit.attacker ~= attacker.UserId and noKnit.attackerUntil >= now then
+			return 'another player hit you less than 0.3 s ago'
+		end
+		local serverNow = workspace:GetServerTimeNow()
+		if serverNow - noKnit.lastAt <= 0.05 then return 'under 50 ms after the last hit' end
+		noKnit.lastAt = serverNow
+		if attacker then
+			noKnit.attacker, noKnit.attackerUntil = attacker.UserId, now + 0.3
+		end
+		return nil
+	end
+
+	--[[ The next frames after a counter (or after a push left whole, measured only) are summed at
+	Heartbeat. prior is what had already changed since PlatformStand came on (the game's push, when
+	this listener ran after it), else the frame before. check arms the take-back. ]]
+	local function watchFrames(job, check)
+		local stand = noKnit.stand
+		job.frame, job.sum, job.fall, job.changes, job.check = 0, Vector3.zero, 0, {}, check
+		job.prior = stand and stand.sum or noKnit.change or Vector3.zero
+		job.priorFall = stand and stand.fall or workspace.Gravity * (noKnit.dt or 0)
+		noKnit.pending = job
+	end
+
+	local function applyCounter(job, check, how)
+		job.root:ApplyImpulse(job.impulse)
+		watchFrames(job, check)
+		trace('hit %s: counter in %s', job.hit, how)
+	end
+
+	--[[ Whether a frame since the last hit this listener handled (Heartbeat keeps up to 8) already
+	carries this hit's push, a velocity change in studs/s, allowing for gravity in the air: the
+	game's listener ran a frame or more before this one, so its PlatformStand is this hit's even
+	when it has been on for longer than 45 ms. ]]
+	local function pushAlreadyIn(push)
+		local limit = push.Magnitude / 3
+		for _, frame in noKnit.recent do
+			if math.min((frame.change - push).Magnitude, (frame.change + Vector3.new(0, frame.fall, 0) - push).Magnitude) < limit then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function onHitWithoutKnit(entity, damage, damageType, fromPosition, fromEntity, multiplier, knockbackId)
+		local character = lplr.Character
+		local root = character and entity == character and character.PrimaryPart
+		if not root then return end
+		local skipped = gameSkips(damageType, fromEntity, multiplier)
+		if not (noKnit.on and Velocity.Enabled) then return end
+		noKnit.hits += 1
+		local hit = noKnit.hits
+		local options = type(multiplier) == 'table' and multiplier or {}
+		trace('hit %s: %s damage, type %s, from %s, knockback x%s/x%s, id %s: %s', hit, damage, damageType,
+			fromEntity and fromEntity.Name or 'nothing', options.horizontal or 1, options.vertical or 1, knockbackId,
+			skipped and 'the game skips it ('..skipped..')' or 'the game pushes you')
+		if skipped then return end
+
+		local util = bedwars.KnockbackUtil
+		local position = fromPosition
+		if position == nil and fromEntity and fromEntity.PrimaryPart then
+			position = fromEntity.PrimaryPart.Position
+		end
+		local mass = root.AssemblyMass
+		if not position or not (mass > 0) or not (util and util.calculateKnockbackVelocityRelative) then
+			trace('hit %s: nothing to counter (%s)', hit, not position and 'no hit position'
+				or not (mass > 0) and 'no mass' or 'no KnockbackUtil')
+			return
+		end
+		local push = util.calculateKnockbackVelocityRelative(root, mass, position, multiplier)
+		local landedAlready = pushAlreadyIn(push / mass)
+		table.clear(noKnit.recent)
+		local reduce = reduceThisHit()
+		local keepFlat, keepUp = Horizontal.Value / 100, Vertical.Value / 100
+		local impulse = reduce and Vector3.new(push.X * (keepFlat - 1), push.Y * (keepUp - 1), push.Z * (keepFlat - 1)) or Vector3.zero
+		local humanoid = character:FindFirstChildOfClass('Humanoid')
+		local job = {root = root, humanoid = humanoid, hit = hit, impulse = impulse, counter = impulse / mass,
+			net = (push + impulse) / mass}
+		noKnit.waiting = nil
+		if impulse.Magnitude < 0.001 then
+			trace('hit %s: the game push %s is left whole (%s)', hit, push / mass,
+				reduce and 'sliders at 100%' or 'Chance roll, AFK check or no enemy within 50 studs')
+			if shared.PistonwareDeveloper == true then
+				-- Measured only, never taken back: the game's own push landing, to compare with.
+				watchFrames(job, false)
+			end
+			return
+		end
+		trace('hit %s: counter %s on the game push %s, keeping %s%% / %s%%', hit, job.counter, push / mass,
+			Horizontal.Value, Vertical.Value)
+		if humanoid and not humanoid.PlatformStand then
+			-- The game's listener has not run yet: the counter waits for its PlatformStand.
+			job.untilAt = os.clock() + 0.1
+			noKnit.waiting = job
+			return
+		end
+		--[[ The game's push is in already (or there is no Humanoid to wait on). A PlatformStand that
+		came on more than 45 ms ago may be an earlier hit's (pushed hits are 50 ms apart), so then the
+		frames decide whether this hit was pushed too, unless a frame since the last hit already
+		shows this push (the game's listener ran a frame or more before this one). ]]
+		local stand = noKnit.stand
+		applyCounter(job, not humanoid or (stand ~= nil and os.clock() - stand.since > 0.045 and not landedAlready),
+			not humanoid and 'at once, no Humanoid to wait on'
+				or landedAlready and 'at once, PlatformStand was already on and a frame since the last hit shows the game push'
+				or 'at once, PlatformStand was already on')
+	end
+
+	--[[ Before each physics step: the counter that waits goes in once the game's PlatformStand is on,
+	so it lands in the same step as the game's push. None within 0.1 s means the game did not push
+	you for that hit, and nothing is applied. ]]
+	local function beforePhysicsWithoutKnit()
+		local job = noKnit.waiting
+		if not job then return end
+		if job.humanoid.PlatformStand then
+			noKnit.waiting = nil
+			if job.root.Parent then
+				applyCounter(job, false, 'before physics, as PlatformStand came on (the same step as the game push)')
+			end
+		elseif os.clock() > job.untilAt then
+			noKnit.waiting = nil
+			trace('hit %s: PlatformStand did not come on within 0.1 s, so the game did not push you: nothing countered', job.hit)
+		end
+	end
+
+	--[[ What is left of push in velocity, cut by the sliders, never past zero. ]]
+	local function takeOff(velocity, push)
+		local flat = Vector3.new(push.X, 0, push.Z)
+		if flat.Magnitude > 0 then
+			local unit = flat.Unit
+			velocity -= unit * math.min(flat.Magnitude * (1 - Horizontal.Value / 100), math.max(velocity:Dot(unit), 0))
+		end
+		if push.Y > 0 then
+			velocity -= Vector3.new(0, math.min(push.Y * (1 - Vertical.Value / 100), math.max(velocity.Y, 0)), 0)
+		end
+		return velocity
+	end
+
+	--[[ Each frame, after physics. It keeps the run of PlatformStand (when it came on, and the change
+	since), and sums the frames after a counter: at the second frame if PlatformStand is off (the
+	game has not pushed you in the last 65 ms), else at the third, the whole change since the hit,
+	and that plus prior, is compared with both impulses together and with the counter alone, allowing
+	for gravity in the air. With the take-back armed, a counter that landed alone is taken back. With
+	no decoder running (zap.decoding not true), a velocity jump within two frames of the game's
+	knockback starting PlatformStand, and within 0.15 s of a drop in your health, stands in for the
+	hit and is cut by the sliders instead. Polled, so no Changed handler writes anything. ]]
+	local function heartbeatWithoutKnit(dt)
+		local character = lplr.Character
+		local root = character and character.PrimaryPart
+		local humanoid = character and character:FindFirstChildOfClass('Humanoid')
+		if not (root and humanoid) then
+			noKnit.root, noKnit.stand = nil, nil
+			table.clear(noKnit.recent)
+			return
+		end
+		local now = os.clock()
+		local velocity = root.AssemblyLinearVelocity
+		local change = noKnit.root == root and velocity - noKnit.velocity or nil
+		if change then
+			local recent = noKnit.recent
+			table.insert(recent, {change = change, fall = workspace.Gravity * dt})
+			if #recent > 8 then table.remove(recent, 1) end
+		end
+		if humanoid.PlatformStand then
+			local stand = noKnit.stand
+			if not stand then
+				stand = {since = now, sum = Vector3.zero, fall = 0}
+				noKnit.stand = stand
+			end
+			if change then
+				stand.sum += change
+				stand.fall += workspace.Gravity * dt
+			end
+		else
+			noKnit.stand = nil
+		end
+
+		local pending = noKnit.pending
+		if pending and not (pending.root == root and change) then
+			pending, noKnit.pending = nil, nil
+		end
+		if pending then
+			pending.frame += 1
+			pending.sum += change
+			pending.fall += workspace.Gravity * dt
+			pending.changes[pending.frame] = change
+			if pending.frame >= 3 or (pending.frame >= 2 and not humanoid.PlatformStand) then
+				noKnit.pending = nil
+				-- In the air those frames also took gravity off the root; on the ground the floor gave it back.
+				local up = Vector3.new(0, pending.fall, 0)
+				local upEarly = Vector3.new(0, pending.fall + pending.priorFall, 0)
+				local sum, early = pending.sum, pending.sum + pending.prior
+				local alone = math.min((sum - pending.counter).Magnitude, (sum + up - pending.counter).Magnitude)
+				local landed = math.min((sum - pending.net).Magnitude, (sum + up - pending.net).Magnitude,
+					(early - pending.net).Magnitude, (early + upEarly - pending.net).Magnitude)
+				local changes = pending.changes
+				if pending.check and alone < pending.counter.Magnitude / 3 and alone < landed then
+					velocity -= pending.counter
+					root.AssemblyLinearVelocity = velocity
+					trace('hit %s: frames %s %s %s are the counter alone (the game did not push): taken back',
+						pending.hit, changes[1], changes[2], changes[3])
+				else
+					trace('hit %s: frames %s %s %s, before them %s; the game push with the counter makes %s, the counter alone %s: %s',
+						pending.hit, changes[1], changes[2], changes[3], pending.prior, pending.net, pending.counter,
+						pending.counter.Magnitude < 0.001 and 'measured only'
+							or landed <= alone and 'kept, the frames add up to both'
+							or pending.check and 'kept, nearer both than the counter alone'
+							or 'kept (PlatformStand showed the game pushed)')
+				end
+			end
+		end
+
+		local zap = bedwars.ZapNetworking
+		if not (zap and zap.decoding == true) then
+			local health = humanoid.Health
+			if noKnit.humanoid == humanoid and health < noKnit.health then
+				noKnit.hurtAt = now
+			end
+			noKnit.humanoid, noKnit.health = humanoid, health
+			local standing = humanoid.PlatformStand
+			if standing and not noKnit.standing then
+				noKnit.watch = 2
+			end
+			noKnit.standing = standing
+			if noKnit.watch and change then
+				local push = change + Vector3.new(0, workspace.Gravity * dt, 0)
+				noKnit.watch -= 1
+				if push.Magnitude > 5 then
+					noKnit.jump, noKnit.jumpAt, noKnit.watch = push, now, nil
+				elseif noKnit.watch <= 0 then
+					noKnit.watch = nil
+				end
+			end
+			if noKnit.jump and now - noKnit.jumpAt > 0.15 then noKnit.jump = nil end
+			if noKnit.hurtAt and now - noKnit.hurtAt > 0.15 then noKnit.hurtAt = nil end
+			if noKnit.jump and noKnit.hurtAt then
+				if reduceThisHit() then
+					local before = velocity
+					velocity = takeOff(velocity, noKnit.jump)
+					root.AssemblyLinearVelocity = velocity
+					trace('no decoder: jump %s with a health drop, velocity %s cut to %s', noKnit.jump, before, velocity)
+				else
+					trace('no decoder: jump %s with a health drop, left whole (Chance roll, AFK check or no enemy)', noKnit.jump)
+				end
+				noKnit.jump, noKnit.hurtAt = nil, nil
+			end
+		end
+		noKnit.root, noKnit.velocity, noKnit.change, noKnit.dt = root, velocity, change, dt
+	end
+
+	local function velocityWithoutKnit(callback)
+		noKnit.pending, noKnit.waiting, noKnit.jump, noKnit.hurtAt, noKnit.watch, noKnit.root, noKnit.humanoid = nil, nil, nil, nil, nil, nil, nil
+		noKnit.on, noKnit.change, noKnit.stand = false, nil, nil
+		table.clear(noKnit.recent)
+		if not callback then return end
+		noKnit.on = true
+		local zap = bedwars.ZapNetworking
+		trace('on (knitless): %s; the Zap decoder is %s, %s packets read so far',
+			noKnit.listening and 'listening for hits on you' or 'no damage event to listen to',
+			type(zap) == 'table' and zap.decoding == true and 'decoding' or 'not decoding (the PlatformStand and health fallback stands in)',
+			type(zap) == 'table' and tonumber(zap.packets) or 0)
+		Velocity:Clean(runService.Heartbeat:Connect(heartbeatWithoutKnit))
+		local okStep, beforePhysics = pcall(function()
+			return runService.PreSimulation
+		end)
+		Velocity:Clean((okStep and beforePhysics or runService.Stepped):Connect(beforePhysicsWithoutKnit))
+	end
+
 	Velocity = vape.Categories.Combat:CreateModule({
 		Name = 'Velocity',
 		ExtraText = function()
@@ -5010,6 +13541,10 @@ run(function()
 			return Horizontal.Value..'% '..Vertical.Value..'%'
 		end,
 		Function = function(callback)
+			if exec.Knitless then
+				velocityWithoutKnit(callback)
+				return
+			end
 			if callback then
 				old = bedwars.KnockbackUtil.applyKnockback
 				bedwars.KnockbackUtil.applyKnockback = function(root, mass, dir, knockback, ...)
@@ -5073,6 +13608,19 @@ run(function()
 		Name = 'AFK check',
 		Tooltip = 'Takes full knockback once you have not touched your mouse or keyboard for 30 seconds'
 	})
+
+	--[[ Knitless: the hit listener stays for the whole match (vape:Clean ends it), so gameSkips keeps
+	the controller's state with Velocity on or off; it counters only while Velocity is on. ]]
+	if exec.Knitless then
+		local event = bedwars.ZapNetworking and bedwars.ZapNetworking.EntityDamageEventZap
+		if type(event) == 'table' and type(event.On) == 'function' then
+			local stop = event.On(onHitWithoutKnit)
+			if type(stop) == 'function' then
+				vape:Clean(stop)
+			end
+			noKnit.listening = true
+		end
+	end
 end)
 
 --[[
@@ -5318,6 +13866,11 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('FastBreak') then return end
+	if exec.Knitless then
+		exec.hide('FastBreak', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
 	local FastBreak
 	local Time
 	local BlacklistBeds
@@ -5583,6 +14136,7 @@ A confirmed Freefall -> Jumping Zephyr transition renews GroundWatcher's
 air-timer clock (and entitylib.character.AirTime), which restarts TPDown's
 countdown/status window without falsifying lastGroundTick. ]]
 run(function()
+	if exec.skip('AutoZephyr') then return end
 	local AutoZephyr
 	local LeadTime
 	local nextAttempt = 0
@@ -5672,6 +14226,18 @@ run(function()
 				nextAttempt = now + 0.26
 				if type(firesignal) == 'function' then
 					pcall(firesignal, inputService.JumpRequest)
+				else
+					--[[ No firesignal (Solara, Xeno): do what JumpHeightController's own
+					JumpRequest handler does for an air jump, after the same allowance check it
+					makes. The 0.25s debounce and the two-jump count are the ones kept here. ]]
+					local jumps = bedwars.JumpHeightController
+					if jumps and (tonumber(jumps.allowedAirJumps) or 0) < 1 then return end
+					local sent = pcall(function()
+						bedwars.Client:Get('NotifyAirJump'):SendToServer()
+					end)
+					if sent then
+						humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+					end
 				end
 			end))
 		end,
@@ -6725,6 +15291,11 @@ run(function()
 	updateModeVisibility(Mode.Value)
 end)	
 run(function()
+	if exec.skip('HitBoxes') then return end
+	if exec.Knitless then
+		exec.hide('HitBoxes', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
 	local Mode
 	local Expand
 	local objects, set = {}
@@ -6745,7 +15316,55 @@ run(function()
 			objects[ent] = hitbox
 		end
 	end
-	
+
+	--[[ Sword mode without debug.setconstant (Solara, Xeno). swingSwordInRegion (sword-controller)
+	asks getTargetInRegion for a target within 3.8 * BLOCK_SIZE, the constant the full path turns
+	into Expand / 3. Here swingSwordInRegion is wrapped so that inside its own call that one range
+	reaches getTargetInRegion as Expand instead; ranges a sword's own attackRange or the mobile
+	distance set are left as they are, as with the constant. The call can wait (its multi-hit
+	check), so it is told apart by its thread: every other caller, TriggerBot's getTargetInRegion
+	check among them, gets the range it asked for. ]]
+	local swingThreads = setmetatable({}, {__mode = 'k'})
+	local swingHook, targetHook
+	local REGION_RANGE = 3.8 * 3
+
+	local function unwrapSword()
+		if swingHook then
+			swingHook.remove()
+			swingHook = nil
+		end
+		if targetHook then
+			targetHook.remove()
+			targetHook = nil
+		end
+		table.clear(swingThreads)
+	end
+
+	local function wrapSword()
+		unwrapSword()
+		local controller = bedwars.SwordController
+		swingHook = fieldPatch.wrap(controller, 'swingSwordInRegion', function(swing)
+			return function(self, ...)
+				local thread = coroutine.running()
+				swingThreads[thread] = (swingThreads[thread] or 0) + 1
+				local results = table.pack(pcall(swing, self, ...))
+				local depth = (swingThreads[thread] or 1) - 1
+				swingThreads[thread] = depth > 0 and depth or nil
+				if not results[1] then error(results[2], 0) end
+				return table.unpack(results, 2, results.n)
+			end
+		end)
+		targetHook = fieldPatch.wrap(controller, 'getTargetInRegion', function(getTarget)
+			return function(self, range, ...)
+				if swingThreads[coroutine.running()] and type(range) == 'number'
+					and math.abs(range - REGION_RANGE) < 1e-6 then
+					range = Expand.Value
+				end
+				return getTarget(self, range, ...)
+			end
+		end)
+	end
+
 	HitBoxes = vape.Categories.Blatant:CreateModule({
 		Name = 'HitBoxes',
 		ExtraText = function()
@@ -6756,7 +15375,11 @@ run(function()
 		Function = function(callback)
 			if callback then
 				if Mode.Value == 'Sword' then
-					debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, (Expand.Value / 3))
+					if fieldPatch.constants then
+						debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, (Expand.Value / 3))
+					else
+						wrapSword()
+					end
 					set = true
 				else
 					HitBoxes:Clean(entitylib.Events.EntityAdded:Connect(createHitbox))
@@ -6772,7 +15395,11 @@ run(function()
 				end
 			else
 				if set then
-					debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, 3.8)
+					if fieldPatch.constants then
+						debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, 3.8)
+					else
+						unwrapSword()
+					end
 					set = nil
 				end
 				for _, part in objects do
@@ -6793,7 +15420,10 @@ run(function()
 		Function = function(val)
 			if HitBoxes.Enabled then
 				if Mode.Value == 'Sword' then
-					debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, (val / 3))
+					-- Without the constant, the wrapper reads Expand as each swing happens.
+					if fieldPatch.constants then
+						debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, (val / 3))
+					end
 				else
 					for _, part in objects do
 						part.Size = Vector3.new(3, 6, 3) + Vector3.one * (val / 5)
@@ -6821,10 +15451,42 @@ end)
 	
 	
 run(function()
+	if exec.skip('KeepSprint') then return end
+	if exec.Knitless then
+		exec.hide('KeepSprint', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
+	--[[ Without debug.setconstant (Solara, Xeno): startSprinting (sprint-controller) gives up while
+	self.blockSprint is set, the field name the constant swaps out. The wrapper clears that field for
+	its own call and puts it back afterwards, unless the controller wrote a newer value meanwhile. ]]
+	local sprintHook
+
 	vape.Categories.Blatant:CreateModule({
 		Name = 'KeepSprint',
 		Function = function(callback)
-			debug.setconstant(bedwars.SprintController.startSprinting, 5, callback and 'blockSprinting' or 'blockSprint')
+			if fieldPatch.constants then
+				debug.setconstant(bedwars.SprintController.startSprinting, 5, callback and 'blockSprinting' or 'blockSprint')
+			else
+				if sprintHook then
+					sprintHook.remove()
+					sprintHook = nil
+				end
+				if callback then
+					sprintHook = fieldPatch.wrap(bedwars.SprintController, 'startSprinting', function(start)
+						return function(self, ...)
+							local blocked = self.blockSprint
+							if not blocked then return start(self, ...) end
+							self.blockSprint = false
+							local results = table.pack(pcall(start, self, ...))
+							if self.blockSprint == false then
+								self.blockSprint = blocked
+							end
+							if not results[1] then error(results[2], 0) end
+							return table.unpack(results, 2, results.n)
+						end
+					end)
+				end
+			end
 			bedwars.SprintController:stopSprinting()
 		end,
 		Tooltip = 'Keeps your sprint speed when attacking players.'
@@ -6832,6 +15494,7 @@ run(function()
 end)
 
 run(function()
+	if exec.skip('SafeWalk') then return end
 	local SafeWalk
 	local rayCheck = RaycastParams.new()
 	rayCheck.RespectCanCollide = true
@@ -6849,7 +15512,7 @@ run(function()
 					local suc = pcall(function()
 						module = require(lplr.PlayerScripts.PlayerModule).controls
 					end)
-					if not suc then module = {} end
+					if not suc or type(module) ~= 'table' then module = {} end
 				end
 
 				local old = module.moveFunction
@@ -6889,6 +15552,7 @@ run(function()
 end)
 
 run(function()
+	if exec.skip('NoSlowdown') then return end
 	local old
 	
 	vape.Categories.Blatant:CreateModule({
@@ -6941,7 +15605,7 @@ run(function()
 		local now = os.clock()
 		if now - ownedAt >= 0.1 then
 			ownedAt = now
-			local check = getgenv and getgenv().isnetworkowner
+			local check = genv.isnetworkowner
 			if type(check) == 'function' then
 				local ok, result = pcall(check, root)
 				owned = not ok or result == true
@@ -6951,15 +15615,45 @@ run(function()
 		end
 		return owned
 	end
-	
+
+	--[[ Zephyr without debug.setconstant (Solara, Xeno). The constant turns the movement modifier
+	WindWalkerController.updateSpeed adds from a moveSpeedMultiplier into a constantSpeedMultiplier.
+	Here updateSpeed is replaced, while Speed is on, by the same function (wind-walker-controller)
+	with that one key changed. ]]
+	local zephyrHook
+	local function setZephyrSpeed(enabled)
+		if zephyrHook then
+			zephyrHook.remove()
+			zephyrHook = nil
+		end
+		if not enabled then return end
+		zephyrHook = fieldPatch.wrap(bedwars.WindWalkerController, 'updateSpeed', function()
+			return function(self, multiplier)
+				if self.currentSpeedModifier then
+					self.currentSpeedModifier:Destroy()
+				end
+				if multiplier == 1 then
+					return nil
+				end
+				self.currentSpeedModifier = bedwars.SprintController:getMovementStatusModifier():addModifier({
+					constantSpeedMultiplier = multiplier
+				})
+			end
+		end)
+	end
+
 	Speed = vape.Categories.Blatant:CreateModule({
 		Name = 'Speed',
 		Function = function(callback)
 			frictionTable.Speed = callback or nil
 			updateVelocity()
-			pcall(function()
-				debug.setconstant(bedwars.WindWalkerController.updateSpeed, 7, callback and 'constantSpeedMultiplier' or 'moveSpeedMultiplier')
-			end)
+			if fieldPatch.constants then
+				pcall(function()
+					debug.setconstant(bedwars.WindWalkerController.updateSpeed, 7, callback and 'constantSpeedMultiplier' or 'moveSpeedMultiplier')
+				end)
+			else
+				pcall(setZephyrSpeed, callback)
+			end
 	
 			if callback then
 				Speed:Clean(runService.PreSimulation:Connect(function(dt)
@@ -7040,6 +15734,7 @@ run(function()
 	})
 	PauseOnLagback = Speed:CreateToggle({
 		Name = 'Pause on Lagback',
+		Visible = not exec.skip('Speed/Pause on Lagback'),
 		Tooltip = 'Stops speeding while the server holds your character\n(no network ownership of it: a lagback).'
 	})
 end)
@@ -7087,9 +15782,48 @@ run(function()
 		end
 	end
 
+	--[[ Knitless (Solara, Xeno; exec.Knitless): the queue meta there came without its teams, so
+	the Teams service names them. BedWars puts every player on a Roblox Team named as the meta
+	names the team ('Blue', 'Red Alpha'), the spectators on 'Spectators', but nothing on a Team
+	says its id. A player does: one whose Team attribute is the bed's id, on that Team. A team
+	with nobody on it is the one Team whose TeamColor is the bed's paint as a BrickColor (the
+	game paints a bed's Bed part in its team's colorHex) that no player of another team is on;
+	two such Teams name neither. A player on the bed's id but on a Team of another colour
+	answers only when nothing else does. ]]
+	local teamsService
+
+	local function rosterTeam(teamId, paint)
+		local id, brick = tostring(teamId), paint and BrickColor.new(paint).Number
+		local held, loose = {}, nil
+		for _, plr in playersService:GetPlayers() do
+			local team, attribute = plr.Team, plr:GetAttribute('Team')
+			if team and attribute ~= nil and team.Name ~= 'Spectators' then
+				if tostring(attribute) ~= id then
+					held[team.Name] = true
+				elseif not brick or team.TeamColor.Number == brick then
+					return team
+				else
+					loose = team
+				end
+			end
+		end
+		if brick then
+			teamsService = teamsService or cloneref(game:GetService('Teams'))
+			local found, count = nil, 0
+			for _, team in teamsService:GetTeams() do
+				if team.TeamColor.Number == brick and team.Name ~= 'Spectators' and not held[team.Name] then
+					found, count = team, count + 1
+				end
+			end
+			if count == 1 then return found end
+		end
+		return loose
+	end
+
 	-- The team's name and colour for this match, from its queue meta (displayName 'Blue',
 	-- colorHex). A bed the meta does not cover falls back to 'Team <id>' and the colour of
-	-- its own blanket.
+	-- its own blanket. Knitless, what the meta leaves out comes first from rosterTeam and the
+	-- bed's own paint; the third value asks teamOf to look again while that found no name.
 	local function teamInfo(bed, teamId)
 		local name, color
 		pcall(function()
@@ -7105,11 +15839,20 @@ run(function()
 				end
 			end
 		end)
+		if exec.Knitless and teamId and not (name and color) then
+			pcall(function()
+				local part = bed:FindFirstChild('Bed')
+				local paint = part and part:IsA('BasePart') and part.Color or nil
+				local team = rosterTeam(teamId, paint)
+				name = name or (team and team.Name)
+				color = color or paint or (team and team.TeamColor.Color)
+			end)
+		end
 		if not color then
 			local part = bed:FindFirstChild('Blanket') or bed:FindFirstChild('Covers')
 			color = part and part:IsA('BasePart') and part.Color or nil
 		end
-		return name or (teamId and 'Team '..tostring(teamId)) or 'Bed', color
+		return name or (teamId and 'Team '..tostring(teamId)) or 'Bed', color, exec.Knitless and teamId ~= nil and name == nil
 	end
 
 	-- The bed's health the way the block engine counts it (hits already taken off), over its
@@ -7171,8 +15914,8 @@ run(function()
 			setthreadidentity(8)
 		end
 
-		local teamName, teamColor = teamInfo(bed, teamId)
-		local ref = {Objects = {}, Points = {}, TeamColor = teamColor, Label = teamName..' Bed', HealthAt = 0, TeamId = teamId, TeamAt = 0}
+		local teamName, teamColor, retry = teamInfo(bed, teamId)
+		local ref = {Objects = {}, Points = {}, TeamColor = teamColor, Label = teamName..' Bed', HealthAt = 0, TeamId = teamId, TeamAt = 0, Retry = retry}
 		local color = colorOf(ref)
 		local ok = pcall(function()
 			local objects = ref.Objects
@@ -7260,15 +16003,16 @@ run(function()
 	-- The bed's team, looked up again twice a second until it is known. A bed added before
 	-- its team attribute had replicated kept the plain 'Bed' label, and Priority Only, which
 	-- only looked when the bed was added, drew our own bed for the whole match; the label
-	-- and colour follow the team once it is in.
+	-- and colour follow the team once it is in. Knitless, a team the Teams service could not
+	-- name yet (teamInfo's third value) is looked up again the same way until it can.
 	local function teamOf(bed, ref)
-		if ref.TeamId == nil and os.clock() >= ref.TeamAt then
+		if (ref.TeamId == nil or ref.Retry) and os.clock() >= ref.TeamAt then
 			ref.TeamAt = os.clock() + 0.5
-			local teamId = bedTeam(bed)
+			local teamId = ref.TeamId or bedTeam(bed)
 			if teamId then
 				ref.TeamId = teamId
-				local teamName, teamColor = teamInfo(bed, teamId)
-				ref.Label, ref.TeamColor = teamName..' Bed', teamColor
+				local teamName, teamColor, retry = teamInfo(bed, teamId)
+				ref.Label, ref.TeamColor, ref.Retry = teamName..' Bed', teamColor, retry
 				local color = colorOf(ref)
 				pcall(function()
 					if ref.Text then
@@ -9234,6 +17978,7 @@ run(function()
 	})
 	Rank = NameTags:CreateToggle({
 		Name = 'Show Rank',
+		Visible = not exec.skip('NameTags/Show Rank'),
 		Function = function()
 			if NameTags.Enabled then
 				NameTags:Toggle(nil, true)
@@ -9703,6 +18448,7 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('AutoKit') then return end
 	local AutoKit
 	local Legit
 	local Toggles = {}
@@ -10480,6 +19226,11 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('TrapDisabler') then return end
+	if exec.Knitless then
+		exec.hide('TrapDisabler', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
 	TrapDisabler = vape.Categories.Utility:CreateModule({
 		Name = 'TrapDisabler',
 		Tooltip = 'Stops enemy traps from going off on you.\nCovers snap traps, landmines, teleport blocks and void portals.'
@@ -10507,10 +19258,37 @@ run(function()
 end)
 	
 run(function()
-	vape.Categories.World:CreateModule({
+	local AntiAFK
+
+	--[[ Without getconnections (Solara, Xeno) nothing can be disconnected. The Heartbeat connection
+	the full path looks for is AfkController's (afk-controller): it only ever sends afk = false once
+	the camera moves, then disconnects itself, so it can stay. Roblox's idle kick is answered
+	instead: each Idled gets a VirtualUser click, which counts as input, and afk = false again.
+	VirtualUser is not an executor function, so the click is tried and skipped where it fails. ]]
+	local function sendActive()
+		pcall(function()
+			bedwars.Client:Get(remotes.AfkStatus):SendToServer({
+				afk = false
+			})
+		end)
+	end
+
+	AntiAFK = vape.Categories.World:CreateModule({
 		Name = 'Anti-AFK',
 		Tab = 'Utility',
 		Function = function(callback)
+			if callback and not exec.Connections then
+				AntiAFK:Clean(lplr.Idled:Connect(function()
+					pcall(function()
+						local virtualUser = game:GetService('VirtualUser')
+						virtualUser:CaptureController()
+						virtualUser:ClickButton2(Vector2.zero)
+					end)
+					sendActive()
+				end))
+				sendActive()
+				return
+			end
 			if callback then
 				for _, v in getconnections(lplr.Idled) do
 					v:Disconnect()
@@ -10549,7 +19327,10 @@ run(function()
 		Function = function(callback)
 			if callback then
 				repeat
-					local item = store.hand.toolType == 'block' and store.hand.tool.Name or not LimitItem.Enabled and getWool()
+					-- The block the game has selected (store.selectedHand knitless, where store.hand follows
+					-- every swap: with Killaura's sword swapped in over your wool it placed nothing).
+					local hand = (store.selectedHand and store.selectedHand()) or store.hand
+					local item = hand.toolType == 'block' and hand.tool.Name or not LimitItem.Enabled and getWool()
 	
 					if item then
 						local plrs = entitylib.AllPosition({
@@ -10609,6 +19390,7 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('AutoTool') then return end
 	local AutoTool
 	local SwitchBack
 	local old, event
@@ -10658,7 +19440,8 @@ run(function()
 				-- Back to what you were holding once the hits stop -- but only while you are still
 				-- on the tool it picked, so a slot you changed yourself is left alone.
 				AutoTool:Clean(runService.Heartbeat:Connect(function()
-					if not (SwitchBack.Enabled and previous) or returning or os.clock() - lastHit < 0.35 then return end
+					-- Kept, not spent, while a drink holds the hand (store.handHeld): hotbarSwitch would refuse it.
+					if not (SwitchBack.Enabled and previous) or returning or os.clock() - lastHit < 0.35 or store.handHeld() then return end
 					local slot = previous
 					previous = nil
 					if store.inventory.hotbarSlot ~= switchedTo then return end
@@ -11255,6 +20038,49 @@ run(function()
 			or name == lplr.Name .. '_smelter'
 	end
 
+	--[[ One chest at a time with the other modules that open chests, through bedwars.ChestLock
+	({Owner, Serial, Holds = {[hold] = expiry}}): its owner may have a chest open, and the others
+	leave chests alone while any of the owner's holds is still running. Holds by the same owner sit
+	side by side (the loot loop and the deposit sweep run at once) and each is let go of on its own.
+	Every hold expires by itself, so a holder that errors cannot keep the lock, not even while this
+	module goes on taking new holds. rawget and rawset: bedwars' __index would look a missing name
+	up as a Knit controller. ]]
+	local function chestLock()
+		local lock = rawget(bedwars, 'ChestLock')
+		if type(lock) ~= 'table' or type(lock.Holds) ~= 'table' then
+			lock = {Serial = 0, Holds = {}}
+			rawset(bedwars, 'ChestLock', lock)
+		end
+		return lock
+	end
+
+	local function chestLockHeld(lock, now)
+		for _, expiry in lock.Holds do
+			if now < expiry then return true end
+		end
+		return false
+	end
+
+	local function claimChestLock(seconds)
+		local lock, now = chestLock(), os.clock()
+		if lock.Owner ~= 'ChestSteal' then
+			if lock.Owner ~= nil and chestLockHeld(lock, now) then return nil end
+			lock.Owner = 'ChestSteal'
+			table.clear(lock.Holds)
+		end
+		lock.Serial += 1
+		lock.Holds[lock.Serial] = now + seconds
+		return lock.Serial
+	end
+
+	local function releaseChestLock(hold)
+		local lock = chestLock()
+		if lock.Owner == 'ChestSteal' and lock.Holds[hold] then
+			lock.Holds[hold] = nil
+			if next(lock.Holds) == nil then lock.Owner = nil end
+		end
+	end
+
 	--[[ Whose crate is it.
 
 	game-player-util's getTeamId is literally `player:GetAttribute("Team")`, and the game
@@ -11307,7 +20133,7 @@ run(function()
 		return false
 	end
 
-	local function lootChest(chest, taken)
+	local function lootChestUnlocked(chest, taken)
 		chest = chest and chest.Value or nil
 		if not chest or (Delays[chest] or 0) >= tick() then return end
 		if isOwnStorage(chest) then return end
@@ -11428,6 +20254,19 @@ run(function()
 			end)
 		end
 	end
+
+	--[[ Under the shared chest lock (chestLock): while another module holds it this chest is left
+	for the next pass, before its Delay starts, so nothing waits longer than that. A loot with
+	nothing to take never yields, so it holds the lock for no time at all. The expiry covers a full
+	chest at this Delay. ]]
+	local function lootChest(chest, taken)
+		local hold = claimChestLock(10 + 24 * Delay.Value)
+		if not hold then return end
+		-- Let go of it even if the loot errors; the error still goes on up as it always did.
+		local looted, lootError = pcall(lootChestUnlocked, chest, taken)
+		releaseChestLock(hold)
+		if not looted then error(lootError, 0) end
+	end
 	
 	--[[ Steal: the same looting, pointed at the enemy team's crate, plus the half that
 	makes raiding one worth doing -- emptying your inventory into your own personal chest
@@ -11484,6 +20323,12 @@ run(function()
 
 		depositing = true
 		task.spawn(function()
+			-- Under the shared chest lock (chestLock): this sweep is skipped while another module holds it.
+			local lockHold = claimChestLock(5 + #Stash * (Delay.Value + 1))
+			if not lockHold then
+				depositing = false
+				return
+			end
 			local chestGiveItem = inventoryRemote('ChestGiveItem')
 
 			--[[ No pacing asked for: one ChestGiveItem per item type in the stash, all at once.
@@ -11524,6 +20369,7 @@ run(function()
 				while pending > 0 and os.clock() < deadline do
 					task.wait()
 				end
+				releaseChestLock(lockHold)
 				depositing = false
 				return
 			end
@@ -11565,6 +20411,7 @@ run(function()
 				task.wait(Delay.Value)
 			end
 
+			releaseChestLock(lockHold)
 			depositing = false
 		end)
 	end
@@ -12054,6 +20901,7 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('ArmorSwitch') then return end
 	local ArmorSwitch
 	local Mode
 	local Targets
@@ -12547,7 +21395,9 @@ run(function()
 				local speedpotion = getItem('speed_potion')
 				if speedpotion and (not lplr.Character:GetAttribute('StatusEffect_speed')) then
 					for _ = 1, 4 do
-						if bedwars.Client:Get(remotes.ConsumeItem):CallServer({item = speedpotion.tool}) then break end
+						-- Not once it is off or you are dead: a drink let go mid-way (store.handRelease) answers nil too.
+						if not (AutoConsume.Enabled and entitylib.isAlive) then break end
+						if bedwars.getConsumeRemote():CallServer({item = speedpotion.tool}) then break end
 					end
 				end
 			end
@@ -12557,7 +21407,7 @@ run(function()
 					local apple = getItem('orange') or (not lplr.Character:GetAttribute('StatusEffect_golden_apple') and getItem('golden_apple')) or getItem('apple')
 					
 					if apple then
-						bedwars.Client:Get(remotes.ConsumeItem):CallServerAsync({
+						bedwars.getConsumeRemote():CallServerAsync({
 							item = apple.tool
 						})
 					end
@@ -12569,7 +21419,7 @@ run(function()
 					local shield = getItem('big_shield') or getItem('mini_shield')
 	
 					if shield then
-						bedwars.Client:Get(remotes.ConsumeItem):CallServerAsync({
+						bedwars.getConsumeRemote():CallServerAsync({
 							item = shield.tool
 						})
 					end
@@ -12591,7 +21441,29 @@ run(function()
 						consumeCheck(attribute)
 					end
 				end))
+				--[[ AutoConsume also looks once a second rather than rest on the events alone. Knitless
+				they come from the layer's store; on both paths a trigger that comes while a consume is
+				under way gets nothing (one at a time), and a refused item rests a while
+				(knitless.consumeRemote), so the look is what tries again. A consume under way makes a
+				look send nothing. Connected before the check below, which can yield for seconds, so
+				turning AutoConsume off meanwhile cannot leave it connected. ]]
+				do
+					local nextLook = os.clock() + 1
+					AutoConsume:Clean(runService.Heartbeat:Connect(function()
+						if os.clock() < nextLook then return end
+						nextLook = os.clock() + 1
+						task.spawn(consumeCheck)
+					end))
+				end
+				--[[ A death ends a drink's hold on the hand at once and drops the drink (knitless.holdHand),
+				so the other modules have the hand back for the respawn. ]]
+				AutoConsume:Clean(entitylib.Events.LocalRemoved:Connect(function()
+					if store.handRelease then store.handRelease(true) end
+				end))
 				consumeCheck()
+			elseif store.handRelease then
+				-- Turned off mid-drink: the drink is dropped and the hand goes back to the other modules now.
+				store.handRelease(true)
 			end
 		end,
 		Tooltip = 'Uses healing items and potions when you need them.\nCovers apples, speed potions and shield potions.'
@@ -12618,6 +21490,7 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('AutoHotbar') then return end
 	local AutoHotbar
 	local Mode
 	local Clear
@@ -13599,86 +22472,21 @@ run(function()
 end)
 	
 run(function()
-	local Value
-	local oldclickhold, oldshowprogress
-	
-	local FastConsume = vape.Categories.Inventory:CreateModule({
-		Name = 'FastConsume',
-		Function = function(callback)
-			if callback then
-				oldclickhold = bedwars.ClickHold.startClick
-				oldshowprogress = bedwars.ClickHold.showProgress
-				bedwars.ClickHold.startClick = function(self)
-					self.startedClickTime = tick()
-					local handle = self:showProgress()
-					local clicktime = self.startedClickTime
-					bedwars.RuntimeLib.Promise.defer(function()
-						task.wait(self.durationSeconds * (Value.Value / 40))
-						if handle == self.handle and clicktime == self.startedClickTime and self.closeOnComplete then
-							self:hideProgress()
-							if self.onComplete then self.onComplete() end
-							if self.onPartialComplete then self.onPartialComplete(1) end
-							self.startedClickTime = -1
-						end
-					end)
-				end
-	
-				bedwars.ClickHold.showProgress = function(self)
-					local roact = bedwars.Roact
-					local countdown = roact.mount(roact.createElement('ScreenGui', {}, { roact.createElement('Frame', {
-						[roact.Ref] = self.wrapperRef,
-						Size = UDim2.new(),
-						Position = UDim2.fromScale(0.5, 0.55),
-						AnchorPoint = Vector2.new(0.5, 0),
-						BackgroundColor3 = Color3.fromRGB(0, 0, 0),
-						BackgroundTransparency = 0.8
-					}, { roact.createElement('Frame', {
-						[roact.Ref] = self.progressRef,
-						Size = UDim2.fromScale(0, 1),
-						BackgroundColor3 = Color3.new(1, 1, 1),
-						BackgroundTransparency = 0.5
-					}) }) }), lplr:FindFirstChild('PlayerGui'))
-	
-					self.handle = countdown
-					local sizetween = tweenService:Create(self.wrapperRef:getValue(), TweenInfo.new(0.1), {
-						Size = UDim2.fromScale(0.11, 0.005)
-					})
-					local countdowntween = tweenService:Create(self.progressRef:getValue(), TweenInfo.new(self.durationSeconds * (Value.Value / 100), Enum.EasingStyle.Linear), {
-						Size = UDim2.fromScale(1, 1)
-					})
-	
-					sizetween:Play()
-					countdowntween:Play()
-					table.insert(self.tweens, countdowntween)
-					table.insert(self.tweens, sizetween)
-					
-					return countdown
-				end
-			else
-				bedwars.ClickHold.startClick = oldclickhold
-				bedwars.ClickHold.showProgress = oldshowprogress
-				oldclickhold = nil
-				oldshowprogress = nil
-			end
-		end,
-		Tooltip = 'Eats and uses items faster.'
-	})
-	Value = FastConsume:CreateSlider({
-		Name = 'Multiplier',
-		Min = 0,
-		Max = 100
-	})
-end)
-	
-run(function()
 	local FastDrop
+	-- Held by you: a key the knitless hotbar is pressing itself, for a slot bound to it in the game's
+	-- settings (shared.PistonwareSyntheticKeys), is not, or that tap would drop what is in hand.
+	local function held(key)
+		local synthetic = shared.PistonwareSyntheticKeys
+		if type(synthetic) == 'table' and (tonumber(synthetic[key]) or 0) > os.clock() then return false end
+		return inputService:IsKeyDown(key)
+	end
 	
 	FastDrop = vape.Categories.Inventory:CreateModule({
 		Name = 'FastDrop',
 		Function = function(callback)
 			if callback then
 				repeat
-					if entitylib.isAlive and (not store.inventory.opened) and (inputService:IsKeyDown(Enum.KeyCode.H) or inputService:IsKeyDown(Enum.KeyCode.Backspace)) and inputService:GetFocusedTextBox() == nil then
+					if entitylib.isAlive and (not store.inventory.opened) and (held(Enum.KeyCode.H) or held(Enum.KeyCode.Backspace)) and inputService:GetFocusedTextBox() == nil then
 						task.spawn(bedwars.ItemDropController.dropItemInHand)
 						task.wait(0.1)
 					else
@@ -13692,14 +22500,39 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('Bed Break Effect') then return end
 	local BedBreakEffect
 	local Mode
 	local List
 	local NameToId = {}
-	
+
+	--[[ Without firesignal (Solara, Xeno): each bed break effect is a Knit controller
+	(break-bed-effect-controller) whose BedBreakEffectTriggered listener only checks the effect type
+	and then calls its onBedBreak(player, cframe, teamId, centerBedPosition). The controllers of the
+	chosen type get that call directly. ]]
+	local function playBedBreakEffect(data)
+		if type(data) ~= 'table' then return end
+		local effectType = NameToId[List.Value]
+		local controllers = bedwars.Knit and bedwars.Knit.Controllers
+		if effectType == nil or type(controllers) ~= 'table' or typeof(data.bedBlockPosition) ~= 'Vector3' then return end
+		local position = data.bedBlockPosition * 3
+		local team = data.brokenBedTeam
+		local teamId = type(team) == 'table' and team.id or nil
+		for _, controller in controllers do
+			if type(controller) == 'table' and controller.breakBedEffectType == effectType
+				and type(controller.onBedBreak) == 'function' then
+				task.spawn(pcall, controller.onBedBreak, controller, data.player, CFrame.new(position), teamId, position)
+			end
+		end
+	end
+
 	BedBreakEffect = vape.Legit:CreateModule({
 		Name = 'Bed Break Effect',
 		Function = function(callback)
+			if callback and not exec.FireSignal then
+				BedBreakEffect:Clean(vapeEvents.BedwarsBedBreak.Event:Connect(playBedBreakEffect))
+				return
+			end
 			if callback then
 	            BedBreakEffect:Clean(vapeEvents.BedwarsBedBreak.Event:Connect(function(data)
 	                firesignal(bedwars.Client:Get('BedBreakEffectTriggered').instance.OnClientEvent, {
@@ -13769,13 +22602,85 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('Crosshair') then return end
+	if exec.Knitless then
+		exec.hide('Crosshair', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
 	local old
 	local Image
-	
+
+	--[[ Without debug.setconstant (Solara, Xeno). showCrosshair (viewmodel-controller) hands the
+	crosshair image to setMouseIcon on a computer; on a phone it mounts a ScreenGui with an
+	ImageLabel showing it. While Crosshair is on, showCrosshair is wrapped: setMouseIcon calls made
+	from inside it (told apart by thread, as the phone path can wait) get Image instead, and an
+	ImageLabel in a ScreenGui the call mounted is given Image afterwards. ]]
+	local showHook, iconHook
+	local showThreads = setmetatable({}, {__mode = 'k'})
+
+	local function unwrapCrosshair()
+		if showHook then
+			showHook.remove()
+			showHook = nil
+		end
+		if iconHook then
+			iconHook.remove()
+			iconHook = nil
+		end
+		table.clear(showThreads)
+	end
+
+	local function wrapCrosshair()
+		unwrapCrosshair()
+		local controller = bedwars.ViewmodelController
+		iconHook = fieldPatch.wrap(controller, 'setMouseIcon', function(setIcon)
+			return function(self, icon, ...)
+				if showThreads[coroutine.running()] then
+					icon = Image.Value
+				end
+				return setIcon(self, icon, ...)
+			end
+		end)
+		showHook = fieldPatch.wrap(controller, 'showCrosshair', function(show)
+			return function(self, ...)
+				local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+				local before = {}
+				if playerGui then
+					for _, child in playerGui:GetChildren() do
+						before[child] = true
+					end
+				end
+				local thread = coroutine.running()
+				showThreads[thread] = (showThreads[thread] or 0) + 1
+				local results = table.pack(pcall(show, self, ...))
+				local depth = (showThreads[thread] or 1) - 1
+				showThreads[thread] = depth > 0 and depth or nil
+				if playerGui then
+					for _, child in playerGui:GetChildren() do
+						if not before[child] and child:IsA('ScreenGui') then
+							local label = child:FindFirstChildWhichIsA('ImageLabel')
+							if label then
+								label.Image = Image.Value
+							end
+						end
+					end
+				end
+				if not results[1] then error(results[2], 0) end
+				return table.unpack(results, 2, results.n)
+			end
+		end)
+	end
+
 	local Crosshair = vape.Legit:CreateModule({
 		Name = 'Crosshair',
 		Function = function(callback)
-			if callback then
+			if not fieldPatch.constants then
+				if callback then
+					wrapCrosshair()
+				else
+					unwrapCrosshair()
+				end
+			elseif callback then
 				old = debug.getconstant(bedwars.ViewmodelController.showCrosshair, 25)
 				debug.setconstant(bedwars.ViewmodelController.showCrosshair, 25, Image.Value)
 				debug.setconstant(bedwars.ViewmodelController.showCrosshair, 37, Image.Value)
@@ -13784,7 +22689,7 @@ run(function()
 				debug.setconstant(bedwars.ViewmodelController.showCrosshair, 37, old)
 				old = nil
 			end
-	
+
 			if bedwars.ViewmodelController.crosshair then
 				bedwars.ViewmodelController:hideCrosshair()
 				bedwars.ViewmodelController:showCrosshair()
@@ -13816,11 +22721,78 @@ run(function()
 	end)
 	tab = suc and tab or {}
 	local oldvalues, oldfont = {}
-	
+
+	--[[ Without the debug library (Solara, Xeno). The table behind upvalue 2 is
+	ConstantManager.registerConstants(script, {...}) (damage-indicator-controller), and
+	ConstantManager copies every key in it from the attribute ConstantManager_<key> on the
+	controller's ModuleScript whenever that attribute changes. The sizes, timings, colour and outline
+	width go through those attributes. The font and switching the outline off are constants of
+	spawnDamageIndicator, so each indicator's TextLabel and UIStroke are restyled when its part
+	reaches workspace instead. ]]
+	local viaDebug = fieldPatch.constants
+	local attributeHost
+	local savedAttributes = {}
+	local attributeKeys = {'strokeThickness', 'textSize', 'blowUpSize', 'blowUpDuration', 'baseColor',
+		'blowUpCompleteDuration', 'anchoredDuration'}
+
+	local function setConstant(key, value)
+		if viaDebug or not attributeHost then return end
+		pcall(attributeHost.SetAttribute, attributeHost, 'ConstantManager_'..key, value)
+	end
+
+	local function restyle(part)
+		if not (DamageIndicator.Enabled and part.Name == 'DamageIndicatorPart') then return end
+		local gui = part:FindFirstChildWhichIsA('BillboardGui')
+		local frame = gui and gui:FindFirstChildWhichIsA('Frame')
+		local label = frame and frame:FindFirstChildWhichIsA('TextLabel')
+		if not label then return end
+		pcall(function()
+			label.Font = Enum.Font[FontOption.Value]
+		end)
+		local stroke = label:FindFirstChildWhichIsA('UIStroke')
+		if stroke and not Stroke.Enabled then
+			stroke.Enabled = false
+		end
+	end
+
+	local function applyAttributes(callback)
+		if callback then
+			if not attributeHost then
+				pcall(function()
+					attributeHost = lplr.PlayerScripts.TS.controllers.global.damage['damage-indicator-controller']
+				end)
+			end
+			table.clear(savedAttributes)
+			if attributeHost then
+				for _, key in attributeKeys do
+					local ok, value = pcall(attributeHost.GetAttribute, attributeHost, 'ConstantManager_'..key)
+					if ok and value ~= nil then
+						savedAttributes[key] = value
+					end
+				end
+			end
+			setConstant('strokeThickness', Stroke.Enabled and 1 or 0)
+			setConstant('textSize', Size.Value)
+			setConstant('blowUpSize', Size.Value)
+			setConstant('blowUpDuration', 0)
+			setConstant('baseColor', Color3.fromHSV(Color.Hue, Color.Sat, Color.Value))
+			setConstant('blowUpCompleteDuration', 0)
+			setConstant('anchoredDuration', Anchor.Value)
+			DamageIndicator:Clean(workspace.ChildAdded:Connect(restyle))
+		else
+			for key, value in savedAttributes do
+				setConstant(key, value)
+			end
+			table.clear(savedAttributes)
+		end
+	end
+
 	DamageIndicator = vape.Legit:CreateModule({
 		Name = 'Damage Indicator',
 		Function = function(callback)
-			if callback then
+			if not viaDebug then
+				applyAttributes(callback)
+			elseif callback then
 				oldvalues = table.clone(tab)
 				oldfont = debug.getconstant(bedwars.DamageIndicator, 86)
 				debug.setconstant(bedwars.DamageIndicator, 86, Enum.Font[FontOption.Value])
@@ -13852,7 +22824,8 @@ run(function()
 		Name = 'Font',
 		List = fontitems,
 		Function = function(val)
-			if DamageIndicator.Enabled then
+			-- Without the debug library, restyle reads the font as each indicator appears.
+			if DamageIndicator.Enabled and viaDebug then
 				debug.setconstant(bedwars.DamageIndicator, 86, Enum.Font[val])
 			end
 		end
@@ -13863,6 +22836,7 @@ run(function()
 		Function = function(hue, sat, val)
 			if DamageIndicator.Enabled then
 				tab.baseColor = Color3.fromHSV(hue, sat, val)
+				setConstant('baseColor', Color3.fromHSV(hue, sat, val))
 			end
 		end
 	})
@@ -13875,6 +22849,8 @@ run(function()
 			if DamageIndicator.Enabled then
 				tab.textSize = val
 				tab.blowUpSize = val
+				setConstant('textSize', val)
+				setConstant('blowUpSize', val)
 			end
 		end
 	})
@@ -13886,6 +22862,7 @@ run(function()
 		Function = function(val)
 			if DamageIndicator.Enabled then
 				tab.anchoredDuration = val
+				setConstant('anchoredDuration', val)
 			end
 		end
 	})
@@ -13893,8 +22870,12 @@ run(function()
 		Name = 'Stroke',
 		Function = function(callback)
 			if DamageIndicator.Enabled then
-				debug.setconstant(bedwars.DamageIndicator, 119, callback and 'Thickness' or 'Enabled')
-				tab.strokeThickness = callback and 1 or false
+				if viaDebug then
+					debug.setconstant(bedwars.DamageIndicator, 119, callback and 'Thickness' or 'Enabled')
+					tab.strokeThickness = callback and 1 or false
+				else
+					setConstant('strokeThickness', callback and 1 or 0)
+				end
 			end
 		end
 	})
@@ -14004,6 +22985,7 @@ run(function()
 	})
 	Kill = FPSBoost:CreateToggle({
 		Name = 'Kill Effects',
+		Visible = not exec.skip('FPS Boost/Kill Effects'),
 		Function = function()
 			if FPSBoost.Enabled then
 				FPSBoost:Toggle(nil, true)
@@ -14014,6 +22996,7 @@ run(function()
 	})
 	Visualizer = FPSBoost:CreateToggle({
 		Name = 'Visualizer',
+		Visible = not exec.skip('FPS Boost/Visualizer'),
 		Function = function()
 			if FPSBoost.Enabled then
 				FPSBoost:Toggle(nil, true)
@@ -14089,24 +23072,162 @@ run(function()
 end)
 	
 run(function()
-	vape.Legit:CreateModule({
+	if exec.skip('HitFix') then return end
+	if exec.Knitless then
+		exec.hide('HitFix', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
+	local HitFix
+
+	--[[ Without the debug library (Solara, Xeno). The patch only makes swingSwordAtMouse's mouse ray
+	go through GameQueryUtil:raycast instead of workspace:Raycast, and the one difference is that
+	GameQueryUtil skips parts marked with the attribute gamecore_GameQueryIgnore (game-query-util).
+	The same parts are taken out of every ray here instead: while HitFix is on, each one that does
+	not collide gets CanQuery = false (Roblox only allows that on non-colliding parts), and gets it
+	back when HitFix goes off. Parts the game marks right after adding them are checked again a
+	moment later. ]]
+	local IGNORE_ATTRIBUTE = 'gamecore_GameQueryIgnore'
+	local unqueried = setmetatable({}, {__mode = 'k'})
+
+	local function skipQuery(part)
+		if unqueried[part] or not part:IsA('BasePart') then return end
+		if part:GetAttribute(IGNORE_ATTRIBUTE) == true and part.CanQuery and not part.CanCollide then
+			part.CanQuery = false
+			unqueried[part] = true
+		end
+	end
+
+	local function restoreQuery()
+		for part in unqueried do
+			pcall(function()
+				part.CanQuery = true
+			end)
+		end
+		table.clear(unqueried)
+	end
+
+	HitFix = vape.Legit:CreateModule({
 		Name = 'HitFix',
 		Tab = 'Combat',
 		Function = function(callback)
-			debug.setconstant(bedwars.SwordController.swingSwordAtMouse, 23, callback and 'raycast' or 'Raycast')
-			debug.setupvalue(bedwars.SwordController.swingSwordAtMouse, 4, callback and bedwars.QueryUtil or workspace)
+			if fieldPatch.constants then
+				debug.setconstant(bedwars.SwordController.swingSwordAtMouse, 23, callback and 'raycast' or 'Raycast')
+				debug.setupvalue(bedwars.SwordController.swingSwordAtMouse, 4, callback and bedwars.QueryUtil or workspace)
+				return
+			end
+			if not callback then
+				restoreQuery()
+				return
+			end
+			HitFix:Clean(workspace.DescendantAdded:Connect(function(object)
+				if not object:IsA('BasePart') then return end
+				skipQuery(object)
+				if not unqueried[object] then
+					task.defer(function()
+						if HitFix.Enabled and object.Parent then
+							skipQuery(object)
+						end
+					end)
+				end
+			end))
+			for _, object in workspace:GetDescendants() do
+				skipQuery(object)
+			end
 		end,
 		Tooltip = 'Makes your sword hits land more reliably.'
 	})
 end)
 	
 run(function()
+	if exec.skip('Interface') then return end
+	if exec.Knitless then
+		exec.hide('Interface', "needs BedWars' Knit, which this executor cannot load")
+		return
+	end
 	local Interface
 	local HotbarOpenInventory = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-open-inventory']).HotbarOpenInventory
 	local HotbarHealthbar = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui.healthbar['hotbar-healthbar']).HotbarHealthbar
-	local HotbarApp = getRoactRender(require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-app']).HotbarApp.render)
+	local HotbarApp = fieldPatch.constants and getRoactRender(require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-app']).HotbarApp.render) or nil
 	local old, new = {}, {}
-	
+
+	--[[ Without the debug library (Solara, Xeno) there are no constants to change, and HotbarApp's
+	render (the way to HotbarTile) cannot be reached. The same values go into the elements the
+	components render instead: while Interface is on, HotbarHealthbar, HotbarTile and
+	HotbarOpenInventory have their render wrapped, and each wrapper changes the props those
+	constants feed (hotbar-healthbar, hotbar-tile, hotbar-open-inventory): the health font
+	LuckiestGuy, the health colour 0xCB3624, the tile colours 0x1D242E and 0x727FAC and the tile
+	transparencies 0.2 (selected) and 0.4. As with the constants, a change shows from the
+	component's next render, and only the options that were set are applied. ]]
+	local styles = {}
+	local renderHooks = {}
+	local HotbarTile
+	if not fieldPatch.constants then
+		pcall(function()
+			HotbarTile = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-tile']).HotbarTile
+		end)
+	end
+
+	local function styleHealthbar(_, element)
+		local container = type(element) == 'table' and type(element.elements) == 'table'
+			and element.elements.HotbarHealthbarContainer or nil
+		local children = fieldPatch.children(container)
+		if not children then return end
+		local label = fieldPatch.child(children, 'TextLabel')
+		if label and styles.healthFont then
+			label.props.Font = styles.healthFont
+		end
+		local bars = fieldPatch.children(children.HealthbarProgressWrapper)
+		local bar = bars and bars[1]
+		local props = type(bar) == 'table' and bar.props
+		-- Only the plain bar colour is the constant; decay and event colours stay.
+		if styles.healthColor and type(props) == 'table' and typeof(props.BackgroundColor3) == 'Color3'
+			and props.BackgroundColor3:ToHex():lower() == 'cb3624' then
+			props.BackgroundColor3 = styles.healthColor
+		end
+	end
+
+	local function styleButton(button, selected)
+		local props = button.props
+		if not styles.tileColor then return end
+		props.BackgroundColor3 = styles.tileColor
+		props.BackgroundTransparency = selected and styles.selectedTransparency or styles.tileTransparency
+		if not selected then
+			props.BorderColor3 = styles.tileShade
+			local keybind = fieldPatch.child(fieldPatch.children(button), 'TextLabel')
+			if keybind then
+				keybind.props.BackgroundColor3 = styles.tileShade
+			end
+		end
+	end
+
+	local function styleTile(self, element)
+		local button = fieldPatch.child(fieldPatch.children(element), 'ImageButton')
+		if button then
+			styleButton(button, type(self.props) == 'table' and self.props.Selected == true)
+		end
+	end
+
+	local function styleOpenInventory(_, element)
+		local button = fieldPatch.child(fieldPatch.children(element), 'ImageButton')
+		if button then
+			styleButton(button, false)
+		end
+	end
+
+	local function setRenderHooks(enabled)
+		for _, hook in renderHooks do
+			hook.remove()
+		end
+		table.clear(renderHooks)
+		if not enabled then return end
+		for _, pair in {{HotbarHealthbar, styleHealthbar}, {HotbarOpenInventory, styleOpenInventory}, {HotbarTile, styleTile}} do
+			local hook = pair[1] ~= nil and fieldPatch.render(pair[1], pair[2]) or nil
+			if hook then
+				table.insert(renderHooks, hook)
+			end
+		end
+	end
+
 	vape:Clean(function()
 		for _, v in new do
 			table.clear(v)
@@ -14141,6 +23262,10 @@ run(function()
 	Interface = vape.Legit:CreateModule({
 		Name = 'Interface',
 		Function = function(callback)
+			if not fieldPatch.constants then
+				setRenderHooks(callback)
+				return
+			end
 			for i, v in (callback and new or old) do
 				for i2, v2 in v do
 					debug.setconstant(i, i2, v2)
@@ -14159,13 +23284,21 @@ run(function()
 		Name = 'Health Font',
 		List = fontitems,
 		Function = function(val)
+			if not fieldPatch.constants then
+				styles.healthFont = val
+				return
+			end
 			modifyconstant(HotbarHealthbar.render, 77, val)
 		end
 	})
 	Interface:CreateColorSlider({
 		Name = 'Health Color',
 		Function = function(hue, sat, val)
-			modifyconstant(HotbarHealthbar.render, 16, tonumber(Color3.fromHSV(hue, sat, val):ToHex(), 16))
+			if fieldPatch.constants then
+				modifyconstant(HotbarHealthbar.render, 16, tonumber(Color3.fromHSV(hue, sat, val):ToHex(), 16))
+			else
+				styles.healthColor = Color3.fromHSV(hue, sat, val)
+			end
 			if Interface.Enabled then
 				local hotbar = lplr.PlayerGui:FindFirstChild('hotbar')
 				hotbar = hotbar and hotbar:FindFirstChild('HealthbarProgressWrapper', true)
@@ -14179,6 +23312,14 @@ run(function()
 		Name = 'Hotbar Color',
 		DefaultOpacity = 0.8,
 		Function = function(hue, sat, val, opacity)
+			if not fieldPatch.constants then
+				styles.tileColor = Color3.fromHSV(hue, sat, val)
+				styles.tileShade = Color3.fromHSV(hue, sat, math.clamp(val > 0.5 and val - 0.2 or val + 0.2, 0, 1))
+				local alpha = tonumber(opacity) or 0.8
+				styles.selectedTransparency = 1 - alpha
+				styles.tileTransparency = math.clamp(1.2 - alpha, 0, 1)
+				return
+			end
 			local func = oldinvrender or HotbarOpenInventory.render
 			modifyconstant(debug.getupvalue(HotbarApp, 23).render, 51, tonumber(Color3.fromHSV(hue, sat, val):ToHex(), 16))
 			modifyconstant(debug.getupvalue(HotbarApp, 23).render, 58, tonumber(Color3.fromHSV(hue, sat, math.clamp(val > 0.5 and val - 0.2 or val + 0.2, 0, 1)):ToHex(), 16))
@@ -14530,6 +23671,7 @@ run(function()
 end)
 
 run(function()
+	if exec.skip('SoundChanger') then return end
 	local SoundChanger
 	local List
 	local Volume
@@ -14903,11 +24045,352 @@ run(function()
 	local OpenInv
 	local KillFeed
 	local OldTabList
-	local HotbarApp = getRoactRender(require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-app']).HotbarApp.render)
-	local HotbarOpenInventory = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-open-inventory']).HotbarOpenInventory
+	local HotbarApp = fieldPatch.constants and getRoactRender(require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-app']).HotbarApp.render) or nil
+	-- Knitless the hotbar's components are stand-ins, with nothing in them to wrap (see hud below).
+	local HotbarOpenInventory = not exec.Knitless and require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-open-inventory']).HotbarOpenInventory or nil
 	local old, new = {}, {}
 	local oldkillfeed
-	
+	local ResizeHealth
+	local NoHotbarNumbers
+	local FixQueueCard
+
+	--[[ Without the debug library (Solara, Xeno) there are no constants to change, and HotbarApp's
+	render cannot be reached. While UI Cleanup is on, the components those constants belong to are
+	wrapped instead, and each wrapper changes the props the constants feed when its toggle is on:
+	  Resize Health: the health bar's width 0.85 becomes 1 (hotbar-healthbar), and tweenPosition
+	    (hotbar-tile) no longer lifts the selected tile by 0.075.
+	  No Hotbar Numbers: the keybind label of each tile and of the inventory button, 0.23 in
+	    size, becomes 0 (hotbar-tile, hotbar-open-inventory).
+	  Fix Queue Card: the queue card's top 0.01 becomes 0.1 (queue-card).
+	HotbarApp's own two constants (60 for Resize Health, 78 for No Inventory Button) have no
+	component of their own to wrap and are left out; No Inventory Button still replaces the
+	button's render. As with the constants, a change shows from the component's next render. ]]
+	local cleanupHooks = {}
+	local HotbarHealthbar, HotbarTile
+	if not fieldPatch.constants and not exec.Knitless then
+		pcall(function()
+			HotbarHealthbar = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui.healthbar['hotbar-healthbar']).HotbarHealthbar
+		end)
+		pcall(function()
+			HotbarTile = require(lplr.PlayerScripts.TS.controllers.global.hotbar.ui['hotbar-tile']).HotbarTile
+		end)
+	end
+
+	local function hideKeybind(button)
+		local keybind = fieldPatch.child(fieldPatch.children(button), 'TextLabel')
+		if keybind then
+			keybind.props.Size = UDim2.fromScale(0, 0)
+		end
+	end
+
+	local function cleanHealthbar(_, element)
+		if not (ResizeHealth and ResizeHealth.Enabled) then return end
+		local container = type(element) == 'table' and type(element.elements) == 'table'
+			and element.elements.HotbarHealthbarContainer or nil
+		local props = type(container) == 'table' and container.props
+		if type(props) == 'table' and typeof(props.Size) == 'UDim2' then
+			props.Size = UDim2.new(1, props.Size.X.Offset, props.Size.Y.Scale, props.Size.Y.Offset)
+		end
+	end
+
+	-- A tile and the inventory button both render an ImageButton with the keybind label in it.
+	local function cleanKeybind(_, element)
+		if not (NoHotbarNumbers and NoHotbarNumbers.Enabled) then return end
+		local button = fieldPatch.child(fieldPatch.children(element), 'ImageButton')
+		if button then
+			hideKeybind(button)
+		end
+	end
+
+	local function cleanQueueCard(_, element)
+		local props = FixQueueCard and FixQueueCard.Enabled and type(element) == 'table' and element.props
+		if type(props) == 'table' and typeof(props.Position) == 'UDim2'
+			and math.abs(props.Position.Y.Scale - 0.01) < 1e-6 then
+			props.Position = UDim2.new(props.Position.X.Scale, props.Position.X.Offset, 0.1, props.Position.Y.Offset)
+		end
+	end
+
+	local function setCleanupHooks(enabled)
+		for _, hook in cleanupHooks do
+			hook.remove()
+		end
+		table.clear(cleanupHooks)
+		if not enabled then return end
+		for _, pair in {{HotbarHealthbar, cleanHealthbar}, {HotbarTile, cleanKeybind},
+			{HotbarOpenInventory, cleanKeybind}, {bedwars.QueueCard, cleanQueueCard}} do
+			local hook = pair[1] ~= nil and fieldPatch.render(pair[1], pair[2]) or nil
+			if hook then
+				table.insert(cleanupHooks, hook)
+			end
+		end
+		-- tweenPosition (hotbar-tile) with the selected tile's lift of 0.075 taken out.
+		local hook = HotbarTile and fieldPatch.wrap(HotbarTile, 'tweenPosition', function(tweenPosition)
+			return function(self, ...)
+				if not (ResizeHealth and ResizeHealth.Enabled) then
+					return tweenPosition(self, ...)
+				end
+				self.positionMaid:DoCleaning()
+				local frame = self.frameRef:getValue()
+				if not frame then
+					return nil
+				end
+				local tween = tweenService:Create(frame, TweenInfo.new(0.12), {
+					Position = UDim2.fromScale(0, 0)
+				})
+				tween:Play()
+				self.positionMaid:GiveTask(function()
+					tween:Cancel()
+				end)
+			end
+		end) or nil
+		if hook then
+			table.insert(cleanupHooks, hook)
+		end
+	end
+
+	--[[ Knitless (Solara, Xeno; exec.Knitless): the components above are stand-ins, with no render
+	to wrap and no KillFeedController to quiet, so each option changes the HUD the game has rendered
+	under PlayerGui instead:
+	  Resize Health: hotbar.1.HotbarHealthbarContainer takes the hotbar's full width (0.85 becomes
+	    1), and the ImageButton of each tile in hotbar.1.ItemsHotbar is put back at 0, 0 each time
+	    the game tweens the selected one up by 0.075.
+	  No Hotbar Numbers: the keybind TextLabel (0.23 by 0.23) in each tile's ImageButton and in the
+	    inventory button's is hidden.
+	  No Inventory Button: the inventory button's tile (LayoutOrder 20 in ItemsHotbar) is hidden,
+	    and the row closes up round it.
+	  No Kill Feed: KillFeedGui.KillFeedContainer is hidden, with the cards the game mounts in it.
+	  Fix Queue Card: the queue card (QueueApp.1, 0.01 from the top) moves down to 0.1.
+	Roact writes a property only when its prop changes, and none of these do, so a change stays until
+	the game mounts that part again (the hotbar on each respawn). What the game adds is styled once
+	that frame's work is done (task.defer), never from inside a property signal. Each change keeps
+	the value it replaced and puts it back when its option or UI Cleanup goes off. ]]
+	local hud = {
+		Guis = {'hotbar', 'KillFeedGui', 'QueueApp'},
+		Flat = UDim2.fromScale(0, 0),
+		Lift = UDim2.fromScale(0, -0.075),
+		Saved = {},
+		Lifted = {},
+		Pending = {},
+		Hooked = {}
+	}
+
+	function hud.on(option)
+		return option ~= nil and option.Enabled == true
+	end
+
+	-- What object[prop] was before hud.style changed it, or what it is.
+	function hud.original(object, prop)
+		local saved = hud.Saved[object]
+		if saved and saved[prop] ~= nil then
+			return saved[prop]
+		end
+		return object[prop]
+	end
+
+	-- On: object[prop] becomes value, and the value it replaced is kept. Off: the kept value goes back.
+	function hud.style(object, prop, on, value)
+		local saved = hud.Saved[object]
+		if on then
+			if not saved then
+				saved = {}
+				hud.Saved[object] = saved
+			end
+			if saved[prop] == nil then
+				saved[prop] = object[prop]
+			end
+		elseif saved and saved[prop] ~= nil then
+			value = saved[prop]
+			saved[prop] = nil
+		else
+			return
+		end
+		if object[prop] ~= value then
+			object[prop] = value
+		end
+	end
+
+	-- Undoes a tile's lift a moment after the game's tween moved it; a Position signal only asks.
+	function hud.flatten(button)
+		if hud.Pending[button] then return end
+		hud.Pending[button] = true
+		task.defer(function()
+			hud.Pending[button] = nil
+			if hud.Lifted[button] and button.Position ~= hud.Flat then
+				button.Position = hud.Flat
+			end
+		end)
+	end
+
+	--[[ hotbar-tile's tweenPosition moves the selected tile's ImageButton to 0, -0.075 and the others
+	to 0, 0. Flat, every move is undone; back off, the selected tile (the one the game draws with a
+	white border) goes up again. ]]
+	function hud.lift(button, flat)
+		local watch = hud.Lifted[button]
+		if flat then
+			if not watch then
+				hud.Lifted[button] = button:GetPropertyChangedSignal('Position'):Connect(function()
+					hud.flatten(button)
+				end)
+			end
+			hud.flatten(button)
+		elseif watch then
+			watch:Disconnect()
+			hud.Lifted[button] = nil
+			if button.BorderColor3 == Color3.new(1, 1, 1) and button.Position == hud.Flat then
+				button.Position = hud.Lift
+			end
+		end
+	end
+
+	-- A tile's keybind label, or the inventory button's: a TextLabel 0.23 by 0.23 in its ImageButton.
+	function hud.keybind(object)
+		if not object:IsA('TextLabel') then return false end
+		local size = object.Size
+		return math.abs(size.X.Scale - 0.23) < 1e-3 and math.abs(size.Y.Scale - 0.23) < 1e-3
+	end
+
+	function hud.apply()
+		local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+		if not playerGui then return end
+		-- What the game took down since: forgotten, so nothing is kept for it.
+		for object in hud.Saved do
+			if not object:IsDescendantOf(playerGui) then
+				hud.Saved[object] = nil
+			end
+		end
+		for object, connection in hud.Lifted do
+			if not object:IsDescendantOf(playerGui) then
+				connection:Disconnect()
+				hud.Lifted[object] = nil
+			end
+		end
+		for gui, connection in hud.Hooked do
+			if gui.Parent ~= playerGui then
+				connection:Disconnect()
+				hud.Hooked[gui] = nil
+			end
+		end
+		for _, name in hud.Guis do
+			local gui = playerGui:FindFirstChild(name)
+			if gui and not hud.Hooked[gui] then
+				-- Re-renders inside it add new pieces.
+				hud.Hooked[gui] = gui.DescendantAdded:Connect(hud.queue)
+			end
+		end
+
+		local hotbar = playerGui:FindFirstChild('hotbar')
+		hotbar = hotbar and hotbar:FindFirstChild('1')
+		local health = hotbar and hotbar:FindFirstChild('HotbarHealthbarContainer')
+		if health and health:IsA('GuiObject') then
+			local size = hud.original(health, 'Size')
+			hud.style(health, 'Size', hud.on(ResizeHealth), UDim2.new(1, size.X.Offset, size.Y.Scale, size.Y.Offset))
+		end
+		local items = hotbar and hotbar:FindFirstChild('ItemsHotbar')
+		for _, tile in items and items:GetChildren() or {} do
+			if not tile:IsA('GuiObject') then continue end
+			local inventory = tile.LayoutOrder == 20
+			if inventory then
+				hud.style(tile, 'Visible', hud.on(OpenInv), false)
+			end
+			local button = tile:FindFirstChildOfClass('ImageButton')
+			if button then
+				for _, label in button:GetChildren() do
+					if hud.keybind(label) then
+						hud.style(label, 'Visible', hud.on(NoHotbarNumbers), false)
+					end
+				end
+				if not inventory then
+					hud.lift(button, hud.on(ResizeHealth))
+				end
+			end
+		end
+
+		local feed = playerGui:FindFirstChild('KillFeedGui')
+		feed = feed and feed:FindFirstChild('KillFeedContainer')
+		if feed and feed:IsA('GuiObject') then
+			hud.style(feed, 'Visible', hud.on(KillFeed), false)
+		end
+
+		local queue = playerGui:FindFirstChild('QueueApp')
+		for _, card in queue and queue:GetChildren() or {} do
+			if card:IsA('GuiObject') then
+				local position = hud.original(card, 'Position')
+				if math.abs(position.Y.Scale - 0.01) < 1e-4 then
+					hud.style(card, 'Position', hud.on(FixQueueCard), UDim2.new(position.X.Scale, position.X.Offset, 0.1, position.Y.Offset))
+				end
+			end
+		end
+	end
+
+	-- One pass once this frame's work is done, however many pieces came.
+	function hud.queue()
+		if hud.Queued or not hud.Started then return end
+		hud.Queued = true
+		task.defer(function()
+			hud.Queued = false
+			if not hud.Started then return end
+			local ok, err = pcall(hud.apply)
+			if not ok then
+				bufferCall('warn', 'UICleanup.knitless', tostring(err))
+			end
+		end)
+	end
+
+	-- An option changed: applied again (knitless, while UI Cleanup is on).
+	function hud.refresh()
+		if exec.Knitless and hud.Started then
+			hud.queue()
+		end
+	end
+
+	function hud.start()
+		if hud.Started then return end
+		hud.Started = true
+		local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+		if playerGui then
+			-- The game mounts these again: the hotbar on each respawn, the queue card per queue.
+			hud.Added = playerGui.ChildAdded:Connect(function(child)
+				if table.find(hud.Guis, child.Name) then
+					hud.queue()
+				end
+			end)
+		end
+		hud.queue()
+	end
+
+	function hud.stop()
+		hud.Started = false
+		if hud.Added then
+			hud.Added:Disconnect()
+			hud.Added = nil
+		end
+		for _, connection in hud.Hooked do
+			connection:Disconnect()
+		end
+		table.clear(hud.Hooked)
+		local lifted = {}
+		for button in hud.Lifted do
+			table.insert(lifted, button)
+		end
+		for _, button in lifted do
+			pcall(hud.lift, button, false)
+		end
+		table.clear(hud.Lifted)
+		for object, saved in hud.Saved do
+			for prop, value in saved do
+				pcall(function()
+					if object[prop] ~= value then
+						object[prop] = value
+					end
+				end)
+			end
+		end
+		table.clear(hud.Saved)
+	end
+	if exec.Knitless then
+		vape:Clean(hud.stop)
+	end
+
 	vape:Clean(function()
 		for _, v in new do
 			table.clear(v)
@@ -15235,10 +24718,27 @@ run(function()
 	UICleanup = vape.Legit:CreateModule({
 		Name = 'UI Cleanup',
 		Function = function(callback)
-			for i, v in (callback and new or old) do
-				for i2, v2 in v do
-					debug.setconstant(i, i2, v2)
+			-- Knitless: the rendered HUD is changed instead (hud above); the old player list is the same switch.
+			if exec.Knitless then
+				if callback then
+					hud.start()
+				else
+					hud.stop()
 				end
+				if OldTabList.Enabled then
+					starterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, callback)
+				end
+				topbar.refresh()
+				return
+			end
+			if fieldPatch.constants then
+				for i, v in (callback and new or old) do
+					for i2, v2 in v do
+						debug.setconstant(i, i2, v2)
+					end
+				end
+			elseif callback then
+				setCleanupHooks(true)
 			end
 			if callback then
 				if OpenInv.Enabled then
@@ -15270,6 +24770,10 @@ run(function()
 				if OldTabList.Enabled then
 					starterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
 				end
+				-- After the inventory button's render is back, so its own wrapper unwinds cleanly.
+				if not fieldPatch.constants then
+					setCleanupHooks(false)
+				end
 			end
 			topbar.refresh()
 		end,
@@ -15290,18 +24794,27 @@ run(function()
 		end,
 		Tooltip = 'Puts the mobile menu button next to the top bar instead of in the top-right corner.'
 	})
-	UICleanup:CreateToggle({
+	ResizeHealth = UICleanup:CreateToggle({
 		Name = 'Resize Health',
 		Function = function(callback)
+			-- Without the debug library the wrappers above read this toggle as they render; knitless, hud does.
+			if not fieldPatch.constants then
+				hud.refresh()
+				return
+			end
 			modifyconstant(HotbarApp, 60, callback and 1 or nil)
 			modifyconstant(debug.getupvalue(HotbarApp, 15).render, 30, callback and 1 or nil)
 			modifyconstant(debug.getupvalue(HotbarApp, 23).tweenPosition, 16, callback and 0 or nil)
 		end,
 		Default = true
 	})
-	UICleanup:CreateToggle({
+	NoHotbarNumbers = UICleanup:CreateToggle({
 		Name = 'No Hotbar Numbers',
 		Function = function(callback)
+			if not fieldPatch.constants then
+				hud.refresh()
+				return
+			end
 			local func = oldinvrender or HotbarOpenInventory.render
 			modifyconstant(debug.getupvalue(HotbarApp, 23).render, 90, callback and 0 or nil)
 			modifyconstant(func, 71, callback and 0 or nil)
@@ -15311,7 +24824,13 @@ run(function()
 	OpenInv = UICleanup:CreateToggle({
 		Name = 'No Inventory Button',
 		Function = function(callback)
-			modifyconstant(HotbarApp, 78, callback and 0 or nil)
+			if fieldPatch.constants then
+				modifyconstant(HotbarApp, 78, callback and 0 or nil)
+			end
+			if exec.Knitless then
+				hud.refresh()
+				return
+			end
 			if UICleanup.Enabled then
 				if callback then
 					oldinvrender = HotbarOpenInventory.render
@@ -15329,6 +24848,10 @@ run(function()
 	KillFeed = UICleanup:CreateToggle({
 		Name = 'No Kill Feed',
 		Function = function(callback)
+			if exec.Knitless then
+				hud.refresh()
+				return
+			end
 			if UICleanup.Enabled then
 				if callback then
 					oldkillfeed = bedwars.KillFeedController.addToKillFeed
@@ -15350,9 +24873,13 @@ run(function()
 		end,
 		Default = true
 	})
-	UICleanup:CreateToggle({
+	FixQueueCard = UICleanup:CreateToggle({
 		Name = 'Fix Queue Card',
 		Function = function(callback)
+			if not fieldPatch.constants then
+				hud.refresh()
+				return
+			end
 			modifyconstant(bedwars.QueueCard.render, 15, callback and 0.1 or nil)
 		end,
 		Default = true
@@ -15373,6 +24900,77 @@ run(function()
 	local NoBob
 	local Rots = {}
 	local old, oldc1
+
+	--[[ Knitless (Solara, Xeno; exec.Knitless): the game's ViewmodelController cannot be reached, so
+	its playAnimation cannot be made to skip FP_WALK, and the stand-in's is never asked for it. That bob
+	is one looped track on the viewmodel's Animator: setHeldItem loads it with each held item, and a
+	0.1 s loop of the game's plays it while you move and stops it when you stand. While No Bobbing is
+	on, each FP_WALK track on a model under the camera (the viewmodel, or the arms some items swap in)
+	is turned down as it starts to the weight the game gives a track it mutes (0.0001), and again on
+	any frame its weight came back. A muted track still counts as playing, so that loop leaves it
+	alone. On disable each muted track still playing fades back to its weight. The offsets and the
+	rotation are attribute and joint writes, which work as they are. ]]
+	local MUTED_WEIGHT = 0.0001
+	local walkTracks = {}
+	local walkAsset
+
+	-- Read back as a float the muted weight is not exactly 0.0001, so under 0.001 counts as muted.
+	local function weighted(track)
+		return track.WeightTarget >= 0.001
+	end
+
+	local function muteWalk(track)
+		local animation = track.Animation
+		local id = animation and animation.AnimationId
+		if type(id) ~= 'string' or id:match('%d+$') ~= walkAsset then return end
+		if walkTracks[track] == nil then
+			walkTracks[track] = weighted(track) and track.WeightTarget or 1
+			track.Destroying:Once(function()
+				walkTracks[track] = nil
+			end)
+		end
+		if track.IsPlaying and weighted(track) then
+			track:AdjustWeight(MUTED_WEIGHT, 0)
+		end
+	end
+
+	local function muteBob()
+		local ok, id = pcall(function()
+			return bedwars.GameAnimationUtil:getAssetId(bedwars.AnimationType.FP_WALK)
+		end)
+		-- prod-animations' FP_WALK when the stand-ins do not know it.
+		walkAsset = ok and type(id) == 'string' and id:match('%d+$') or '8091867276'
+		local function watch(model)
+			local humanoid = model:IsA('Model') and model:FindFirstChildOfClass('Humanoid')
+			local animator = humanoid and humanoid:FindFirstChildOfClass('Animator')
+			if not animator then return end
+			Viewmodel:Clean(animator.AnimationPlayed:Connect(muteWalk))
+			for _, track in animator:GetPlayingAnimationTracks() do
+				muteWalk(track)
+			end
+		end
+		for _, child in gameCamera:GetChildren() do
+			watch(child)
+		end
+		-- The game builds the viewmodel again when its mode changes; the new one is parented last.
+		Viewmodel:Clean(gameCamera.ChildAdded:Connect(watch))
+		Viewmodel:Clean(runService.Heartbeat:Connect(function()
+			for track in walkTracks do
+				if track.IsPlaying and weighted(track) then
+					track:AdjustWeight(MUTED_WEIGHT, 0)
+				end
+			end
+		end))
+	end
+
+	local function unmuteBob()
+		for track, weight in walkTracks do
+			if track.IsPlaying and not weighted(track) then
+				track:AdjustWeight(weight, 0.3)
+			end
+		end
+		table.clear(walkTracks)
+	end
 	
 	Viewmodel = vape.Legit:CreateModule({
 		Name = 'Viewmodel',
@@ -15395,8 +24993,14 @@ run(function()
 				lplr.PlayerScripts.TS.controllers.global.viewmodel['viewmodel-controller']:SetAttribute('ConstantManager_DEPTH_OFFSET', -Depth.Value)
 				lplr.PlayerScripts.TS.controllers.global.viewmodel['viewmodel-controller']:SetAttribute('ConstantManager_HORIZONTAL_OFFSET', Horizontal.Value)
 				lplr.PlayerScripts.TS.controllers.global.viewmodel['viewmodel-controller']:SetAttribute('ConstantManager_VERTICAL_OFFSET', Vertical.Value)
+				if exec.Knitless and NoBob.Enabled then
+					muteBob()
+				end
 			else
 				bedwars.ViewmodelController.playAnimation = old
+				if exec.Knitless then
+					unmuteBob()
+				end
 				if viewmodel then
 					viewmodel.RightHand.RightWrist.C1 = oldc1
 				end
@@ -15471,13 +25075,33 @@ run(function()
 end)
 	
 run(function()
+	if exec.skip('WinEffect') then return end
 	local WinEffect
 	local List
 	local NameToId = {}
-	
+
+	--[[ Without getconnections (Solara, Xeno): each win effect is a Knit controller (win-effect)
+	whose WinEffectTriggered listener only checks the effect type and then calls its
+	onWin(winningPlayer). The controllers of the chosen type get that call directly. ]]
+	local function playWinEffect()
+		local effectType = NameToId[List.Value]
+		local controllers = bedwars.Knit and bedwars.Knit.Controllers
+		if effectType == nil or type(controllers) ~= 'table' then return end
+		for _, controller in controllers do
+			if type(controller) == 'table' and controller.winEffectType == effectType
+				and type(controller.onWin) == 'function' then
+				task.spawn(pcall, controller.onWin, controller, lplr)
+			end
+		end
+	end
+
 	WinEffect = vape.Legit:CreateModule({
 		Name = 'WinEffect',
 		Function = function(callback)
+			if callback and not exec.Connections then
+				WinEffect:Clean(vapeEvents.MatchEndEvent.Event:Connect(playWinEffect))
+				return
+			end
 			if callback then
 				WinEffect:Clean(vapeEvents.MatchEndEvent.Event:Connect(function()
 					for i, v in getconnections(bedwars.Client:Get('WinEffectTriggered').instance.OnClientEvent) do
@@ -15627,6 +25251,18 @@ run(function()
 	})
 end)
 
+--[[ Knitless (Solara, Xeno; exec.Knitless): modules that load and toggle but can change nothing,
+because all they do is wrap a method the game never calls on the stand-ins (movement modifiers, the
+block breaker). Taken out before the profile applies, as an impossible module is. ]]
+if exec.Knitless then
+	for _, name in {'NoSlowdown', 'AutoTool', 'SafeWalk'} do
+		-- One already skipped by name (exec.skip) keeps the reason it was skipped with.
+		if not exec.skip(name) then
+			exec.hide(name, "needs BedWars' Knit, which this executor cannot load")
+		end
+	end
+end
+
 --[[ == bedwars module loader ==
 Exposes shared.bedwars and loads the external obfuscatable module ]]
 
@@ -15701,6 +25337,7 @@ shared.bedwars = {
 	_baseGetSpeed       = _baseGetSpeed,
 	namecallGuard       = namecallGuard,
 	fpsHooks            = fpsHooks,
+	exec                = exec,
 }
 
 --[[ bedwars.lua is the ONLY file fetched from GitLab -- everything else comes from GitHub -- and
@@ -15822,8 +25459,8 @@ local function downloadBedwars()
         else
             suc, res = pcall(function()
                 local protectedUrl = shared.PistonwareProtectedRawUrl
-                return type(protectedUrl) == 'function' and game:HttpGet(protectedUrl(), true)
-                    or game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
+                return type(protectedUrl) == 'function' and httpGet(protectedUrl(), true)
+                    or httpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
             end)
         end
         --[[ compile check: during an outage HttpGet can hand back the 503/error page as the body,

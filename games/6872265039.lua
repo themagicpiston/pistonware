@@ -15,6 +15,221 @@ if not shared.PistonwareAuthenticated then
 	return
 end
 
+-- Solara and Xeno support. Approach credit: stxvv (gitlab.com/stxvv/bedwarsdeps).
+-- Written for pistonware from BedWars' own modules; no code from that project is included.
+local exec = shared.PistonwareExec
+if not (type(exec) == 'table' and type(exec.hide) == 'function') then
+	local function probeExecutor()
+		local exec = {}
+		local function present(value)
+			return type(value) == 'function'
+		end
+		local function passes(check)
+			local ok, result = pcall(check)
+			return ok and result == true
+		end
+		--[[ Solara's require runs a module's code again instead of handing back the game's copy, and when
+		that code errors (KnitClient does) the thread that called require is left at identity 2 without its
+		executor capabilities: file calls, gethui and CoreGui all refuse it from then on, and pcall does not
+		prevent it. A require made in a thread of its own costs only that thread, so the probe requires
+		through here, and so can any later require that may fail (exec.isolatedRequire). Returns what pcall
+		would; a require still running when the timeout ends counts as failed, with no error value. ]]
+		local function isolatedRequire(module, timeout)
+			local finished, ok, result = false, false, nil
+			task.spawn(function()
+				ok, result = pcall(require, module)
+				finished = true
+			end)
+			local deadline = os.clock() + (timeout or 10)
+			while not finished and os.clock() < deadline do
+				task.wait()
+			end
+			if not finished then return false, nil end
+			return ok, result
+		end
+		exec.isolatedRequire = isolatedRequire
+		--[[ Roblox's own require is a C function. Solara's is written in Lua (its init script): it runs a
+		module's code again instead of handing back the game's copy, and Knit's code fails there with its
+		error printed to the console. Where there is no debug library to reach Knit by either, nothing
+		tries KnitClient through such a require: not the Live check below, not the BedWars files. ]]
+		exec.NativeRequire = passes(function()
+			return debug.info(require, 's') == '[C]'
+		end)
+
+		local named, name = pcall(function()
+			return identifyexecutor and ({identifyexecutor()})[1] or nil
+		end)
+		exec.Name = (named and type(name) == 'string') and name or ''
+
+		--[[ Roblox's own require exists everywhere: what counts is whether it hands back a game module.
+		It is tried only on modules whose bodies just build a table (PlayerModule's helpers, roblox-ts'
+		RuntimeLib), never on PlayerModule itself: a require that re-ran modules instead of handing back
+		the game's cached ones would build a second camera and control stack from it. Asked twice, the
+		same module has to come back. A place with none of these leaves require untried, which does not
+		count against Full below. ]]
+		local requireTarget
+		pcall(function()
+			local scripts = game:GetService('Players').LocalPlayer:FindFirstChild('PlayerScripts')
+			local playerModule = scripts and scripts:FindFirstChild('PlayerModule')
+			local utils = playerModule and playerModule:FindFirstChild('CommonUtils')
+			local module = utils and (utils:FindFirstChild('FlagUtil') or utils:FindFirstChild('ConnectionUtil'))
+			if not module then
+				local include = game:GetService('ReplicatedStorage'):FindFirstChild('rbxts_include')
+				module = include and include:FindFirstChild('RuntimeLib')
+			end
+			if module and module.ClassName == 'ModuleScript' then
+				requireTarget = module
+			end
+		end)
+		exec.Require = requireTarget ~= nil and passes(function()
+			local loaded, exported = isolatedRequire(requireTarget)
+			if not loaded or type(exported) ~= 'table' then return false end
+			local again, second = isolatedRequire(requireTarget)
+			return again and second == exported
+		end)
+		--[[ Live: require hands back the modules the game itself runs, not fresh copies of them. Only
+		BedWars' Knit can show that from here: the game registers every controller in KnitClient's
+		Controllers table, which a re-run copy holds empty. Everywhere else it stays false. An injection
+		made before the game registered them sees an empty table too, so the BedWars files also set it
+		once Knit has started through require. ]]
+		exec.Live = exec.Require and passes(function()
+			local node = game:GetService('ReplicatedStorage')
+			for _, step in {'rbxts_include', 'node_modules', '@easy-games', 'knit', 'src', 'Knit'} do
+				node = node:FindFirstChild(step)
+				if not node then return false end
+			end
+			local client = node:FindFirstChild('KnitClient')
+			-- KnitClient waits for its Services folder, so without one this would hang
+			if not (client and node:FindFirstChild('Services')) then return false end
+			if not exec.NativeRequire and type(debug.getupvalue) ~= 'function' then return false end
+			local loaded, knit = isolatedRequire(client)
+			return loaded and type(knit) == 'table' and type(knit.Controllers) == 'table' and next(knit.Controllers) ~= nil
+		end)
+		-- Tried in a throwaway thread, so the check cannot leave this one at another identity.
+		exec.Identity = present(setthreadidentity) and passes(function()
+			local thread = coroutine.create(function()
+				local level = 8
+				if present(getthreadidentity) then
+					local got, current = pcall(getthreadidentity)
+					if got and type(current) == 'number' then level = current end
+				end
+				setthreadidentity(level)
+				return true
+			end)
+			local resumed, result = coroutine.resume(thread)
+			return resumed and result == true
+		end)
+		exec.Genv = passes(function()
+			return type(getgenv()) == 'table'
+		end)
+		exec.Rawmeta = present(setreadonly) and passes(function()
+			return type(getrawmetatable(game)) == 'table'
+		end)
+		exec.HookFunction = present(hookfunction)
+		exec.HookMetamethod = present(hookmetamethod)
+
+		--[[ getnamecallmethod is trusted only once something proves it. hookmetamethod is how full
+		executors hook namecalls, and its presence is taken as proof. Without it, a pass-through wrapper
+		goes on the raw __namecall for exactly one call of our own, game:GetService, which has to report
+		'GetService'; the original goes straight back whatever happens. Delta is not tested that way:
+		nothing may be written to its metatable at load (see the Delta notes in 6872274481.lua). ]]
+		exec.Namecall = false
+		if present(getnamecallmethod) then
+			if exec.HookMetamethod then
+				exec.Namecall = true
+			elseif exec.Name:lower():find('delta', 1, true) then
+				exec.Namecall = exec.Rawmeta
+			elseif exec.Rawmeta then
+				exec.Namecall = passes(function()
+					local mt = getrawmetatable(game)
+					local original = rawget(mt, '__namecall')
+					if type(original) ~= 'function' then return false end
+					local readonly = true
+					if present(isreadonly) then
+						local got, value = pcall(isreadonly, mt)
+						if got then readonly = value == true end
+					end
+					local seen
+					local installed = pcall(function()
+						setreadonly(mt, false)
+						rawset(mt, '__namecall', function(self, ...)
+							if seen == nil then
+								local got, method = pcall(getnamecallmethod)
+								seen = got and method or false
+							end
+							return original(self, ...)
+						end)
+					end)
+					if installed then
+						pcall(function()
+							return game:GetService('Players')
+						end)
+					end
+					pcall(function()
+						setreadonly(mt, false)
+						rawset(mt, '__namecall', original)
+					end)
+					pcall(setreadonly, mt, readonly)
+					return installed and seen == 'GetService' and rawget(mt, '__namecall') == original
+				end)
+			end
+		end
+
+		exec.Connections = present(getconnections) and passes(function()
+			local event = Instance.new('BindableEvent')
+			local connection = event.Event:Connect(function() end)
+			local got, list = pcall(getconnections, event.Event)
+			connection:Disconnect()
+			event:Destroy()
+			return got and type(list) == 'table'
+		end)
+		exec.FireSignal = present(firesignal)
+		exec.Debug = passes(function()
+			local marker = {}
+			local function probeUpvalueHolder()
+				return marker
+			end
+			return debug.getupvalue(probeUpvalueHolder, 1) == marker
+		end)
+		exec.Touch = present(firetouchinterest)
+		exec.Prompt = present(fireproximityprompt)
+		exec.Click = present(fireclickdetector)
+		exec.NetworkOwner = present(isnetworkowner)
+		exec.FpsCap = present(setfpscap)
+		exec.FFlag = present(setfflag)
+		exec.Mouse = present(mouse1click) and present(mouse1press)
+		exec.MouseMove = present(mousemoverel)
+		exec.Hui = present(gethui)
+		exec.Teleport = present(queue_on_teleport)
+		exec.HttpGet = passes(function()
+			return type(game.HttpGet) == 'function'
+		end)
+		-- Everything the scripts were first written against: on such an executor nothing changes.
+		-- A place with no module to try require on (requireTarget nil) does not decide it.
+		exec.Full = (exec.Require or requireTarget == nil) and exec.Identity and exec.Rawmeta
+			and exec.Namecall and exec.HookFunction and exec.Connections and exec.Debug
+
+		-- Takes a module out of the list on this executor and keeps the reason for a later notice.
+		-- Safe before the module exists (only the reason is kept) and after it was created.
+		function exec.hide(moduleName, reason)
+			if type(moduleName) ~= 'string' then return end
+			local hidden = shared.PistonwareHidden
+			if type(hidden) ~= 'table' then
+				hidden = {}
+				shared.PistonwareHidden = hidden
+			end
+			hidden[moduleName] = reason or 'not supported on this executor'
+			local vape = shared.vape
+			if type(vape) == 'table' and type(vape.Modules) == 'table' and vape.Modules[moduleName] ~= nil then
+				pcall(vape.Remove, vape, moduleName)
+			end
+		end
+		return exec
+	end
+	exec = probeExecutor()
+	shared.PistonwareExec = exec
+end
+
 local function errorTrace(err)
 	local traceback
 	pcall(function()
@@ -61,7 +276,13 @@ local inputService = cloneref(game:GetService('UserInputService'))
 local runService = cloneref(game:GetService('RunService'))
 local tweenService = cloneref(game:GetService('TweenService'))
 local guiService = cloneref(game:GetService('GuiService'))
-local coreGui = cloneref(game:GetService('CoreGui'))
+-- Guarded: at a low identity CoreGui may not come back, and this is file scope.
+local coreGui = (function()
+	local ok, service = pcall(function()
+		return cloneref(game:GetService('CoreGui'))
+	end)
+	return ok and service or nil
+end)()
 
 local lplr = playersService.LocalPlayer
 local vape = shared.vape
@@ -99,41 +320,271 @@ local function notif(...)
 	return vape:CreateNotification(...)
 end
 
+--[[ Knit out of reach (Solara, Xeno): the lobby's bedwars table rebuilt from the game itself, so the
+modules below run as they are. Remotes come by name through exec.net, data from games/bedwars-data.json
+(exec.loadData), and the store's slices from what the game pushes and answers:
+  Party                    the reducer's default (you, solo), then partyInfoEvent; asked for once
+                           with requestPartyInfo, which the server answers once you have a party
+  Consumable.inventory     ConsumableUpdate, push-only: empty until the game sends one
+  Lobby.profileData        RequestProfileData replies (ClaimRewards asks every 30 s)
+  Bedwars.playerLevel      the PlayerLevel attribute, PlayerLevelUpdate and profile replies
+  milestoneRewardsClaimed  MilestoneRewardUpdate, push-only
+CrateAltarController reads the RewardCrate-tagged crates and sends SpawnRewardCrate/OpenRewardCrate.
+UserInputController answers the server's RequestUserInputType a frame after the game does, so a type
+DeviceSpoofer sets on it is the one the server keeps. ]]
+local function knitlessLobby()
+	local net = exec.net
+	local Client = net.client(replicatedStorage.rbxts_include.node_modules['@rbxts'].net.out._NetManaged)
+	local collectionService = cloneref(game:GetService('CollectionService'))
+	local state = {
+		--[[ The lobby's party reducer starts here too: you, leading a party of one, not queued. The
+		server only has a party for you once you queue or join one, and only then answers
+		requestPartyInfo; until then this default is the game's own state as well. ]]
+		Party = {
+			leader = {userId = lplr.UserId, name = lplr.Name, displayName = lplr.DisplayName},
+			members = {},
+			queueState = 0,
+			outgoingInviteUserIds = {}
+		},
+		Consumable = {inventory = {}},
+		Lobby = {},
+		Bedwars = {playerLevel = tonumber(lplr:GetAttribute('PlayerLevel')) or 0}
+	}
+	local consumablesKnown = false
+	local layer = {Knitless = true, Client = Client}
+
+	local function listen(name, callback)
+		pcall(function()
+			vape:Clean(Client:Get(name):Connect(callback))
+		end)
+	end
+	listen('ConsumableUpdate', function(data)
+		if type(data) == 'table' and type(data.inventory) == 'table' then
+			state.Consumable = {inventory = data.inventory, record = data.record}
+			consumablesKnown = true
+		end
+	end)
+	listen('PlayerLevelUpdate', function(level)
+		if tonumber(level) then state.Bedwars.playerLevel = tonumber(level) end
+	end)
+	listen('MilestoneRewardUpdate', function(claimed)
+		if type(claimed) == 'table' then state.Bedwars.milestoneRewardsClaimed = claimed end
+	end)
+	vape:Clean(lplr:GetAttributeChangedSignal('PlayerLevel'):Connect(function()
+		local level = tonumber(lplr:GetAttribute('PlayerLevel'))
+		if level then state.Bedwars.playerLevel = level end
+	end))
+	pcall(function()
+		local events = net.events('@easy-games/lobby:shared/event/lobby-events@getEvents.Events')
+		vape:Clean(events:FindFirstChild('partyInfoEvent').OnClientEvent:Connect(function(data)
+			if type(data) == 'table' and type(data.party) == 'table' then state.Party = data.party end
+		end))
+		events:FindFirstChild('requestPartyInfo'):FireServer()
+	end)
+
+	local Store = {changed = {connect = function()
+		return {disconnect = function() end}
+	end}}
+	function Store:getState()
+		return state
+	end
+	-- The two actions the lobby modules send; everything else stays with the game's own store.
+	function Store:dispatch(action)
+		if type(action) ~= 'table' then return end
+		if action.type == 'LobbySetProfileData' and type(action.profileData) == 'table' then
+			state.Lobby.profileData = action.profileData
+			if tonumber(action.profileData.level) then state.Bedwars.playerLevel = tonumber(action.profileData.level) end
+		elseif action.type == 'LobbyClaimAchievementRewards' then
+			local achievements = state.Lobby.profileData and state.Lobby.profileData.achievements
+			local entry = type(achievements) == 'table' and achievements[action.id]
+			if type(entry) == 'table' then entry.rewardsClaimed = true end
+		end
+	end
+	layer.Store = Store
+	layer.ConsumablesUnknown = function()
+		return not consumablesKnown
+	end
+
+	local rewardCrate = Client:GetNamespace('RewardCrate')
+	layer.CrateAltarController = {
+		-- activeCrates[altarId]: the crates on that altar, as the game's component lists them.
+		activeCrates = setmetatable({}, {__index = function(_, altarId)
+			local crates = {}
+			for _, crate in collectionService:GetTagged('RewardCrate') do
+				if crate:GetAttribute('altarId') == altarId then
+					table.insert(crates, {instance = crate, attributes = {
+						crateId = crate:GetAttribute('crateId'),
+						crateType = crate:GetAttribute('crateType'),
+						owner = crate:GetAttribute('owner'),
+						altarId = altarId
+					}})
+				end
+			end
+			return #crates > 0 and crates or nil
+		end}),
+		pickCrate = function(_, crateType, altarId)
+			rewardCrate:Get('SpawnRewardCrate'):SendToServer({crateType = crateType, altarId = altarId})
+		end,
+		requestOpenCrate = function(_, crateId, altarId)
+			rewardCrate:Get('OpenRewardCrate'):SendToServer({crateId = crateId, altarId = altarId})
+		end
+	}
+
+	layer.MilestonesController = {getMilestoneRewardsClaimed = function()
+		return state.Bedwars.milestoneRewardsClaimed or {}
+	end}
+
+	-- The game's own rule (user-input-controller): a gamepad, a touch screen without a mouse, or PC.
+	local UserInputController = {getUserInputType = function()
+		if inputService.GamepadEnabled then return 'GAMEPAD' end
+		if inputService.TouchEnabled and not inputService.MouseEnabled then return 'MOBILE' end
+		return 'PC'
+	end}
+	local realInputType = UserInputController.getUserInputType
+	layer.UserInputController = UserInputController
+	listen('RequestUserInputType', function()
+		if UserInputController.getUserInputType == realInputType then return end
+		task.defer(function()
+			pcall(function()
+				Client:Get('SendUserInputType'):SendToServer({userInputType = UserInputController:getUserInputType()})
+			end)
+		end)
+	end)
+
+	-- game-core's GameQueryUtil keeps its ignore list as this attribute, which the game's targeting reads.
+	layer.QueryUtil = {
+		setQueryIgnored = function(_, part, ignored)
+			if ignored == nil then ignored = true end
+			part:SetAttribute('gamecore_GameQueryIgnore', ignored and true or nil)
+		end,
+		isQueryIgnored = function(_, part)
+			return part:GetAttribute('gamecore_GameQueryIgnore') == true
+		end
+	}
+
+	layer.QueueMeta = exec.loadData('shared', 'QueueMeta')
+	layer.CrateConsumables = exec.loadData('lobby', 'CrateConsumables')
+	local crateNames = exec.loadData('lobby', 'CrateItemNames') or {}
+	layer.getCrateItemMeta = function(itemType)
+		local name = crateNames[itemType]
+		return name and {displayName = name} or nil
+	end
+	-- AchievementUtil.hasUnclaimedRewards, as the game has it: achieved, rewards listed, not yet claimed.
+	local ids = exec.loadData('lobby', 'AchievementIds')
+	local rewards = exec.loadData('lobby', 'AchievementRewards')
+	if ids and rewards then
+		local meta = {}
+		for id, count in rewards do
+			meta[id] = {rewards = count}
+		end
+		layer.Achievement = {Id = ids, Meta = meta, Util = {hasUnclaimedRewards = function(id, entry)
+			return type(entry) == 'table' and entry.achieved and (rewards[id] or 0) > 0 and not entry.rewardsClaimed or false
+		end}}
+	end
+	layer.MilestoneRewards = exec.loadData('lobby', 'MilestoneRewards')
+	return layer
+end
+
 run(function()
 	local function dumpRemote(tab)
 		local ind = table.find(tab, 'Client')
 		return ind and tab[ind + 1] or ''
 	end
 
-	local KnitInit, Knit
-	repeat
-		KnitInit, Knit = pcall(function() return debug.getupvalue(require(lplr.PlayerScripts.TS.knit).setup, 9) end)
-		if KnitInit then break end
-		task.wait()
-	until KnitInit
-	if not debug.getupvalue(Knit.Start, 1) then
-		repeat task.wait() until debug.getupvalue(Knit.Start, 1)
-	end
-	local Client = require(replicatedStorage.TS.remotes).default.Client
-
-	bedwars = setmetatable({
-		Client = Client,
-		Store = require(lplr.PlayerScripts.TS.ui.store).ClientStore
-	}, {
-		__index = function(self, ind)
-			rawset(self, ind, Knit.Controllers[ind])
-			return rawget(self, ind)
+	local KnitInit, Knit, knitError
+	if exec.Debug then
+		repeat
+			KnitInit, Knit = pcall(function() return debug.getupvalue(require(lplr.PlayerScripts.TS.knit).setup, 9) end)
+			if KnitInit then break end
+			task.wait()
+		until KnitInit
+		if not debug.getupvalue(Knit.Start, 1) then
+			repeat task.wait() until debug.getupvalue(Knit.Start, 1)
 		end
-	})
-	-- AutoQueue's mode list. Guarded on its own: a moved module costs that list, not the
-	-- controllers every other lobby module needs from this table.
-	pcall(function()
-		bedwars.QueueMeta = require(replicatedStorage.TS.game['queue-meta']).QueueMeta
-	end)
-	-- AutoGamble's reward names: the lookup the game's own crate reveal uses, guarded the same way.
-	pcall(function()
-		bedwars.getCrateItemMeta = require(replicatedStorage.TS['reward-crate']['crate-item']['crate-item-meta']).getCrateItemMeta
-	end)
+	elseif exec.Require and exec.NativeRequire then
+		--[[ No debug library, but Roblox's own require (exec.NativeRequire): KnitClient's own export,
+		the way 6872274481.lua takes it.
+		Its Controllers table is public and OnStart resolves once Knit has started. Bounded, unlike
+		the path above: a require that hands back a fresh copy instead of the game's module never
+		starts, and must not hold up the rest of this file. Each try runs in a thread of its own
+		(exec.isolatedRequire): on Solara KnitClient errors, which would leave this thread without its
+		executor capabilities. An error ends the wait, since a module that failed to load fails again. ]]
+		local deadline = os.clock() + 30
+		local started = false
+		local observing = false
+		while os.clock() < deadline and vape.Loaded ~= nil do
+			local found, knitClient = pcall(function()
+				return replicatedStorage.rbxts_include.node_modules['@easy-games'].knit.src.Knit.KnitClient
+			end)
+			local ok, client = false, nil
+			if found then
+				ok, client = exec.isolatedRequire(knitClient)
+				if not ok and client ~= nil then
+					knitError = tostring(client)
+					break
+				end
+			end
+			if ok and type(client) == 'table' and type(client.Controllers) == 'table' then
+				if not observing then
+					observing = true
+					pcall(function()
+						client.OnStart():andThen(function()
+							started = true
+						end)
+					end)
+				end
+				if started and next(client.Controllers) ~= nil then
+					Knit = client
+					-- started through require: the game's own KnitClient (exec.Live)
+					exec.Live = true
+					break
+				end
+			end
+			task.wait(0.1)
+		end
+	end
+	if not Knit then
+		--[[ Expected with no debug library and no Roblox require (Solara, Xeno): a warning, not an error
+		dump on every boot. The modules below that need Knit are not offered then (needsKnit). ]]
+		if knitError or (exec.Require and exec.NativeRequire) then
+			bufferCall('error', 'lobby.knit', knitError and 'KnitClient does not load through require here: '..knitError
+				or 'Knit did not start within 30s through require')
+		else
+			bufferCall('warn', 'lobby.knit', exec.Require
+				and 'Knit is out of reach: require here runs module code again instead of returning the game\'s modules, and there is no debug library'
+				or 'Knit is out of reach on this executor (no debug library and no require)')
+		end
+	end
+
+	if Knit then
+		local Client = require(replicatedStorage.TS.remotes).default.Client
+
+		bedwars = setmetatable({
+			Client = Client,
+			Store = require(lplr.PlayerScripts.TS.ui.store).ClientStore
+		}, {
+			__index = function(self, ind)
+				rawset(self, ind, Knit.Controllers[ind])
+				return rawget(self, ind)
+			end
+		})
+		-- AutoQueue's mode list. Guarded on its own: a moved module costs that list, not the
+		-- controllers every other lobby module needs from this table.
+		pcall(function()
+			bedwars.QueueMeta = require(replicatedStorage.TS.game['queue-meta']).QueueMeta
+		end)
+		-- AutoGamble's reward names: the lookup the game's own crate reveal uses, guarded the same way.
+		pcall(function()
+			bedwars.getCrateItemMeta = require(replicatedStorage.TS['reward-crate']['crate-item']['crate-item-meta']).getCrateItemMeta
+		end)
+	elseif type(exec.net) == 'table' then
+		local built, layer = pcall(knitlessLobby)
+		if built and type(layer) == 'table' then
+			bedwars = layer
+		else
+			bufferCall('error', 'lobby.knitless', tostring(layer))
+		end
+	end
 
 	local kills = sessioninfo:AddItem('Kills')
 	local beds = sessioninfo:AddItem('Beds')
@@ -172,14 +623,61 @@ for _, name in toRemove do
 	vape:Remove(name)
 end
 
+--[[ With neither Knit nor the knitless layer (an executor without exec.net) bedwars stays empty, so a
+lobby module that runs on its controllers, remotes client or store is not offered: its run block
+returns before creating it. Where either loaded this is always false. ]]
+local function needsKnit(name)
+	if bedwars.Client then return false end
+	exec.hide(name, "needs BedWars' Knit, which this executor cannot load")
+	return true
+end
+
 run(function()
 	local Sprint
 	local old
-	
+
+	--[[ Without Knit (Solara, Xeno) there is no SprintController to hook, so this does what its
+	startSprinting does to your character, from outside it, and nothing to the camera: the game's sprint
+	is client-only, WalkSpeed going from SprintConstants.WALK_SPEED (14) to RUN_SPEED (20), each times
+	the status multiplier. So a walking speed the game set (its Sprinting attribute is off) is raised to
+	the matching run speed; a speed set while the game sprints itself, or one this set, is left alone.
+	Checked each Heartbeat, not from a Changed handler, which must never write properties. ]]
+	local RUN_SCALE = 20 / 14
+	local raisedTo, raisedOn
+	local function sprintWithoutKnit(callback)
+		if inputService.TouchEnabled then
+			pcall(function() lplr.PlayerGui.MobileUI['2'].Visible = not callback end)
+		end
+		if callback then
+			Sprint:Clean(runService.Heartbeat:Connect(function()
+				local character = lplr.Character
+				local humanoid = character and character:FindFirstChildOfClass('Humanoid')
+				-- The game's own startSprinting does nothing while freecam is on.
+				if not humanoid or lplr:GetAttribute('Sprinting') == true or workspace:GetAttribute('FreecamEnabled') then
+					return
+				end
+				local speed = humanoid.WalkSpeed
+				if raisedOn == humanoid and math.abs(speed - raisedTo) < 0.01 then return end
+				raisedTo, raisedOn = speed * RUN_SCALE, humanoid
+				humanoid.WalkSpeed = raisedTo
+			end))
+		else
+			-- Back to the walking speed, unless the game has set another one since.
+			if raisedOn and raisedOn.Parent and math.abs(raisedOn.WalkSpeed - raisedTo) < 0.01 then
+				raisedOn.WalkSpeed = raisedTo / RUN_SCALE
+			end
+			raisedTo, raisedOn = nil, nil
+		end
+	end
+
 	Sprint = vape.Categories.Combat:CreateModule({
 		Name = 'Sprint',
 		Tab = 'Move',
 		Function = function(callback)
+			if not bedwars.SprintController then
+				sprintWithoutKnit(callback)
+				return
+			end
 			if callback then
 				if inputService.TouchEnabled then pcall(function() lplr.PlayerGui.MobileUI['2'].Visible = false end) end
 				old = bedwars.SprintController.stopSprinting
@@ -201,7 +699,25 @@ run(function()
 end)
 	
 run(function()
+	if needsKnit('AutoGamble') then return end
 	local AutoGamble
+
+	--[[ The crate types to try, in the store's order: every crate among your consumables. Without Knit
+	that list only arrives with the game's next consumable update, so until then each known crate type
+	is tried in turn; a type that spawned nothing waits a minute (the server only spawns crates you own). ]]
+	local tried = {}
+	local function crateCandidates()
+		local list = {}
+		for _, v in bedwars.Store:getState().Consumable.inventory do
+			if v.consumable:find('crate') then table.insert(list, v.consumable) end
+		end
+		if #list == 0 and bedwars.ConsumablesUnknown and bedwars.ConsumablesUnknown() then
+			for crateType in bedwars.CrateConsumables or {} do
+				if os.clock() - (tried[crateType] or -math.huge) >= 60 then table.insert(list, crateType) end
+			end
+		end
+		return list
+	end
 	
 	AutoGamble = vape.Categories.Minigames:CreateModule({
 		Name = 'AutoGamble',
@@ -220,25 +736,24 @@ run(function()
 	
 				repeat
 					if not bedwars.CrateAltarController.activeCrates[1] then
-						for _, v in bedwars.Store:getState().Consumable.inventory do
-							if v.consumable:find('crate') then
-								bedwars.CrateAltarController:pickCrate(v.consumable, 1)
-								task.wait(1.2)
-								-- activeCrates[altarId] is the list of crates on that altar; open ours, as the
-								-- game's own prompt does (crateId and altarId).
-								local crates = bedwars.CrateAltarController.activeCrates[1]
-								if crates then
-									for index = #crates, 1, -1 do
-										local crate = crates[index]
-										local owner = crate.attributes.owner
-										if owner == nil or owner == lplr.UserId then
-											bedwars.CrateAltarController:requestOpenCrate(crate.attributes.crateId, 1)
-											break
-										end
+						for _, crateType in crateCandidates() do
+							tried[crateType] = os.clock()
+							bedwars.CrateAltarController:pickCrate(crateType, 1)
+							task.wait(1.2)
+							-- activeCrates[altarId] is the list of crates on that altar; open ours, as the
+							-- game's own prompt does (crateId and altarId).
+							local crates = bedwars.CrateAltarController.activeCrates[1]
+							if crates then
+								for index = #crates, 1, -1 do
+									local crate = crates[index]
+									local owner = crate.attributes.owner
+									if owner == nil or owner == lplr.UserId then
+										bedwars.CrateAltarController:requestOpenCrate(crate.attributes.crateId, 1)
+										break
 									end
 								end
-								break
 							end
+							break
 						end
 					end
 					task.wait(1)
@@ -250,6 +765,7 @@ run(function()
 end)
 
 run(function()
+	if needsKnit('AutoQueue') then return end
 	local AutoQueue
 	local Mode
 	local Delay
@@ -400,6 +916,16 @@ run(function()
 end)
 
 run(function()
+	--[[ The hold runs in main.lua's queued teleport script on the match server, the only thing that
+	reads the file this module writes. With no queue_on_teleport (Xeno, and Solara builds without
+	it) that script never runs, so the module would do nothing at all, and it is not offered: the
+	same check the match copy makes. ]]
+	if not (exec.Teleport or type(queueonteleport) == 'function'
+		or (type(syn) == 'table' and type(syn.queue_on_teleport) == 'function')
+		or (type(fluxus) == 'table' and type(fluxus.queue_on_teleport) == 'function')) then
+		exec.hide('RegionLock', 'needs queue_on_teleport')
+		return
+	end
 	local RegionLock
 	local Timeout
 	local Requeue
@@ -547,6 +1073,7 @@ run(function()
 	end)
 end)
 run(function()
+	if needsKnit('DeviceSpoofer') then return end
 	local DeviceSpoofer
 	local Device
 	local spoofedType
@@ -608,6 +1135,7 @@ run(function()
 end)
 
 run(function()
+	if needsKnit('ClaimRewards') then return end
 	local ClaimRewards
 	local DailyReward
 	local ClaimAchievements
@@ -621,19 +1149,28 @@ run(function()
 
 	local function getAchievement()
 		if not achievement then
-			local folder = replicatedStorage.TS.achievement
-			achievement = {
-				Id = require(folder['achievement-id']).AchievementId,
-				Meta = require(folder['achievement-meta']).AchievementsMeta,
-				Util = require(folder['achievement-util']).AchievementUtil
-			}
+			if bedwars.Knitless then
+				-- From the data file: these modules load Knit, which is out of reach here.
+				achievement = bedwars.Achievement
+			else
+				local folder = replicatedStorage.TS.achievement
+				achievement = {
+					Id = require(folder['achievement-id']).AchievementId,
+					Meta = require(folder['achievement-meta']).AchievementsMeta,
+					Util = require(folder['achievement-util']).AchievementUtil
+				}
+			end
 		end
 		return achievement
 	end
 
 	local function getMilestones()
 		if not milestoneRewards then
-			milestoneRewards = require(replicatedStorage.TS.milestones.milestones).MilestoneRewards
+			if bedwars.Knitless then
+				milestoneRewards = bedwars.MilestoneRewards
+			else
+				milestoneRewards = require(replicatedStorage.TS.milestones.milestones).MilestoneRewards
+			end
 		end
 		return milestoneRewards
 	end
@@ -647,6 +1184,7 @@ run(function()
 
 	local function claimAchievements()
 		local data = getAchievement()
+		if not data then return end
 
 		if os.clock() >= nextProfileRefresh then
 			nextProfileRefresh = os.clock() + 30
@@ -681,7 +1219,7 @@ run(function()
 		local claimedList = bedwars.MilestonesController:getMilestoneRewardsClaimed()
 		if not (level and claimedList) then return end
 
-		for _, milestone in getMilestones() do
+		for _, milestone in getMilestones() or {} do
 			if level >= milestone.levelRequirement and not table.find(claimedList, milestone.id) and not milestoneAttempts[milestone.id] then
 				milestoneAttempts[milestone.id] = true
 				if bedwars.Client:Get('ClaimMilestoneReward'):CallServer(milestone.id) then

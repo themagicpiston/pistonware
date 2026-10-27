@@ -3914,20 +3914,51 @@ function vape:EnsureVapeButton()
 	if not (isMobile() and gui) then return end
 	if self.VapeButton and self.VapeButton.Parent then return end
 
-	-- The loader's >_ badge: its dark tile, its console face in its orange, and its grey border.
+	--[[ The piston face in the loader's colours: its 8 by 8 pixels, the stone in shades of the
+	loader's black, the piston head and the eyes in its orange, on the loader's dark tile with its
+	grey border. Drawn as cells, not an image: on a touch device, the only place this button
+	exists, this GUI draws uploaded ids and never files, and cells need neither. A CanvasGroup's
+	UICorner clips them to the tile's rounded corners; each cell reaches one pixel into the next so
+	no seam shows at a size that is not a multiple of 8. ]]
+	local PISTON_FACE = {
+		'474747 E2731D DE711D FF9025 ED781F D96F1C D56C1C 474747',
+		'363636 D06A1B D36B1B EF7A1F D86E1C D86E1C D76D1C 363636',
+		'191919 F07A1F 090909 232323 181818 F07A1F 090909 161616',
+		'171717 F07A1F 090909 353535 252525 F07A1F 090909 191919',
+		'171717 363636 313131 333333 373737 2C2C2C 292929 191919',
+		'1C1C1C 343434 090909 090909 090909 090909 2D2D2D 1E1E1E',
+		'1A1A1A 2B2B2B 2E2E2E 090909 F07A1F F07A1F 313131 161616',
+		'191919 1B1B1B 171717 1E1E1E 191919 1D1D1D 161616 131313'
+	}
 	local button = Instance.new('TextButton')
 	button.AutoButtonColor = false
 	button.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
 	button.BackgroundTransparency = 0
 	button.BorderSizePixel = 0
-	button.FontFace = Font.fromEnum(Enum.Font.Code)
 	button.Position = vapeButtonFallback
 	button.Size = UDim2.fromOffset(vapeButtonSize, vapeButtonSize)
-	button.Text = '>_'
-	button.TextColor3 = Color3.fromRGB(240, 122, 31)
-	button.TextSize = 15
+	button.Text = ''
 	button.Parent = gui
 	addCorner(button, UDim.new(0, 8))
+	local face = Instance.new('CanvasGroup')
+	face.Name = 'Face'
+	face.BackgroundTransparency = 1
+	face.BorderSizePixel = 0
+	face.Size = UDim2.fromScale(1, 1)
+	face.Parent = button
+	addCorner(face, UDim.new(0, 8))
+	for row, line in PISTON_FACE do
+		local column = 0
+		for hex in line:gmatch('%x+') do
+			local cell = Instance.new('Frame')
+			cell.BackgroundColor3 = Color3.fromHex(hex)
+			cell.BorderSizePixel = 0
+			cell.Position = UDim2.fromScale(column / 8, (row - 1) / 8)
+			cell.Size = UDim2.new(1 / 8, 1, 1 / 8, 1)
+			cell.Parent = face
+			column += 1
+		end
+	end
 	local stroke = Instance.new('UIStroke')
 	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	stroke.Color = Color3.fromRGB(52, 52, 52)
@@ -3936,6 +3967,7 @@ function vape:EnsureVapeButton()
 	anchorVapeButton(button)
 
 	self.VapeButton = button
+	self.VapeButtonFace = face
 	self.VapeButtonStroke = stroke
 	self.VapeButtonTransparency = button.BackgroundTransparency
 	--[[ Honour the saved setting on a button built after the options loaded; when the
@@ -3943,7 +3975,7 @@ function vape:EnsureVapeButton()
 	than Visible: see HideVapeButton. ]]
 	if self.HideVapeButton and self.HideVapeButton.Enabled then
 		button.BackgroundTransparency = 1
-		button.TextTransparency = 1
+		face.GroupTransparency = 1
 		stroke.Transparency = 1
 	end
 	-- The Mod Overlay keeps clear of the button, so it is placed again now there is one.
@@ -4029,7 +4061,17 @@ function build.root()
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.IgnoreGuiInset = true
 
-	if vape.ThreadFix then
+	--[[ Solara runs signal callbacks without the capability to read anything inside gethui's container
+	or CoreGui, so every menu callback that reads the menu there threw "lacking capability Plugin" on
+	each open and close. Probing for it did not work: a property signal fired during load and a
+	Heartbeat both read a Folder inside fine while the menu's own callbacks failed. So on Solara the
+	menu goes where an executor without setthreadidentity puts it, PlayerGui, which callbacks can always
+	read. Every other executor is unchanged. ]]
+	local callbacksBlocked = false
+	pcall(function()
+		callbacksBlocked = tostring(identifyexecutor and identifyexecutor() or ''):lower():find('solara', 1, true) ~= nil
+	end)
+	if vape.ThreadFix and not callbacksBlocked then
 		--[[ Recent property; older clients throw on the assignment rather than ignoring it. ]]
 		pcall(function() gui.OnTopOfCoreBlur = true end)
 		--[[
@@ -6483,7 +6525,9 @@ function build.settings()
 			the button keeps opening the menu from exactly where it always sat. ]]
 			if vape.VapeButton then
 				vape.VapeButton.BackgroundTransparency = callback and 1 or (vape.VapeButtonTransparency or 0)
-				vape.VapeButton.TextTransparency = callback and 1 or 0
+				if vape.VapeButtonFace then
+					vape.VapeButtonFace.GroupTransparency = callback and 1 or 0
+				end
 				if vape.VapeButtonStroke then
 					vape.VapeButtonStroke.Transparency = callback and 1 or 0
 				end
@@ -8326,6 +8370,20 @@ function build.targetInfo()
 		MaxText.Text = '/ '..math.floor(shownMax + 0.5)
 	end
 
+	--[[ The number counts to a new health rather than jumping: 0.3 s on a hit, 0.4 s on a heal,
+	easing out (cubic), so most of it lands with the bar and the last digits settle just after. A
+	count already under way goes on from the number it shows. Stepped from Update; once it has
+	arrived nothing is written. ]]
+	local COUNT_TIME = {drop = 0.3, heal = 0.4}
+	local count = {From = 20, To = 20, Time = 0, Length = 0}
+	local function stepHealthCount(dt)
+		if count.Time >= count.Length then return end
+		count.Time = math.min(count.Time + dt, count.Length)
+		local x = count.Time / count.Length
+		shownHealth = count.From + (count.To - count.From) * (1 - (1 - x) ^ 3)
+		paintHealthText()
+	end
+
 	--[[ The bar slides a little on a hit (0.12 s, easing out so it lands at once and settles) and a
 	little slower on a heal; a new target snaps, so it never drains from the last one's health. ]]
 	local BAR_SLIDE = {
@@ -8333,7 +8391,14 @@ function build.targetInfo()
 		heal = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	}
 	local function showHealth(health, maxHealth, mode)
-		shownHealth, shownMax = health, maxHealth
+		local length = COUNT_TIME[mode]
+		if length then
+			count.From, count.To, count.Time, count.Length = shownHealth, health, 0, length
+		else
+			count.From, count.To, count.Time, count.Length = health, health, 0, 0
+			shownHealth = health
+		end
+		shownMax = maxHealth
 		local percent = maxHealth > 0 and math.clamp(health / maxHealth, 0, 1) or 0
 		local colour = healthColor(percent)
 		paintHealthText()
@@ -8588,6 +8653,7 @@ function build.targetInfo()
 		if moved then
 			paint()
 		end
+		stepHealthCount(dt)
 		local fillShown = Fill.Size.X.Scale > 0.01
 		if Fill.Visible ~= fillShown then
 			Fill.Visible = fillShown
@@ -8944,6 +9010,11 @@ function build.loops()
 		end
 	
 		if not inputService:GetFocusedTextBox() and input.KeyCode ~= Enum.KeyCode.Unknown then
+			-- A number key pistonware pressed itself, to move the game's hotbar, is not yours: no bind
+			-- fires on it and it is not held (shared.PistonwareSyntheticKeys, marked until just after its
+			-- release).
+			local synthetic = shared.PistonwareSyntheticKeys
+			if type(synthetic) == 'table' and (tonumber(synthetic[input.KeyCode]) or 0) > os.clock() then return end
 			table.insert(vape.HeldKeybinds, input.KeyCode.Name)
 			if vape.Binding then return end
 	
@@ -8961,6 +9032,10 @@ function build.loops()
 		end
 	
 		if not inputService:GetFocusedTextBox() and input.KeyCode ~= Enum.KeyCode.Unknown then
+			-- Its release likewise: it ends no held bind and is not bound to a badge waiting for a key.
+			-- It was never added to HeldKeybinds, so there is nothing to take out.
+			local synthetic = shared.PistonwareSyntheticKeys
+			if type(synthetic) == 'table' and (tonumber(synthetic[input.KeyCode]) or 0) > os.clock() then return end
 			if vape.Binding then
 				if not vape.MultiKeybind.Enabled then
 					vape.HeldKeybinds = {input.KeyCode.Name}

@@ -11,6 +11,228 @@ local function bufferError(event, message, details)
 	if shared.PistonwareDeveloper == true then warn('[pistonware] '..tostring(message)) end
 end
 
+-- Solara and Xeno support. Approach credit: stxvv (gitlab.com/stxvv/bedwarsdeps).
+-- Written for pistonware from BedWars' own modules; no code from that project is included.
+--[[ The shared executor probe: what this executor can actually do, worked out once per injection
+and published as shared.PistonwareExec for the game files (each builds the same thing itself when
+run without this file). Every check is pcall-guarded, cheap, and leaves nothing installed. ]]
+local function probeExecutor()
+	local exec = {}
+	local function present(value)
+		return type(value) == 'function'
+	end
+	local function passes(check)
+		local ok, result = pcall(check)
+		return ok and result == true
+	end
+	--[[ Solara's require runs a module's code again instead of handing back the game's copy, and when
+	that code errors (KnitClient does) the thread that called require is left at identity 2 without its
+	executor capabilities: file calls, gethui and CoreGui all refuse it from then on, and pcall does not
+	prevent it. A require made in a thread of its own costs only that thread, so the probe requires
+	through here, and so can any later require that may fail (exec.isolatedRequire). Returns what pcall
+	would; a require still running when the timeout ends counts as failed, with no error value. ]]
+	local function isolatedRequire(module, timeout)
+		local finished, ok, result = false, false, nil
+		task.spawn(function()
+			ok, result = pcall(require, module)
+			finished = true
+		end)
+		local deadline = os.clock() + (timeout or 10)
+		while not finished and os.clock() < deadline do
+			task.wait()
+		end
+		if not finished then return false, nil end
+		return ok, result
+	end
+	exec.isolatedRequire = isolatedRequire
+	--[[ Roblox's own require is a C function. Solara's is written in Lua (its init script): it runs a
+	module's code again instead of handing back the game's copy, and Knit's code fails there with its
+	error printed to the console. Where there is no debug library to reach Knit by either, nothing
+	tries KnitClient through such a require: not the Live check below, not the BedWars files. ]]
+	exec.NativeRequire = passes(function()
+		return debug.info(require, 's') == '[C]'
+	end)
+
+	local named, name = pcall(function()
+		return identifyexecutor and ({identifyexecutor()})[1] or nil
+	end)
+	exec.Name = (named and type(name) == 'string') and name or ''
+
+	--[[ Roblox's own require exists everywhere: what counts is whether it hands back a game module.
+	It is tried only on modules whose bodies just build a table (PlayerModule's helpers, roblox-ts'
+	RuntimeLib), never on PlayerModule itself: a require that re-ran modules instead of handing back
+	the game's cached ones would build a second camera and control stack from it. Asked twice, the
+	same module has to come back. A place with none of these leaves require untried, which does not
+	count against Full below. ]]
+	local requireTarget
+	pcall(function()
+		local scripts = game:GetService('Players').LocalPlayer:FindFirstChild('PlayerScripts')
+		local playerModule = scripts and scripts:FindFirstChild('PlayerModule')
+		local utils = playerModule and playerModule:FindFirstChild('CommonUtils')
+		local module = utils and (utils:FindFirstChild('FlagUtil') or utils:FindFirstChild('ConnectionUtil'))
+		if not module then
+			local include = game:GetService('ReplicatedStorage'):FindFirstChild('rbxts_include')
+			module = include and include:FindFirstChild('RuntimeLib')
+		end
+		if module and module.ClassName == 'ModuleScript' then
+			requireTarget = module
+		end
+	end)
+	exec.Require = requireTarget ~= nil and passes(function()
+		local loaded, exported = isolatedRequire(requireTarget)
+		if not loaded or type(exported) ~= 'table' then return false end
+		local again, second = isolatedRequire(requireTarget)
+		return again and second == exported
+	end)
+	--[[ Live: require hands back the modules the game itself runs, not fresh copies of them. Only
+	BedWars' Knit can show that from here: the game registers every controller in KnitClient's
+	Controllers table, which a re-run copy holds empty. Everywhere else it stays false. An injection
+	made before the game registered them sees an empty table too, so the BedWars files also set it
+	once Knit has started through require. ]]
+	exec.Live = exec.Require and passes(function()
+		local node = game:GetService('ReplicatedStorage')
+		for _, step in {'rbxts_include', 'node_modules', '@easy-games', 'knit', 'src', 'Knit'} do
+			node = node:FindFirstChild(step)
+			if not node then return false end
+		end
+		local client = node:FindFirstChild('KnitClient')
+		-- KnitClient waits for its Services folder, so without one this would hang
+		if not (client and node:FindFirstChild('Services')) then return false end
+		if not exec.NativeRequire and type(debug.getupvalue) ~= 'function' then return false end
+		local loaded, knit = isolatedRequire(client)
+		return loaded and type(knit) == 'table' and type(knit.Controllers) == 'table' and next(knit.Controllers) ~= nil
+	end)
+	-- Tried in a throwaway thread, so the check cannot leave this one at another identity.
+	exec.Identity = present(setthreadidentity) and passes(function()
+		local thread = coroutine.create(function()
+			local level = 8
+			if present(getthreadidentity) then
+				local got, current = pcall(getthreadidentity)
+				if got and type(current) == 'number' then level = current end
+			end
+			setthreadidentity(level)
+			return true
+		end)
+		local resumed, result = coroutine.resume(thread)
+		return resumed and result == true
+	end)
+	exec.Genv = passes(function()
+		return type(getgenv()) == 'table'
+	end)
+	exec.Rawmeta = present(setreadonly) and passes(function()
+		return type(getrawmetatable(game)) == 'table'
+	end)
+	exec.HookFunction = present(hookfunction)
+	exec.HookMetamethod = present(hookmetamethod)
+
+	--[[ getnamecallmethod is trusted only once something proves it. hookmetamethod is how full
+	executors hook namecalls, and its presence is taken as proof. Without it, a pass-through wrapper
+	goes on the raw __namecall for exactly one call of our own, game:GetService, which has to report
+	'GetService'; the original goes straight back whatever happens. Delta is not tested that way:
+	nothing may be written to its metatable at load (see the Delta notes in 6872274481.lua). ]]
+	exec.Namecall = false
+	if present(getnamecallmethod) then
+		if exec.HookMetamethod then
+			exec.Namecall = true
+		elseif exec.Name:lower():find('delta', 1, true) then
+			exec.Namecall = exec.Rawmeta
+		elseif exec.Rawmeta then
+			exec.Namecall = passes(function()
+				local mt = getrawmetatable(game)
+				local original = rawget(mt, '__namecall')
+				if type(original) ~= 'function' then return false end
+				local readonly = true
+				if present(isreadonly) then
+					local got, value = pcall(isreadonly, mt)
+					if got then readonly = value == true end
+				end
+				local seen
+				local installed = pcall(function()
+					setreadonly(mt, false)
+					rawset(mt, '__namecall', function(self, ...)
+						if seen == nil then
+							local got, method = pcall(getnamecallmethod)
+							seen = got and method or false
+						end
+						return original(self, ...)
+					end)
+				end)
+				if installed then
+					pcall(function()
+						return game:GetService('Players')
+					end)
+				end
+				pcall(function()
+					setreadonly(mt, false)
+					rawset(mt, '__namecall', original)
+				end)
+				pcall(setreadonly, mt, readonly)
+				return installed and seen == 'GetService' and rawget(mt, '__namecall') == original
+			end)
+		end
+	end
+
+	exec.Connections = present(getconnections) and passes(function()
+		local event = Instance.new('BindableEvent')
+		local connection = event.Event:Connect(function() end)
+		local got, list = pcall(getconnections, event.Event)
+		connection:Disconnect()
+		event:Destroy()
+		return got and type(list) == 'table'
+	end)
+	exec.FireSignal = present(firesignal)
+	exec.Debug = passes(function()
+		local marker = {}
+		local function probeUpvalueHolder()
+			return marker
+		end
+		return debug.getupvalue(probeUpvalueHolder, 1) == marker
+	end)
+	exec.Touch = present(firetouchinterest)
+	exec.Prompt = present(fireproximityprompt)
+	exec.Click = present(fireclickdetector)
+	exec.NetworkOwner = present(isnetworkowner)
+	exec.FpsCap = present(setfpscap)
+	exec.FFlag = present(setfflag)
+	exec.Mouse = present(mouse1click) and present(mouse1press)
+	exec.MouseMove = present(mousemoverel)
+	exec.Hui = present(gethui)
+	exec.Teleport = present(queue_on_teleport)
+	exec.HttpGet = passes(function()
+		return type(game.HttpGet) == 'function'
+	end)
+	-- Everything the scripts were first written against: on such an executor nothing changes.
+	-- A place with no module to try require on (requireTarget nil) does not decide it.
+	exec.Full = (exec.Require or requireTarget == nil) and exec.Identity and exec.Rawmeta
+		and exec.Namecall and exec.HookFunction and exec.Connections and exec.Debug
+
+	-- Takes a module out of the list on this executor and keeps the reason for a later notice.
+	-- Safe before the module exists (only the reason is kept) and after it was created.
+	function exec.hide(moduleName, reason)
+		if type(moduleName) ~= 'string' then return end
+		local hidden = shared.PistonwareHidden
+		if type(hidden) ~= 'table' then
+			hidden = {}
+			shared.PistonwareHidden = hidden
+		end
+		hidden[moduleName] = reason or 'not supported on this executor'
+		local vape = shared.vape
+		if type(vape) == 'table' and type(vape.Modules) == 'table' and vape.Modules[moduleName] ~= nil then
+			pcall(vape.Remove, vape, moduleName)
+		end
+	end
+	return exec
+end
+shared.PistonwareExec = probeExecutor()
+shared.PistonwareHidden = {}
+local exec = shared.PistonwareExec
+--[[ The executors these files were first written for (Potassium, Wave, Delta and the like) hook
+functions and list connections. Where a module has a second way of working for Solara and Xeno,
+this keeps those executors on the original one. It stands in for exec.Full there because none of
+those modules needs Full's other parts, which depend on the place (Require) or differ between such
+executors (Identity). ]]
+local hookExecutor = exec.HookFunction and exec.Connections
+
 local loadstring = function(...)
 	local res, err = loadstring(...)
 	if err and vape then
@@ -30,7 +252,37 @@ local function pistonwareHttpGet(url, nocache, attempt)
 	if type(adapter) == 'function' then
 		return adapter(url, nocache, attempt)
 	end
-	return game:HttpGet(url, nocache)
+	--[[ game:HttpGet as before wherever the executor has it: what it returns or raises comes back
+	unchanged. request() stands in only where HttpGet is missing or refused to this thread (Xeno
+	has none; the libraries this file loads at file scope come through here), and there only a
+	2xx answer with a body counts, so an error page is never cached as the file. ]]
+	local ok, body = pcall(function()
+		return game:HttpGet(url, nocache)
+	end)
+	if ok then return body end
+	local reason = tostring(body):lower()
+	local refused = false
+	for _, hint in {'not a valid member', 'lacking capability', 'lacking permission', 'cannot call'} do
+		if reason:find(hint, 1, true) then
+			refused = true
+			break
+		end
+	end
+	if not refused then
+		local indexed, method = pcall(function()
+			return game.HttpGet
+		end)
+		refused = not indexed or type(method) ~= 'function'
+	end
+	local send = type(request) == 'function' and request or type(http_request) == 'function' and http_request or nil
+	if not (refused and send) then error(body, 0) end
+	local response = send({Url = url, Method = 'GET'})
+	local status = type(response) == 'table' and tonumber(response.StatusCode) or nil
+	if type(response) ~= 'table' or response.Success == false or (status and (status < 200 or status > 299))
+		or type(response.Body) ~= 'string' or response.Body == '' then
+		error('GET '..tostring(url)..' failed'..(status and ' (HTTP '..status..')' or ''), 0)
+	end
+	return response.Body
 end
 
 local function errorTrace(err)
@@ -118,8 +370,365 @@ local guiService = cloneref(game:GetService('GuiService'))
 local groupService = cloneref(game:GetService('GroupService'))
 local textChatService = cloneref(game:GetService('TextChatService'))
 local contextService = cloneref(game:GetService('ContextActionService'))
-local coreGui = cloneref(game:GetService('CoreGui'))
+-- Guarded: at a low identity CoreGui may not come back, and this is file scope.
+local coreGui = (function()
+	local ok, service = pcall(function()
+		return cloneref(game:GetService('CoreGui'))
+	end)
+	return ok and service or nil
+end)()
 local proxService = cloneref(game:GetService('ProximityPromptService'))
+
+--[[ The pieces of BedWars' own client code the game files need where Knit is out of reach (Solara,
+Xeno), written for pistonware: approach credit stxvv (gitlab.com/stxvv/bedwarsdeps), no code from it.
+They sit on exec so both BedWars files share one copy, and nothing here runs until a game file asks:
+  exec.Promise   the small part of roblox-ts' Promise the scripts chain on.
+  exec.net       remotes found by name in an @rbxts/net folder, with the calls the game's own client
+                 makes (SendToServer, CallServer, CallServerAsync, Connect, GetNamespace, WaitFor).
+  exec.loadData  BedWars data dumped from the game on a full executor (games/bedwars-data.json). ]]
+do
+	local collectionService = cloneref(game:GetService('CollectionService'))
+	local httpService = cloneref(game:GetService('HttpService'))
+	local replicatedStorage = cloneref(game:GetService('ReplicatedStorage'))
+
+	--[[ A promise settles once, Resolved or Rejected, and every chain off it runs on a thread of its
+	own. A handler that returns a promise is waited on, as roblox-ts' Promise does. ]]
+	local Promise = {}
+	Promise.__index = Promise
+
+	local function isPromise(value)
+		return type(value) == 'table' and getmetatable(value) == Promise
+	end
+
+	function Promise.new(executor)
+		local self = setmetatable({status = 'Started', values = {n = 0}, waiting = {}}, Promise)
+		local function settle(status, ...)
+			if self.status ~= 'Started' then return end
+			self.status, self.values = status, table.pack(...)
+			local waiting = self.waiting
+			self.waiting = {}
+			for _, thread in waiting do
+				task.spawn(thread)
+			end
+		end
+		task.spawn(function()
+			local ok, err = pcall(executor, function(...)
+				settle('Resolved', ...)
+			end, function(...)
+				settle('Rejected', ...)
+			end)
+			if not ok then settle('Rejected', err) end
+		end)
+		return self
+	end
+
+	function Promise.resolve(...)
+		local values = table.pack(...)
+		return Promise.new(function(resolve)
+			resolve(table.unpack(values, 1, values.n))
+		end)
+	end
+
+	function Promise.reject(...)
+		local values = table.pack(...)
+		return Promise.new(function(_, reject)
+			reject(table.unpack(values, 1, values.n))
+		end)
+	end
+
+	function Promise.delay(seconds)
+		return Promise.new(function(resolve)
+			resolve(task.wait(seconds))
+		end)
+	end
+
+	-- Waits for the promise to settle and returns true or false, then its values.
+	function Promise:await()
+		if self.status == 'Started' then
+			table.insert(self.waiting, coroutine.running())
+			coroutine.yield()
+		end
+		return self.status == 'Resolved', table.unpack(self.values, 1, self.values.n)
+	end
+
+	function Promise:expect()
+		local results = table.pack(self:await())
+		if not results[1] then error(results[2], 2) end
+		return table.unpack(results, 2, results.n)
+	end
+
+	function Promise:andThen(onResolved, onRejected)
+		return Promise.new(function(resolve, reject)
+			local results = table.pack(self:await())
+			-- Not `a and b or c`: a resolved promise with no onResolved must not fall to onRejected.
+			local handler = if results[1] then onResolved else onRejected
+			if not handler then
+				(results[1] and resolve or reject)(table.unpack(results, 2, results.n))
+				return
+			end
+			local returned = table.pack(handler(table.unpack(results, 2, results.n)))
+			if returned.n == 1 and isPromise(returned[1]) then
+				local chained = table.pack(returned[1]:await())
+				;(chained[1] and resolve or reject)(table.unpack(chained, 2, chained.n))
+			else
+				resolve(table.unpack(returned, 1, returned.n))
+			end
+		end)
+	end
+
+	function Promise:catch(onRejected)
+		return self:andThen(nil, onRejected)
+	end
+
+	function Promise:finally(handler)
+		return Promise.new(function(resolve, reject)
+			local results = table.pack(self:await())
+			handler(results[1] and 'Resolved' or 'Rejected')
+			;(results[1] and resolve or reject)(table.unpack(results, 2, results.n))
+		end)
+	end
+
+	function Promise:getStatus()
+		return self.status
+	end
+
+	-- Nothing to stop: the request is already on its way to the server.
+	function Promise:cancel() end
+
+	exec.Promise = Promise
+
+	--[[ @rbxts/net keeps every remote flat in one _NetManaged folder; a namespace is only part of the
+	name, "RewardCrate/CrateOpened". A RemoteFunction is a CallServer remote. A RemoteEvent tagged
+	NetManagedAsyncFunction is CallServerAsync: the request goes up with a fresh GUID, and the reply
+	comes back on the same remote under that GUID (rbx-net's ClientAsyncFunction). Any other
+	RemoteEvent is a plain event. ]]
+	local NAMESPACE_SEPARATOR = '/'
+	local ASYNC_TIMEOUT = 60
+
+	local function remoteObject(remote, name)
+		local isFunction = remote:IsA('RemoteFunction')
+		local isAsync = not isFunction and collectionService:HasTag(remote, 'NetManagedAsyncFunction')
+		local object = {instance = remote, name = name}
+
+		function object:SendToServer(...)
+			if isFunction then error(name..' is a function remote; use CallServer', 2) end
+			remote:FireServer(...)
+		end
+
+		function object:CallServer(...)
+			if not isFunction then error(name..' is not a function remote', 2) end
+			return remote:InvokeServer(...)
+		end
+
+		function object:CallServerAsync(...)
+			local args = table.pack(...)
+			if isFunction then
+				return Promise.new(function(resolve)
+					resolve(remote:InvokeServer(table.unpack(args, 1, args.n)))
+				end)
+			end
+			if not isAsync then
+				return Promise.reject(name..' is not an async function remote')
+			end
+			return Promise.new(function(resolve, reject)
+				local id = httpService:GenerateGUID(false)
+				local reply
+				local connection = remote.OnClientEvent:Connect(function(replyId, result)
+					if replyId == id and result ~= nil and reply == nil then
+						reply = {result}
+					end
+				end)
+				local packed = {}
+				for index = 1, args.n do packed[index] = args[index] end
+				remote:FireServer(id, packed)
+				local deadline = os.clock() + ASYNC_TIMEOUT
+				while reply == nil and os.clock() < deadline do
+					task.wait()
+				end
+				connection:Disconnect()
+				if reply then
+					resolve(reply[1])
+				else
+					reject('Request to server timed out after '..ASYNC_TIMEOUT..' seconds')
+				end
+			end)
+		end
+
+		function object:Connect(callback)
+			if isFunction then error(name..' is a function remote; it has no event', 2) end
+			return remote.OnClientEvent:Connect(callback)
+		end
+
+		return object
+	end
+
+	exec.net = {}
+
+	--[[ A client over one _NetManaged folder, shaped like the game's TS.remotes client. Get errors on
+	a name the folder does not have, as the game's own GetOrThrow does; WaitFor waits for it. Each
+	remote is wrapped once and wrapped again if it is replaced. ]]
+	function exec.net.client(folder)
+		local cache = {}
+		local function find(name, timeout)
+			local cached = cache[name]
+			if cached and cached.instance.Parent then return cached end
+			local remote = folder:FindFirstChild(name)
+			if not remote and timeout then remote = folder:WaitForChild(name, timeout) end
+			if not (remote and (remote:IsA('RemoteEvent') or remote:IsA('RemoteFunction'))) then
+				error(name..' is not defined', 3)
+			end
+			cached = remoteObject(remote, name)
+			cache[name] = cached
+			return cached
+		end
+		local function view(prefix)
+			local client = {}
+			function client:Get(name)
+				return find(prefix..name)
+			end
+			function client:GetNamespace(namespace)
+				return view(prefix..namespace..NAMESPACE_SEPARATOR)
+			end
+			function client:WaitFor(name)
+				return Promise.new(function(resolve)
+					resolve(find(prefix..name, 60))
+				end)
+			end
+			return client
+		end
+		return view('')
+	end
+
+	-- Flamework's networking folders: ReplicatedStorage['events-'..name], RemoteEvents by event name.
+	function exec.net.events(name)
+		return replicatedStorage:FindFirstChild('events-'..name)
+	end
+
+	--[[ games/bedwars-data.json: the BedWars tables the layer needs, dumped from the game on a full
+	executor, in sections (shared, lobby, match). It is read once per session. The cached copy is used
+	when there is one; a missing copy is fetched now, and one dumped before this place's current
+	version is fetched again in the background, the old copy serving meanwhile. Developer mode reads
+	the local file only. Each value is decoded the first time it is asked for. ]]
+	local DATA_FILE = 'pistonware/games/bedwars-data.json'
+	local dataRaw, dataTried, dataDecoded = nil, false, {}
+
+	local function fetchData()
+		local rawUrl = shared.PistonwareRawUrl
+		if type(rawUrl) ~= 'function' then return nil end
+		local ok, body = pcall(pistonwareHttpGet, rawUrl('games/bedwars-data.json'), true)
+		if not ok or type(body) ~= 'string' or body:sub(1, 1) ~= '{' then return nil end
+		local decoded, value = pcall(httpService.JSONDecode, httpService, body)
+		if not decoded or type(value) ~= 'table' or value.schema ~= 1 then return nil end
+		pcall(writefile, DATA_FILE, body)
+		return value
+	end
+
+	local function readData()
+		if dataTried then return dataRaw end
+		dataTried = true
+		pcall(function()
+			if isfile(DATA_FILE) then
+				local value = httpService:JSONDecode(readfile(DATA_FILE))
+				if type(value) == 'table' and value.schema == 1 then dataRaw = value end
+			end
+		end)
+		if shared.PistonwareDeveloper == true then return dataRaw end
+		if not dataRaw then
+			dataRaw = fetchData()
+		else
+			local place = type(dataRaw.places) == 'table' and dataRaw.places[tostring(game.PlaceId)]
+			if type(place) == 'table' and tonumber(place.placeVersion) and tonumber(place.placeVersion) < game.PlaceVersion then
+				task.spawn(function()
+					local fresh = fetchData()
+					if fresh then
+						dataRaw = fresh
+						table.clear(dataDecoded)
+					end
+				end)
+			end
+		end
+		return dataRaw
+	end
+
+	local function decodeKey(key)
+		if type(key) ~= 'string' or key:sub(1, 1) ~= '#' then return key end
+		local marker = key:sub(2, 2)
+		if marker == 'n' then return tonumber(key:sub(3)) or key end
+		if marker == 'e' then
+			local enumName, itemName = key:match('^#eEnum%.([^%.]+)%.(.+)$')
+			local ok, item = pcall(function() return Enum[enumName][itemName] end)
+			return ok and item or key
+		end
+		return key:sub(2)
+	end
+
+	local function decodeValue(value)
+		if type(value) ~= 'table' then return value end
+		local tag = value['$t']
+		if type(tag) == 'string' then
+			local v = value.v
+			if tag == 'map' then return {} end
+			if tag == 'cycle' or tag == 'nil' then return nil end
+			if tag == 'nan' then return 0 / 0 end
+			if tag == 'inf' then return (v or 1) * math.huge end
+			local ok, result = pcall(function()
+				if tag == 'Color3' then return Color3.new(v[1], v[2], v[3]) end
+				if tag == 'Vector3' then return Vector3.new(v[1], v[2], v[3]) end
+				if tag == 'Vector2' then return Vector2.new(v[1], v[2]) end
+				if tag == 'UDim2' then return UDim2.new(v[1], v[2], v[3], v[4]) end
+				if tag == 'NumberRange' then return NumberRange.new(v[1], v[2]) end
+				if tag == 'CFrame' then return CFrame.new(table.unpack(v)) end
+				if tag == 'Enum' then
+					local enumName, itemName = tostring(v):match('^Enum%.([^%.]+)%.(.+)$')
+					return Enum[enumName][itemName]
+				end
+				if tag == 'ColorSequence' then
+					local points = {}
+					for _, p in v do
+						table.insert(points, ColorSequenceKeypoint.new(p[1], Color3.new(p[2], p[3], p[4])))
+					end
+					return ColorSequence.new(points)
+				end
+				if tag == 'NumberSequence' then
+					local points = {}
+					for _, p in v do
+						table.insert(points, NumberSequenceKeypoint.new(p[1], p[2], p[3]))
+					end
+					return NumberSequence.new(points)
+				end
+				-- An instance by its full name, found again from game; gone or renamed reads as nil.
+				if tag == 'Instance' then
+					local node = game
+					for part in tostring(v):gmatch('[^%.]+') do
+						node = node and node:FindFirstChild(part)
+					end
+					return node
+				end
+				return nil
+			end)
+			return ok and result or nil
+		end
+		local out = {}
+		for key, item in value do
+			local decodedKey = decodeKey(key)
+			if decodedKey ~= nil then
+				out[decodedKey] = decodeValue(item)
+			end
+		end
+		return out
+	end
+
+	-- exec.loadData('lobby', 'QueueMeta') -> the decoded table, or nil when the file or the entry is missing.
+	function exec.loadData(section, name)
+		local cacheKey = tostring(section)..'.'..tostring(name)
+		if dataDecoded[cacheKey] ~= nil then return dataDecoded[cacheKey] or nil end
+		local raw = readData()
+		local entry = type(raw) == 'table' and type(raw[section]) == 'table' and raw[section][name]
+		local value = entry ~= nil and entry ~= false and decodeValue(entry) or nil
+		dataDecoded[cacheKey] = value == nil and false or value
+		return value
+	end
+end
 
 --[[ identifyexecutor throws on several mobile executors. Because this runs at file scope, an
 unguarded call would terminate the whole game script before any module registers. main.lua
@@ -307,13 +916,42 @@ local function canClick()
 			return false
 		end
 	end
-	for _, v in coreGui:GetGuiObjectsAtPosition(mousepos.X, mousepos.Y) do
-		local obj = v:FindFirstAncestorOfClass('ScreenGui')
-		if v.Active and v.Visible and obj and obj.Enabled then
+	--[[ CoreGui can be missing, or refuse the read from a module thread without the raised
+	identity (Solara and Xeno); then only the PlayerGui check above applies. The executors that
+	hook read it as before. ]]
+	if hookExecutor then
+		for _, v in coreGui:GetGuiObjectsAtPosition(mousepos.X, mousepos.Y) do
+			local obj = v:FindFirstAncestorOfClass('ScreenGui')
+			if v.Active and v.Visible and obj and obj.Enabled then
+				return false
+			end
+		end
+	elseif coreGui then
+		local ok, covered = pcall(function()
+			for _, v in coreGui:GetGuiObjectsAtPosition(mousepos.X, mousepos.Y) do
+				local obj = v:FindFirstAncestorOfClass('ScreenGui')
+				if v.Active and v.Visible and obj and obj.Enabled then
+					return true
+				end
+			end
+			return false
+		end)
+		if ok and covered then
 			return false
 		end
 	end
 	return (not clickGuiOpen()) and (not inputService:GetFocusedTextBox())
+end
+
+--[[ Whether Roblox has the window focus, for the modules that send real mouse clicks. The check
+is isrbxactive or iswindowactive, whichever the executor has; with neither the window is taken as
+focused instead of calling nil. A check that throws counts as not focused, so no click is sent
+while it cannot tell. ]]
+local function windowActive()
+	local check = isrbxactive or iswindowactive
+	if type(check) ~= 'function' then return true end
+	local ok, active = pcall(check)
+	return ok and active
 end
 
 local function getTableSize(tab)
@@ -1128,7 +1766,19 @@ run(function()
 		num += num < -(math.pi / 2) and math.pi or 0
 		return num
 	end
-	
+
+	--[[ Without mousemoverel the camera is turned directly, by the same share of the yaw and pitch
+	gap the mouse move would have closed. The default camera module carries on from
+	Camera.CFrame's look each frame, so the pull builds up the same way. ]]
+	local function turnCamera(diffYaw, diffPitch, share)
+		local look = gameCamera.CFrame.LookVector
+		local yaw = math.atan2(look.X, look.Z) - diffYaw * share
+		local pitch = math.clamp(math.asin(look.Y) - diffPitch * share, -1.5, 1.5)
+		local position = gameCamera.CFrame.Position
+		local direction = Vector3.new(math.cos(pitch) * math.sin(yaw), math.sin(pitch), math.cos(pitch) * math.cos(yaw))
+		gameCamera.CFrame = CFrame.lookAt(position, position + direction)
+	end
+
 	AimAssist = vape.Categories.Combat:CreateModule({
 		Name = 'AimAssist',
 		ExtraText = function()
@@ -1176,8 +1826,13 @@ run(function()
 								local diffPitch = math.asin(facing.Y) - math.asin(new.Y)
 								local angle = Vector2.new(diffYaw, diffPitch) // (moveConst * UserSettings():GetService('UserGameSettings').MouseSensitivity)
 	
-								angle *= math.min(aimSpeed() * dt, 1)
-								mousemoverel(angle.X, angle.Y)
+								local share = math.min(aimSpeed() * dt, 1)
+								if exec.MouseMove then
+									angle *= share
+									mousemoverel(angle.X, angle.Y)
+								else
+									turnCamera(diffYaw, diffPitch, share)
+								end
 							end
 						end
 					end
@@ -1340,9 +1995,12 @@ run(function()
 							tool:Activate()
 						end
 					else
-						if mouse1click and (isrbxactive or iswindowactive)() then
+						if mouse1click and windowActive() then
 							if not clickGuiOpen() then
-								(Mode.Value == 'Click' and mouse1click or mouse2click)()
+								local click = Mode.Value == 'Click' and mouse1click or mouse2click
+								if click then
+									click()
+								end
 							end
 						end
 					end
@@ -1362,9 +2020,17 @@ run(function()
 		DefaultMax = 12
 	})
 	AutoClicker:CreateDivider({Text = 'Extras'})
+	-- Click and RightClick send real clicks, so they are offered only where the executor can.
+	local modes = {'Tool'}
+	if type(mouse1click) == 'function' then
+		table.insert(modes, 'Click')
+		if type(mouse2click) == 'function' then
+			table.insert(modes, 'RightClick')
+		end
+	end
 	Mode = AutoClicker:CreateDropdown({
 		Name = 'Mode',
-		List = {'Tool', 'Click', 'RightClick'},
+		List = modes,
 		Tooltip = 'Tool - Automatically uses roblox tools (eg. swords)\nClick - Left click\nRightClick - Right click'
 	})
 end)
@@ -1577,6 +2243,16 @@ run(function()
 	Hooks.FindPartOnRay = Hooks.FindPartOnRayWithIgnoreList
 	Hooks.ViewportPointToRay = Hooks.ScreenPointToRay
 
+	--[[ SilentAim changes what the game's own scripts get back from their rays: a __namecall hook
+	(with a trustworthy getnamecallmethod) or hookfunction on Ray.new, plus checkcaller and
+	getcallingscript. No plain Roblox API can do that, so where the executor has neither path the
+	module is left out of the list. ]]
+	local callerChecks = type(checkcaller) == 'function' and type(getcallingscript) == 'function'
+	if not (callerChecks and ((exec.HookMetamethod and exec.Namecall) or exec.HookFunction)) then
+		exec.hide('SilentAim', 'needs hookmetamethod or hookfunction, getnamecallmethod, checkcaller and getcallingscript')
+		return
+	end
+
 	SilentAim = vape.Categories.Combat:CreateModule({
 		Name = 'SilentAim',
 		Function = function(callback)
@@ -1648,7 +2324,7 @@ run(function()
 						targetQuery.NPCs = Target.NPCs.Enabled
 						local ent = entitylib['Entity'..Mode.Value](targetQuery)
 
-						if mouse1click and (isrbxactive or iswindowactive)() then
+						if mouse1click and windowActive() then
 							if ent and canClick() then
 								if delayCheck < tick() then
 									if mouseClicked then
@@ -1917,7 +2593,7 @@ run(function()
 		Function = function(callback)
 			if callback then
 				repeat
-					if mouse1click and (isrbxactive or iswindowactive)() then
+					if mouse1click and mouse1press and mouse1release and windowActive() then
 						if getTriggerBotTarget() and canClick() then
 							if delayCheck < tick() then
 								if mouseClicked then
@@ -1939,7 +2615,7 @@ run(function()
 					task.wait()
 				until not TriggerBot.Enabled
 			else
-				if mouse1click and (isrbxactive or iswindowactive)() then
+				if mouse1click and mouse1release and windowActive() then
 					if mouseClicked then
 						mouse1release()
 					end
@@ -2112,11 +2788,51 @@ end)
 run(function()
 	local Desync
 	local hook
-	
+
+	--[[ Without raknet (Solara, Xeno) the packet cannot be rewritten, so the same result comes from
+	the swap Invisible uses: the root is put at the held CFrame in Heartbeat, after physics, so that
+	is what replicates, and back at its real CFrame first thing next frame (render step 0), before
+	the camera and the next simulation see it. Others keep seeing you where Desync was switched on
+	while you move freely. The executors that hook (hookExecutor) keep the raknet path and its
+	warning, as before. ]]
+	local function holdPosition()
+		local held, real
+		local bindKey = httpService:GenerateGUID(true)
+		local function restore()
+			if real and entitylib.isAlive then
+				entitylib.character.RootPart.CFrame = real
+			end
+			real = nil
+		end
+		runService:BindToRenderStep(bindKey, 0, restore)
+		Desync:Clean(function()
+			runService:UnbindFromRenderStep(bindKey)
+			restore()
+		end)
+		Desync:Clean(runService.Heartbeat:Connect(function()
+			if not entitylib.isAlive then
+				held, real = nil, nil
+				return
+			end
+			local root = entitylib.character.RootPart
+			held = held or root.CFrame
+			-- Kept if render step 0 has not put it back yet, so the real place is never lost.
+			real = real or root.CFrame
+			root.CFrame = held
+		end))
+		Desync:Clean(entitylib.Events.LocalAdded:Connect(function()
+			held, real = nil, nil
+		end))
+	end
+
 	Desync = vape.Categories.Blatant:CreateModule({
 		Name = 'Desync',
 		Function = function(callback)
 			if callback then
+				if not hookExecutor and not (type(raknet) == 'table' and type(raknet.add_send_hook) == 'function') then
+					holdPosition()
+					return
+				end
 				if not rakNetCheck('Desync') then
 					Desync:Toggle()
 					return
@@ -3491,14 +4207,22 @@ run(function()
 	})
 	-- Tells AutoWin this Phase holds off by itself, so it is left switched on.
 	Phase.AutoWinAware = true
+	--[[ FFlag mode works through setfflag, so it is offered only where the executor has it; a saved
+	FFlag then falls back to the first mode, as any value missing from a list does. ]]
+	local modeList = {'Part', 'Character', 'CFrame', 'Motor'}
+	local modeTips = 'Part - Modifies parts collision status around you\nCharacter - Modifies the local collision status of the character\nCFrame - Teleports you past parts\nMotor - Same as CFrame with a bypass'
+	if exec.FFlag then
+		table.insert(modeList, 'FFlag')
+		modeTips ..= '\nFFlag - Directly adjusts all physics collisions'
+	end
 	Mode = Phase:CreateDropdown({
 		Name = 'Mode',
-		List = {'Part', 'Character', 'CFrame', 'Motor', 'FFlag'},
+		List = modeList,
 		Function = function(val)
 			StudLimit.Object.Visible = val == 'CFrame' or val == 'Motor'
 			releasePhase()
 		end,
-		Tooltip = 'Part - Modifies parts collision status around you\nCharacter - Modifies the local collision status of the character\nCFrame - Teleports you past parts\nMotor - Same as CFrame with a bypass\nFFlag - Directly adjusts all physics collisions'
+		Tooltip = modeTips
 	})
 	StudLimit = Phase:CreateSlider({
 		Name = 'Wall Size',
@@ -4074,7 +4798,22 @@ end)
 run(function()
 	local Timer
 	local Value
-	
+
+	--[[ Where the step is refused (no setfflag, a flag that did not take, or too low an identity
+	for Pause/StepPhysics), the same extra share of motion is added to the root after physics: its
+	velocity over the extra time, and gravity on that velocity while airborne. ]]
+	local function emulateStep(dt)
+		if not entitylib.isAlive then return end
+		local root = entitylib.character.RootPart
+		local extra = dt * (Value.Value - 1)
+		local velocity = root.AssemblyLinearVelocity
+		if entitylib.character.Humanoid.FloorMaterial == Enum.Material.Air then
+			velocity += Vector3.new(0, -workspace.Gravity * extra, 0)
+			root.AssemblyLinearVelocity = velocity
+		end
+		root.CFrame += velocity * extra
+	end
+
 	Timer = vape.Categories.Blatant:CreateModule({
 		Name = 'Timer',
 		ExtraText = function()
@@ -4082,9 +4821,36 @@ run(function()
 		end,
 		Function = function(callback)
 			if callback then
+				if not hookExecutor then
+					--[[ Solara and Xeno: the same step, at the raised identity and guarded, with Run
+					always following a Pause that went through. The first refusal switches to
+					emulateStep, and without setfflag it runs from the first frame. The executors
+					that hook run the original below. ]]
+					local stepping = exec.FFlag and pcall(setfflag, 'SimEnableStepPhysics', 'True') and pcall(setfflag, 'SimEnableStepPhysicsSelective', 'True')
+					Timer:Clean(runService.RenderStepped:Connect(function(dt)
+						if stepping and Value.Value > 1 and entitylib.isAlive then
+							if exec.Identity then
+								pcall(setthreadidentity, 8)
+							end
+							local paused = pcall(runService.Pause, runService)
+							stepping = paused and pcall(function()
+								workspace:StepPhysics(dt * (Value.Value - 1), {entitylib.character.RootPart})
+							end)
+							if paused then
+								pcall(runService.Run, runService)
+							end
+						end
+					end))
+					Timer:Clean(runService.Heartbeat:Connect(function(dt)
+						if not stepping and Value.Value > 1 then
+							emulateStep(dt)
+						end
+					end))
+					return
+				end
 				setfflag('SimEnableStepPhysics', 'True')
 				setfflag('SimEnableStepPhysicsSelective', 'True')
-	
+
 				Timer:Clean(runService.RenderStepped:Connect(function(dt)
 					if Value.Value > 1 then
 						runService:Pause()
@@ -7882,6 +8648,12 @@ run(function()
 	-- setting the flags beside the new one.
 	local generation = 0
 
+	-- Blink holds your packets back through the sender-rate flags, so it needs setfflag.
+	if not exec.FFlag then
+		exec.hide('Blink', 'needs setfflag')
+		return
+	end
+
 	Blink = vape.Categories.Utility:CreateModule({
 		Name = 'Blink',
 		ExtraText = function()
@@ -7971,15 +8743,29 @@ ChatSpammer = vape.Categories.Utility:CreateModule({
 			end
 
 			if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
-				if Hide.Enabled and coreGui:FindFirstChild('ExperienceChat') then
+				local function hideWaitNotices()
 					ChatSpammer:Clean(coreGui.ExperienceChat.appLayout.chatWindow.contentFrame.scrollingView.bottomLockedScrollView.scrollView.ChildAdded:Connect(function(msg)
 						if msg.Name:sub(1, 2) == '0-' and msg.TextMessage.BodyText.Text == '<font color="#d4d4d4">You must wait before sending another message.</font>' then
 							msg.Visible = false
 						end
 					end))
 				end
+				if hookExecutor then
+					if Hide.Enabled and coreGui:FindFirstChild('ExperienceChat') then
+						hideWaitNotices()
+					end
+				elseif Hide.Enabled and coreGui then
+					--[[ The chat window is under CoreGui, which can be missing or refuse the read
+					at a low identity (Solara, Xeno); then the wait message just stays visible. ]]
+					pcall(function()
+						if coreGui:FindFirstChild('ExperienceChat') then
+							hideWaitNotices()
+						end
+					end)
+				end
 			elseif replicatedStorage:FindFirstChild('DefaultChatSystemChatEvents') then
-				if Hide.Enabled then
+				-- Legacy chat's Hide hooks the game's own handler: getconnections and hookfunction only.
+				if Hide.Enabled and exec.Connections and exec.HookFunction then
 					oldchat = hookfunction(getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnNewSystemMessage.OnClientEvent)[1].Function, function(data, ...)
 						if data.Message:find('ChatFloodDetector') then return end
 						return oldchat(data, ...)
@@ -8062,7 +8848,15 @@ Hide = ChatSpammer:CreateToggle({
 	
 run(function()
 	local Disabler
-	
+
+	--[[ Disabler silences the game's own handlers on your root's CFrame and Velocity changes. Other
+	scripts' connections can only be listed and replaced with getconnections and hookfunction, so
+	without both the module is left out of the list. ]]
+	if not (exec.Connections and exec.HookFunction) then
+		exec.hide('Disabler', 'needs getconnections and hookfunction')
+		return
+	end
+
 	local function characterAdded(char)
 		for _, v in getconnections(char.RootPart:GetPropertyChangedSignal('CFrame')) do
 			hookfunction(v.Function, function() end)
@@ -8301,12 +9095,41 @@ end)
 	
 run(function()
 	local connections = {}
-	
+	local idled
+
+	--[[ Without getconnections (Solara, Xeno) the idle kick's own connection cannot be switched off,
+	so the idle timer is reset instead: each time Roblox reports you idle, VirtualUser clicks for
+	you at the raised identity it needs, or, where that is refused, the mouse is nudged a pixel and
+	back. Spawned, so the identity change stays out of the signal's own thread. ]]
+	local function resetIdle()
+		task.spawn(function()
+			if exec.Identity then
+				pcall(setthreadidentity, 8)
+			end
+			local clicked = pcall(function()
+				local user = cloneref(game:GetService('VirtualUser'))
+				user:CaptureController()
+				user:ClickButton2(Vector2.zero)
+			end)
+			if not clicked and exec.MouseMove then
+				pcall(mousemoverel, 1, 0)
+				task.wait()
+				pcall(mousemoverel, -1, 0)
+			end
+		end)
+	end
+
 	vape.Categories.World:CreateModule({
 		Name = 'Anti-AFK',
 		Tab = 'Utility',
 		Function = function(callback)
 			if callback then
+				if not exec.Connections then
+					if not idled then
+						idled = lplr.Idled:Connect(resetIdle)
+					end
+					return
+				end
 				for _, v in getconnections(lplr.Idled) do
 					table.insert(connections, v)
 					v:Disable()
@@ -8316,6 +9139,10 @@ run(function()
 					v:Enable()
 				end
 				table.clear(connections)
+				if idled then
+					idled:Disconnect()
+					idled = nil
+				end
 			end
 		end,
 		Tooltip = 'Prevents you from getting kicked for being idle.'
@@ -8339,22 +9166,54 @@ run(function()
 					return
 				end
 
-				repeat
-					task.wait(0.1)
-					for _, v in getconnections(gameCamera:GetPropertyChangedSignal('CameraType')) do
-						if v.Function then
-							module = debug.getupvalue(v.Function, 1)
+				local hooked = exec.Connections and exec.Debug
+				if hooked then
+					repeat
+						task.wait(0.1)
+						for _, v in getconnections(gameCamera:GetPropertyChangedSignal('CameraType')) do
+							if v.Function then
+								module = debug.getupvalue(v.Function, 1)
+							end
 						end
-					end
-				until module or not Freecam.Enabled
-	
+					until module or not Freecam.Enabled
+				elseif exec.Live then
+					--[[ No getconnections or debug (Solara): PlayerModule hands out the same camera
+					module through GetCameras, so its controller's subject is swapped as above.
+					Only where require is shown to hand back the game's own modules (exec.Live): a
+					fresh copy of PlayerModule would build a second camera and control stack. ]]
+					local ok, cameras = pcall(function()
+						return require(lplr.PlayerScripts.PlayerModule):GetCameras()
+					end)
+					module = ok and type(cameras) == 'table' and cameras or nil
+				end
+
+				local camPos
 				if module and module.activeCameraController and Freecam.Enabled then
 					old = module.activeCameraController.GetSubjectPosition
-					local camPos = old(module.activeCameraController) or Vector3.zero
+					camPos = old(module.activeCameraController) or Vector3.zero
 					module.activeCameraController.GetSubjectPosition = function()
 						return camPos
 					end
-	
+				elseif not hooked and Freecam.Enabled then
+					--[[ No camera module within reach (no live require, or a game's own camera script):
+					the camera is placed at camPos right after the camera module's update each
+					frame, looking where that module looks, so mouse look keeps working. ]]
+					module = nil
+					camPos = gameCamera.CFrame.Position
+					local bindKey = 'Freecam'..randomkey
+					runService:BindToRenderStep(bindKey, Enum.RenderPriority.Camera.Value + 1, function()
+						local placed = CFrame.lookAlong(camPos, gameCamera.CFrame.LookVector)
+						gameCamera.CFrame = placed
+						gameCamera.Focus = placed
+					end)
+					Freecam:Clean(function()
+						pcall(function()
+							runService:UnbindFromRenderStep(bindKey)
+						end)
+					end)
+				end
+
+				if camPos then
 					Freecam:Clean(runService.PreSimulation:Connect(function(dt)
 						if not inputService:GetFocusedTextBox() then
 							local forward = (inputService:IsKeyDown(Enum.KeyCode.W) and -1 or 0) + (inputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
@@ -10287,6 +11146,11 @@ run(function()
 	local FPSUnlocker
 	local Cap
 	local previousCap
+	-- Nothing but setfpscap can raise the framerate cap, so without it the module is left out.
+	if not exec.FpsCap then
+		exec.hide('FPS Unlocker', 'needs setfpscap')
+		return
+	end
 	if getfpscap then
 		local ok, value = pcall(getfpscap)
 		previousCap = ok and tonumber(value) or nil

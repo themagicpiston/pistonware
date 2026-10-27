@@ -1630,15 +1630,15 @@ end
 		--[[ Cosmetic, and entirely inside a pcall, because the rewrite moved every field it reads.
 		'GUI bind indicator' left Categories.Main.Options for Settings.GUI.Options, the keybind
 		list became GUIBind.Keys instead of a flat vape.Keybind, and vape.VapeButton is the
-		phone's >_ button now. A finished-loading toast is not worth risking finishLoading over
+		phone's piston button now. A finished-loading toast is not worth risking finishLoading over
 		if any of that moves again. ]]
 		pcall(function()
 			if not vape.Categories then return end
 			local indicator = vape.Settings and vape.Settings.GUI and vape.Settings.GUI.Options['GUI bind indicator']
 			if not (indicator and indicator.Enabled) then return end
 			local keys = vape.GUIBind and vape.GUIBind.Keys
-			-- A phone has no key to press: the GUI builds the >_ button there instead.
-			local how = vape.VapeButton and 'Tap the >_ button in the top bar to open the GUI'
+			-- A phone has no key to press: the GUI builds the piston button there instead.
+			local how = vape.VapeButton and 'Tap the piston button in the top bar to open the GUI'
 				or (keys and #keys > 0) and ('Press '..table.concat(keys, ' + '):upper()..' to open GUI')
 				or 'Open the GUI with your keybind'
 			vape:CreateNotification('Pistonware | Finished Loading', how, 5)

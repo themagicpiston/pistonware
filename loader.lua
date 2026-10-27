@@ -3006,6 +3006,418 @@ do
 	console:SetProgress(0.12)
 end
 
+--[[ Teleport re-injection, owned here as well as by main.lua.
+
+main.lua queues the teleport script, but only from inside finishLoading -- the very end of a
+successful boot. A boot that stopped short of that (a failed download, a GUI error, a game script
+that died before the profile applied) left the next server with nothing at all, silently. This
+connects as soon as the key has validated, so a teleport always comes back through the loader.
+
+It never queues twice. Both handlers mark shared.PistonwareTeleportQueued the moment they queue,
+and this one waits a resumption first, so when main.lua's handler is live it goes first (with the
+full script: profile, AutoQueueDodge hold and all) and this stands down. Once main.lua hooks the
+session's teleports itself it sets shared.PistonwareTeleportOwned and disconnects the connection
+kept under shared.PistonwareDevTeleportConnection, the name it already drops, so this handler goes
+with it and nothing queues after an Unload. A boot the user cancelled queues nothing either. ]]
+do
+	--[[ The teleport queue, under whatever name this executor gives it.
+
+	main.lua and the game files look it up by name -- main.lua tries queue_on_teleport, queueonteleport
+	and the syn and fluxus tables, the game files' capability probe queue_on_teleport alone -- so a
+	function an executor keeps under any other name read to them as no teleport support at all. It is
+	looked up here under every name an executor is known to use, as a plain global and then through
+	getgenv() and getrenv(), and copied to queue_on_teleport and queueonteleport wherever those are
+	missing, before main.lua is compiled. A name that already holds something is never touched, so an
+	executor's own function stays exactly as it is. No capability probe, executor name or test result
+	decides any of this: a function under any of these names is used.
+
+	Where it is copied to: executors disagree on the environment loadstring gives a chunk (the
+	thread's globals, the caller's environment, one shared table, or a fresh table per chunk that reads
+	through to a shared one), and Xeno has no getgenv() to reach a shared one with. The plain
+	assignment lands where this chunk's own globals go, as script_key's does. Then a check chunk is
+	compiled both ways main.lua is (directly, and through pcall); a way that cannot see it gets the
+	names assigned by a chunk compiled that same way, which lands them wherever main.lua keeps its own
+	globals. Not through getfenv(): that switches off Luau's fast paths for every script sharing the
+	environment it returns. Only when that chunk wrote the names and a fresh chunk still cannot see
+	them (each chunk gets a new table) is the table those read through filled. Never the game's own
+	environment (getrenv()), a frozen table or one isreadonly() reports. ]]
+	local queueTeleport
+	local resolved, resolveError = pcall(function()
+		local function callable(value)
+			if type(value) == 'function' then return true end
+			if type(value) ~= 'table' and type(value) ~= 'userdata' then return false end
+			local ok, meta = pcall(getmetatable, value)
+			return ok and type(meta) == 'table' and rawget(meta, '__call') ~= nil
+		end
+		local function lookIn(env)
+			if type(env) ~= 'table' then return nil end
+			for _, name in {'queue_on_teleport', 'queueonteleport', 'queueteleport'} do
+				local ok, value = pcall(function() return env[name] end)
+				if ok and callable(value) then return value, name end
+			end
+			for _, library in {'syn', 'fluxus'} do
+				local ok, value = pcall(function()
+					local tbl = env[library]
+					return type(tbl) == 'table' and tbl.queue_on_teleport or nil
+				end)
+				if ok and callable(value) then return value, library..'.queue_on_teleport' end
+			end
+			return nil
+		end
+
+		local plain = {}
+		pcall(function()
+			plain = {
+				queue_on_teleport = queue_on_teleport,
+				queueonteleport = queueonteleport,
+				queueteleport = queueteleport,
+				syn = syn,
+				fluxus = fluxus
+			}
+		end)
+		local genv, renv, readonly
+		pcall(function() genv = getgenv() end)
+		pcall(function() renv = getrenv() end)
+		if type(genv) ~= 'table' then genv = nil end
+		if type(renv) ~= 'table' then renv = nil end
+		pcall(function() readonly = isreadonly end)
+		if type(readonly) ~= 'function' and genv then
+			pcall(function() readonly = genv.isreadonly end)
+		end
+
+		local found, name = lookIn(plain)
+		local foundAs = name
+		if not found then
+			found, name = lookIn(genv)
+			foundAs = name and 'getgenv().'..name
+		end
+		if not found then
+			found, name = lookIn(renv)
+			foundAs = name and 'getrenv().'..name
+		end
+		if not found then return end
+		if type(found) ~= 'function' then
+			local callableValue = found
+			found = function(...)
+				return callableValue(...)
+			end
+		end
+		queueTeleport = found
+
+		local function writable(env)
+			if type(env) ~= 'table' or (renv and rawequal(env, renv)) then return false end
+			local frozenOk, frozen = pcall(table.isfrozen, env)
+			if frozenOk and frozen then return false end
+			if type(readonly) == 'function' then
+				local readOk, isRead = pcall(readonly, env)
+				if readOk and isRead then return false end
+			end
+			return true
+		end
+		local filled = {}
+		-- A name is filled in env only while reader (env itself, by default) sees nothing under it.
+		local function fill(env, label, reader)
+			if not writable(env) then return end
+			for _, standard in {'queue_on_teleport', 'queueonteleport'} do
+				pcall(function()
+					if env[standard] == nil and (reader or env)[standard] == nil then
+						env[standard] = found
+						table.insert(filled, label..standard)
+					end
+				end)
+			end
+		end
+		pcall(function()
+			if queue_on_teleport == nil then
+				queue_on_teleport = found
+				table.insert(filled, 'queue_on_teleport')
+			end
+		end)
+		pcall(function()
+			if queueonteleport == nil then
+				queueonteleport = found
+				table.insert(filled, 'queueonteleport')
+			end
+		end)
+		fill(genv, 'getgenv().')
+
+		local compilers = {
+			function(source, chunkName)
+				return loadstring(source, chunkName)
+			end,
+			function(source, chunkName)
+				local ok, chunk = pcall(loadstring, source, chunkName)
+				return ok and chunk or nil
+			end
+		}
+		local function sees(compile)
+			local ok, chunk = pcall(compile, 'return queue_on_teleport', 'teleport-check')
+			if not ok or type(chunk) ~= 'function' then return nil end
+			local ran, value = pcall(chunk)
+			return ran and callable(value), chunk
+		end
+		local publish = 'local found = ...\nlocal names = {}\n'
+			..'if queue_on_teleport == nil then queue_on_teleport = found names[#names + 1] = "queue_on_teleport" end\n'
+			..'if queueonteleport == nil then queueonteleport = found names[#names + 1] = "queueonteleport" end\n'
+			..'return names'
+		local checked, unseen = 0, 0
+		for _, compile in compilers do
+			local seen, probe = sees(compile)
+			if seen ~= nil then
+				checked += 1
+				if not seen then
+					local wrote
+					pcall(function()
+						local ran, names = pcall(compile(publish, 'teleport-publish'), found)
+						if ran and type(names) == 'table' and #names > 0 then wrote = names end
+					end)
+					seen, probe = sees(compile)
+					if seen and wrote then
+						for _, standard in wrote do
+							table.insert(filled, 'chunk globals.'..tostring(standard))
+						end
+					end
+					-- Written, and a fresh chunk still cannot see it: each chunk's globals are its
+					-- own, so getfenv() here only ever touches a throwaway check chunk's table.
+					if seen == false and wrote then
+						local envOk, env = pcall(getfenv, probe)
+						if envOk and type(env) == 'table' then
+							local metaOk, meta = pcall(getmetatable, env)
+							if metaOk and type(meta) == 'table' then
+								fill(rawget(meta, '__index'), 'chunk env parent.', env)
+							end
+						end
+						seen = sees(compile)
+					end
+				end
+				if not seen then unseen += 1 end
+			end
+		end
+
+		pistonwareBuffer.print('teleport.lookup', 'teleport queue found as '..foundAs, {
+			filled = #filled > 0 and table.concat(filled, ', ')
+				or (unseen > 0 and 'none (nothing would take it)' or 'none (nothing was missing)')
+		})
+		if checked == 0 then
+			pistonwareBuffer.warn('teleport.publish', 'no check chunk would compile, so whether main.lua and the game files can see queue_on_teleport is unknown')
+		elseif unseen > 0 then
+			pistonwareBuffer.warn('teleport.publish', 'a chunk compiled here still cannot see queue_on_teleport, so main.lua and the game files will report no teleport support')
+		end
+	end)
+	if not resolved then
+		pistonwareBuffer.error('teleport.lookup', tostring(resolveError))
+	end
+
+	--[[ The queued script carries the key, and an error raised around it could too, so no line
+	this block writes ever holds it. ]]
+	local function scrub(text)
+		text = tostring(text)
+		local key = rawget(shared, 'PistonwareKey')
+		if type(key) == 'string' and key ~= '' then
+			text = text:gsub((key:gsub('%p', '%%%0')), '<redacted>')
+		end
+		return text
+	end
+
+	--[[ All of it guarded: whatever goes wrong here costs the fallback, never the boot below. ]]
+	local fallbackOk, fallbackError = pcall(function()
+		if type(queueTeleport) ~= 'function' then
+			pistonwareBuffer.warn('teleport.unsupported', 'this executor has no queue_on_teleport; pistonware will not re-inject after a teleport')
+			return
+		end
+		local previous = rawget(shared, 'PistonwareDevTeleportConnection')
+		if previous then
+			rawset(shared, 'PistonwareDevTeleportConnection', nil)
+			pcall(function() previous:Disconnect() end)
+		end
+		rawset(shared, 'PistonwareTeleportQueued', nil)
+		--[[ Set by main.lua once it hooks the teleport itself; a new boot starts without it. ]]
+		rawset(shared, 'PistonwareTeleportOwned', nil)
+
+		--[[ Runs on the next server. Every step leaves a line in pistonware_teleport.log (key
+		redacted), since nothing else is up there yet to say where a queued boot stopped. The loader
+		comes from this boot's channel branch, the URL the loadstring everyone starts from fetches,
+		tried three times since a request made straight after arriving can fail on its own; then from
+		pistonware/loader.lua, when there is one (the update pass keeps a copy there current). ]]
+		local body = [==[
+shared.vapereload = true
+-- Kept from the start: the loader can switch shared.PistonwareKey to another key before a line is written.
+local carriedKey = rawget(shared, 'PistonwareKey')
+local function crumb(text)
+	pcall(function()
+		text = tostring(text)
+		for _, key in {carriedKey, rawget(shared, 'PistonwareKey')} do
+			if type(key) == 'string' and key ~= '' then
+				text = text:gsub((key:gsub('%p', '%%%0')), '<redacted>')
+			end
+		end
+		local line = os.date('!%Y-%m-%dT%H:%M:%SZ')..' [loader fallback] '..text..'\n'
+		if type(appendfile) == 'function' and isfile('pistonware_teleport.log') then
+			appendfile('pistonware_teleport.log', line)
+		else
+			writefile('pistonware_teleport.log', line)
+		end
+	end)
+end
+crumb('queued script started in place '..tostring(game.PlaceId))
+pcall(rawset, shared, 'PistonwareSessionRejected', nil)
+pcall(rawset, shared, 'PistonwareLoaderBoot', nil)
+local chunk, from
+for attempt = 1, 3 do
+	local fetched, source = pcall(function()
+		return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/'..loaderBranch..'/loader.lua', true)
+	end)
+	if fetched and type(source) == 'string' and source ~= '' and source ~= '404: Not Found' then
+		local compileError
+		chunk, compileError = loadstring(source, 'loader')
+		if chunk then
+			from = 'the '..loaderBranch..' branch'
+			break
+		end
+		crumb('the downloaded loader.lua did not compile (attempt '..attempt..'): '..tostring(compileError))
+	else
+		crumb('loader.lua could not be downloaded (attempt '..attempt..'): '..tostring(source):sub(1, 200))
+	end
+	if attempt < 3 then task.wait(attempt) end
+end
+if not chunk then
+	local readOk, cached = pcall(readfile, 'pistonware/loader.lua')
+	if readOk and type(cached) == 'string' and cached ~= '' then
+		local compileError
+		chunk, compileError = loadstring(cached, 'loader')
+		if chunk then
+			from = 'pistonware/loader.lua'
+		else
+			crumb('pistonware/loader.lua did not compile: '..tostring(compileError))
+		end
+	else
+		crumb('pistonware/loader.lua could not be read')
+	end
+end
+if not chunk then
+	crumb('no loader to run; nothing was loaded')
+	return
+end
+crumb('running loader.lua from '..from)
+local ran, runError = pcall(chunk)
+crumb(ran and 'loader.lua finished' or ('loader.lua errored: '..tostring(runError)))
+local hold = shared.PistonwareDodgeHold
+if not ran and type(hold) == 'table' and not hold.claimed and type(hold.release) == 'function' then
+	pcall(hold.release)
+	crumb('released the AutoQueueDodge hold')
+end
+]==]
+
+		--[[ Connected from its own thread. After a teleport this runs before the new server has a
+		LocalPlayer, and waiting for one -- or anything going wrong here at all -- must never hold up
+		or abort the boot below. ]]
+		task.spawn(function()
+			local ok, err = pcall(function()
+				local playersService = cloneref(game:GetService('Players'))
+				local deadline = os.clock() + 120
+				while not playersService.LocalPlayer and os.clock() < deadline do
+					task.wait()
+				end
+				local localPlayer = playersService.LocalPlayer
+				if not localPlayer then
+					pistonwareBuffer.warn('teleport.fallback', 'no LocalPlayer; the teleport fallback is not connected')
+					return
+				end
+				local queuedHere, stoodDown = false, false
+				local connection = localPlayer.OnTeleport:Connect(function(state)
+					--[[ A failed attempt is not consumed: the teleport that does go somewhere queues. ]]
+					if state == Enum.TeleportState.Failed then return end
+					task.defer(function()
+						if queuedHere then return end
+						--[[ main.lua has this teleport, or would never queue it: an independent
+						session. And a boot the user cancelled stays cancelled on the next server;
+						closing a failed boot's window reads as aborted too, so a boot that stopped
+						still queues -- that is what this handler is for. ]]
+						local standDown
+						if rawget(shared, 'PistonwareTeleportQueued') or rawget(shared, 'PistonwareTeleportOwned') then
+							standDown = 'main.lua has this teleport; nothing queued here'
+						elseif rawget(shared, 'VapeIndependent') then
+							standDown = 'an independent session; nothing queued here'
+						else
+							local abortedOk, aborted = pcall(function() return console:IsAborted() end)
+							if abortedOk and aborted == true and not loaderStopped then
+								standDown = 'the boot was cancelled; nothing queued here'
+							end
+						end
+						if standDown then
+							if not stoodDown then
+								stoodDown = true
+								pistonwareBuffer.print('teleport.fallback', standDown)
+							end
+							return
+						end
+						rawset(shared, 'PistonwareTeleportQueued', true)
+						local queued, queueError = pcall(function()
+							local function quote(value)
+								return string.format('%q', tostring(value))
+							end
+							--[[ What main.lua's queued script carries: the key candidate (the loader
+							checks it again), the channel and the profile. ]]
+							local lines = {}
+							local key = rawget(shared, 'PistonwareKey')
+							if type(key) == 'string' and key ~= '' then
+								table.insert(lines, 'script_key = '..quote(key))
+								table.insert(lines, 'rawset(shared, "PistonwareKey", '..quote(key)..')')
+							end
+							table.insert(lines, 'shared.PistonwareChannel = '..quote(release.channel))
+							--[[ finishLoading is what reads and clears shared.VapeCustomProfile, so a boot
+							that never got there still holds the profile it was asked for; a session that
+							did load one names its own. Neither: the saved profile decides. ]]
+							local profile = rawget(shared, 'VapeCustomProfile')
+							if type(profile) ~= 'string' or profile == '' then
+								local vape = rawget(shared, 'vape')
+								profile = type(vape) == 'table' and vape.Loaded and vape.Profile or nil
+							end
+							if type(profile) == 'string' and profile ~= '' then
+								table.insert(lines, 'shared.VapeCustomProfile = '..quote(profile))
+							end
+							local branch = tostring(release.branch or 'main')
+							if not branch:match('^[%w%-_%.]+$') then branch = 'main' end
+							table.insert(lines, 'local loaderBranch = '..quote(branch))
+							table.insert(lines, body)
+							--[[ One queued boot per arrival, with the token main.lua's script starts with:
+							Delta runs every script ever queued again on each join, and a copy whose token
+							is no longer the file's stops on its first line. No file access, no check. ]]
+							local tokenPath = 'pistonware/teleport_token_'..tostring(localPlayer.UserId)..'.txt'
+							local token = tostring(game.JobId)..'-'..tostring(os.clock())..'-'..tostring(math.random(1, 2147483647))
+							if pcall(writefile, tokenPath, token) then
+								table.insert(lines, 1, 'do local tokenOk, tokenNow = pcall(readfile, '..quote(tokenPath)..')\n'
+									..'if tokenOk and tokenNow ~= '..quote(token)..' then return end\n'
+									..'pcall(writefile, '..quote(tokenPath)..', "") end')
+							end
+							queueTeleport(table.concat(lines, '\n'))
+						end)
+						if queued then
+							queuedHere = true
+							pistonwareBuffer.print('teleport.queued', 'main.lua did not queue this teleport; queued loader.lua instead')
+						else
+							rawset(shared, 'PistonwareTeleportQueued', nil)
+							pistonwareBuffer.error('teleport.queue', scrub(queueError))
+						end
+					end)
+				end)
+				local stale = rawget(shared, 'PistonwareDevTeleportConnection')
+				if stale and stale ~= connection then
+					pcall(function() stale:Disconnect() end)
+				end
+				rawset(shared, 'PistonwareDevTeleportConnection', connection)
+				pistonwareBuffer.print('teleport.fallback', 'connected; the loader is queued if main.lua does not take a teleport')
+			end)
+			if not ok then
+				pistonwareBuffer.error('teleport.fallback', scrub(err))
+			end
+		end)
+	end)
+	if not fallbackOk then
+		pcall(pistonwareBuffer.error, 'teleport.fallback', scrub(fallbackError))
+	end
+end
+
 --[[ Decided before the folders are created, while 'did this run create the install' is still
 observable. The key gate above yields, but it runs before any folder exists and its own
 cancel path returns without reaching here, so freshInstall still cannot be read stale. ]]
