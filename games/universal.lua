@@ -3630,7 +3630,10 @@ run(function()
 				local hideVisuals = clickGuiOpen()
 				for i, v in Boxes do
 					local hit = not hideVisuals and i <= attackedCount and attacked[i] or nil
-					v.Adornee = hit and hit.Entity.RootPart or nil
+					-- Adornee needs a real Instance; on Solara/Xeno an entity's RootPart can be a
+					-- stand-in table (it still carries a Position), which Adornee rejects.
+					local root = hit and hit.Entity.RootPart or nil
+					v.Adornee = typeof(root) == 'Instance' and root or nil
 					if hit then
 						v.Color3 = Color3.fromHSV(hit.Check.Hue, hit.Check.Sat, hit.Check.Value)
 						v.Transparency = 1 - hit.Check.Opacity
