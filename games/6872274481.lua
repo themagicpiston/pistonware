@@ -2404,7 +2404,11 @@ methods are only replaced once something registers, and only where exec.Live sho
 hands back the game's own classes rather than copies; they are put back on uninject. ]]
 if not namecallGuard.supported then
 	local netGuard
-	if exec.Require then
+	--[[ exec.Live, not exec.Require: where require re-runs module code (Solara, Xeno) rather than
+	handing back the game's copy, requiring the net and Promise modules below re-runs and errors them,
+	which poisons the game's own copies -- its item shop can then no longer load its Knit chain. netGuard
+	only installs its wrappers when exec.Live anyway, so it has nothing to do when Knit is not live. ]]
+	if exec.Live then
 		local function dispatch(inst, method, ...)
 			-- the hook's order: observers first (they never change the call), then the watch entry
 			local observerMethods = namecallObservers[inst]
