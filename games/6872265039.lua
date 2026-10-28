@@ -643,7 +643,47 @@ run(function()
 	the matching run speed; a speed set while the game sprints itself, or one this set, is left alone.
 	Checked each Heartbeat, not from a Changed handler, which must never write properties. ]]
 	local RUN_SCALE = 20 / 14
+	-- SprintConstants.RUN_FOV_MULT: the game's own startSprinting tweens the camera to
+	-- FovController:getFOV() * 1.1 over 0.1 s and tweens it back when you stop.
+	local RUN_FOV_MULT = 1.1
 	local raisedTo, raisedOn
+	local fovBase, fovTween
+	--[[ The game's FovController owns the base FOV and its sprint widens relative to it. Without Knit
+	there is none, and pistonware's own FOV module (universal.lua) writes the camera every frame while
+	it is on. So this never fights it: the camera is widened only while the FOV module is OFF, from
+	whatever FOV the camera is resting on, and it is handed back the moment the FOV module (or a game
+	effect) owns the camera again. Each edge SETS the FOV, never multiplies the live value frame on
+	frame -- the compounding that glitched the camera before. ]]
+	local function fovModuleOwns()
+		local fov = vape.Modules and vape.Modules.FOV
+		return fov ~= nil and fov.Enabled == true
+	end
+	local function tweenSprintFov(target)
+		if fovTween then pcall(function() fovTween:Cancel() end) end
+		local camera = workspace.CurrentCamera
+		if not (camera and target) then fovTween = nil; return end
+		fovTween = tweenService:Create(camera, TweenInfo.new(0.1, Enum.EasingStyle.Linear), {FieldOfView = target})
+		fovTween:Play()
+	end
+	-- Widen once, from the FOV the camera rests on, unless the FOV module owns it or we already have.
+	local function widenFov()
+		if fovBase or fovModuleOwns() then return end
+		local camera = workspace.CurrentCamera
+		if not camera then return end
+		fovBase = camera.FieldOfView
+		tweenSprintFov(fovBase * RUN_FOV_MULT)
+	end
+	-- Back to the base, but only over a widening of ours still on screen: a game effect or the FOV
+	-- module taking the camera elsewhere since is left alone.
+	local function restoreFov()
+		local base, tween = fovBase, fovTween
+		fovBase, fovTween = nil, nil
+		local camera = workspace.CurrentCamera
+		if not (camera and base) or fovModuleOwns() then return end
+		local playing = tween ~= nil and tween.PlaybackState == Enum.PlaybackState.Playing
+		if not playing and math.abs(camera.FieldOfView - base * RUN_FOV_MULT) > 0.05 then return end
+		tweenSprintFov(base)
+	end
 	local function sprintWithoutKnit(callback)
 		if inputService.TouchEnabled then
 			pcall(function() lplr.PlayerGui.MobileUI['2'].Visible = not callback end)
@@ -652,14 +692,22 @@ run(function()
 			Sprint:Clean(runService.Heartbeat:Connect(function()
 				local character = lplr.Character
 				local humanoid = character and character:FindFirstChildOfClass('Humanoid')
-				-- The game's own startSprinting does nothing while freecam is on.
+				-- The game's own startSprinting does nothing while it sprints you itself or in freecam.
 				if not humanoid or lplr:GetAttribute('Sprinting') == true or workspace:GetAttribute('FreecamEnabled') then
+					if fovBase then restoreFov() end
 					return
 				end
 				local speed = humanoid.WalkSpeed
-				if raisedOn == humanoid and math.abs(speed - raisedTo) < 0.01 then return end
-				raisedTo, raisedOn = speed * RUN_SCALE, humanoid
-				humanoid.WalkSpeed = raisedTo
+				if not (raisedOn == humanoid and math.abs(speed - raisedTo) < 0.01) then
+					raisedTo, raisedOn = speed * RUN_SCALE, humanoid
+					humanoid.WalkSpeed = raisedTo
+				end
+				-- Widen the view while actually moving, as the game does; hand it back when you stop.
+				if humanoid.MoveDirection.Magnitude > 0.01 then
+					widenFov()
+				elseif fovBase then
+					restoreFov()
+				end
 			end))
 		else
 			-- Back to the walking speed, unless the game has set another one since.
@@ -667,6 +715,7 @@ run(function()
 				raisedOn.WalkSpeed = raisedTo / RUN_SCALE
 			end
 			raisedTo, raisedOn = nil, nil
+			restoreFov()
 		end
 	end
 

@@ -10831,7 +10831,12 @@ shared.PistonwareForceKnitless. The stand-ins are not the game's modules, so exe
 them, as it already is on Solara, and fieldPatch and netGuard leave them alone. ]]
 knitless.active = (type(debug.getupvalue) ~= 'function' and not (exec.Require and exec.NativeRequire))
 	or (shared.PistonwareForceKnitless == true and shared.PistonwareDeveloper == true)
-if knitless.active then
+--[[ The knitless-mode setup, as a function so the bootstrap below can also turn it on after the
+fact: a Xeno build that exposes debug.getupvalue passes the heuristic above as if Knit were
+reachable, yet its require re-runs module code and KnitClient errors, so the Knit path fails and
+the bootstrap falls back to here. ]]
+local function activateKnitless()
+	knitless.active = true
 	exec.Live = false
 	-- Stand-ins are not the game's functions: nothing patches their constants or upvalues.
 	fieldPatch.constants = false
@@ -10868,6 +10873,7 @@ if knitless.active then
 		return seen.hand
 	end
 end
+if knitless.active then activateKnitless() end
 if shared.VapeSmoothBoot and os.clock() - lastBootYield > FRAME_BUDGET then
 	task.wait()
 	lastBootYield = os.clock()
@@ -10885,6 +10891,17 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		knitLoaded, Knit = exec.isolatedRequire(
 			replicatedStorage.rbxts_include.node_modules['@easy-games'].knit.src.Knit.KnitClient, 60
 		)
+		--[[ Knit was expected to load here (the executor reports a debug library or native require)
+		but did not: a Xeno build that exposes debug.getupvalue yet re-runs module code on require, so
+		KnitClient errors. Fall back to the stand-in layer when universal.lua published it, rather than
+		failing the whole payload. Full executors load Knit and never reach this. ]]
+		if not knitLoaded and type(exec.net) == 'table' and type(exec.net.client) == 'function'
+			and type(exec.Promise) == 'table' and type(exec.loadData) == 'function' then
+			knitless.log('KnitClient did not load ('..tostring(Knit)..'); using the stand-in layer instead')
+			activateKnitless()
+			require = knitless.require
+			knitLoaded, Knit = knitless.build()
+		end
 	end
 	if not knitLoaded then
 		error('KnitClient did not load: '..(Knit ~= nil and tostring(Knit) or 'still loading after 60s'), 0)
