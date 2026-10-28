@@ -89,6 +89,13 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			local again, second = isolatedRequire(requireTarget)
 			return again and second == exported
 		end)
+		exec.Debug = passes(function()
+			local marker = {}
+			local function probeUpvalueHolder()
+				return marker
+			end
+			return debug.getupvalue(probeUpvalueHolder, 1) == marker
+		end)
 		--[[ Live: require hands back the modules the game itself runs, not fresh copies of them. Only
 		BedWars' Knit can show that from here: the game registers every controller in KnitClient's
 		Controllers table, which a re-run copy holds empty. Everywhere else it stays false. An injection
@@ -103,7 +110,7 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			local client = node:FindFirstChild('KnitClient')
 			-- KnitClient waits for its Services folder, so without one this would hang
 			if not (client and node:FindFirstChild('Services')) then return false end
-			if not exec.NativeRequire and type(debug.getupvalue) ~= 'function' then return false end
+			if not exec.NativeRequire and not exec.Debug then return false end
 			local loaded, knit = isolatedRequire(client)
 			return loaded and type(knit) == 'table' and type(knit.Controllers) == 'table' and next(knit.Controllers) ~= nil
 		end)
@@ -186,13 +193,6 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			return got and type(list) == 'table'
 		end)
 		exec.FireSignal = present(firesignal)
-		exec.Debug = passes(function()
-			local marker = {}
-			local function probeUpvalueHolder()
-				return marker
-			end
-			return debug.getupvalue(probeUpvalueHolder, 1) == marker
-		end)
 		exec.Touch = present(firetouchinterest)
 		exec.Prompt = present(fireproximityprompt)
 		exec.Click = present(fireclickdetector)
@@ -10825,16 +10825,16 @@ function knitless.jadeEquipGate(call)
 	end})
 end
 
---[[ The Knit path below needs the debug library or Roblox's own require; Solara and Xeno have
-neither. The owner can take this path on a full executor too, to test it: developer mode plus
-shared.PistonwareForceKnitless. The stand-ins are not the game's modules, so exec.Live is off with
-them, as it already is on Solara, and fieldPatch and netGuard leave them alone. ]]
-knitless.active = (type(debug.getupvalue) ~= 'function' and not (exec.Require and exec.NativeRequire))
+--[[ The Knit path below needs either Roblox's own require or a debug library that actually works
+(exec.Debug: tested, not merely present); Solara and Xeno have neither. The owner can take this path
+on a full executor too, to test it: developer mode plus shared.PistonwareForceKnitless. The stand-ins
+are not the game's modules, so exec.Live is off with them, and fieldPatch and netGuard leave them alone. ]]
+knitless.active = (not exec.Debug and not (exec.Require and exec.NativeRequire))
 	or (shared.PistonwareForceKnitless == true and shared.PistonwareDeveloper == true)
 --[[ The knitless-mode setup, as a function so the bootstrap below can also turn it on after the
-fact: a Xeno build that exposes debug.getupvalue passes the heuristic above as if Knit were
-reachable, yet its require re-runs module code and KnitClient errors, so the Knit path fails and
-the bootstrap falls back to here. ]]
+fact: an executor that reports exec.Debug (a working debug library) passes the gate above as if Knit
+were reachable, yet if its require re-runs module code KnitClient errors, so the Knit path fails and
+the bootstrap falls back to here. A debug-present-but-broken build (exec.Debug false) skips all that. ]]
 local function activateKnitless()
 	knitless.active = true
 	exec.Live = false
@@ -10891,10 +10891,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		knitLoaded, Knit = exec.isolatedRequire(
 			replicatedStorage.rbxts_include.node_modules['@easy-games'].knit.src.Knit.KnitClient, 60
 		)
-		--[[ Knit was expected to load here (the executor reports a debug library or native require)
-		but did not: a Xeno build that exposes debug.getupvalue yet re-runs module code on require, so
-		KnitClient errors. Fall back to the stand-in layer when universal.lua published it, rather than
-		failing the whole payload. Full executors load Knit and never reach this. ]]
+		--[[ Knit was expected to load here (the executor reports exec.Debug, a tested debug library, or
+		native require) but did not: an executor whose require re-runs module code makes KnitClient error.
+		Fall back to the stand-in layer when universal.lua published it, rather than failing the whole
+		payload. Full executors load Knit and never reach this. ]]
 		if not knitLoaded and type(exec.net) == 'table' and type(exec.net.client) == 'function'
 			and type(exec.Promise) == 'table' and type(exec.loadData) == 'function' then
 			knitless.log('KnitClient did not load ('..tostring(Knit)..'); using the stand-in layer instead')

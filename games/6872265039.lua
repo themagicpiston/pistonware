@@ -87,6 +87,13 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			local again, second = isolatedRequire(requireTarget)
 			return again and second == exported
 		end)
+		exec.Debug = passes(function()
+			local marker = {}
+			local function probeUpvalueHolder()
+				return marker
+			end
+			return debug.getupvalue(probeUpvalueHolder, 1) == marker
+		end)
 		--[[ Live: require hands back the modules the game itself runs, not fresh copies of them. Only
 		BedWars' Knit can show that from here: the game registers every controller in KnitClient's
 		Controllers table, which a re-run copy holds empty. Everywhere else it stays false. An injection
@@ -101,7 +108,7 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			local client = node:FindFirstChild('KnitClient')
 			-- KnitClient waits for its Services folder, so without one this would hang
 			if not (client and node:FindFirstChild('Services')) then return false end
-			if not exec.NativeRequire and type(debug.getupvalue) ~= 'function' then return false end
+			if not exec.NativeRequire and not exec.Debug then return false end
 			local loaded, knit = isolatedRequire(client)
 			return loaded and type(knit) == 'table' and type(knit.Controllers) == 'table' and next(knit.Controllers) ~= nil
 		end)
@@ -184,13 +191,6 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			return got and type(list) == 'table'
 		end)
 		exec.FireSignal = present(firesignal)
-		exec.Debug = passes(function()
-			local marker = {}
-			local function probeUpvalueHolder()
-				return marker
-			end
-			return debug.getupvalue(probeUpvalueHolder, 1) == marker
-		end)
 		exec.Touch = present(firetouchinterest)
 		exec.Prompt = present(fireproximityprompt)
 		exec.Click = present(fireclickdetector)
