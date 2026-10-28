@@ -2489,23 +2489,6 @@ else
 	stopExecution(console, 'console.create', consoleResult, consoleResult)
 	return
 end
-do
-	local unsupported = {'xeno'}
-	local executorName = ''
-	pcall(function()
-		executorName = identifyexecutor and identifyexecutor() or ''
-	end)
-	local lowered = tostring(executorName):lower()
-	for _, name in unsupported do
-		if lowered:find(name, 1, true) then
-			local message = 'Unsupported executor ('..tostring(executorName)..'), please look in the #supported-executors channel for more info.'
-			console:SetStatus('ERROR', '#E15046')
-			console:SetLine(message, Palette.Error)
-			stopExecution(console, 'executor.unsupported', message, nil, message)
-			return
-		end
-	end
-end
 logger:bindConsole(console)
 logger:info('console.ready', isReload and 'headless console ready' or 'console ready', {reload = isReload})
 --[[ The key gate is the first thing that runs -- every run, reinjects included -- so the console
