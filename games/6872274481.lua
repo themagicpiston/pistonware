@@ -396,9 +396,14 @@ local run = function(func)
 	if os.clock() - lastBootYield > FRAME_BUDGET then
 		task.wait()
 		lastBootYield = os.clock()
+		--[[ Checked again: a reinject or an unload clears this boot's vape, and it lands during this
+		frame as often as not. The block would then build into the cleared table ("attempt to index
+		nil with 'Blatant'") and leave its connections and hooks behind with nothing to clean them. ]]
+		if shared.vape ~= bootVape then return end
 	end
 	local ok, err = callWithThreadFix(func)
-	if not ok then
+	-- an error from a block whose boot was replaced while it ran is that teardown, not a bug
+	if not ok and shared.vape == bootVape then
 		bufferCall('error', 'bedwars.module', err, {traceback = err})
 	end
 end
