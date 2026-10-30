@@ -595,16 +595,30 @@ do
 	end
 end
 
---[[ Delta (Android) only. BedWars runs Workspace.SignalBehavior = Immediate, so a handler
-connected to a game signal runs INSIDE the write, replication step or Destroy that fired it, and
-Delta's own native code sits in that path. Firing an event, writing a property or calling into
-the executor from in there nests inside it, which is the memory corruption that closes Delta at
-the next place load. So on Delta the handlers below hand their work to store.queueDispatch, and
-this pump runs it on the next Heartbeat, in arrival order. Everywhere else queueDispatch is nil
-and dispatchSafe returns the handler itself, so nothing changes. The store is emptied on
-uninject, so code that runs later reads these through locals taken at load. ]]
+--[[ BedWars runs Workspace.SignalBehavior = Immediate, so a handler connected to a game signal runs
+INSIDE the write, replication step or Destroy that fired it, and the executor's own native code
+sits in that path. Firing an event, writing a property or calling into the executor from in there
+nests inside it, which is the memory corruption that closed Delta at the next place load. So the
+handlers below hand their work to store.queueDispatch, and this pump runs it on the next
+Heartbeat, in arrival order.
+
+This was Delta only. It now covers every executor that takes the Knit path (the Knit gate's own
+test, further down: a working debug library, or Roblox's own require), because crashes are reported
+on Potassium and other full executors too, and the Delta crash came down to this same always-on
+Knit-path code: these handlers and the namecall hook below. Solara and Xeno, which never crashed
+this way, are left out by name (a Xeno build can report a working debug library and then fall back
+to the stand-in layer), and so is the developer force-knitless test, which mirrors them. There
+queueDispatch stays nil and dispatchSafe returns the handler itself, so nothing changes. The store
+is emptied on uninject, so code that runs later reads these through locals taken at load. ]]
 store.deltaExecutor = executorName():lower():find('delta', 1, true) ~= nil
-if store.deltaExecutor then
+do
+	local name = executorName():lower()
+	store.deferDispatch = store.deltaExecutor
+		or ((exec.Debug == true or (exec.Require == true and exec.NativeRequire == true))
+			and not (shared.PistonwareForceKnitless == true and shared.PistonwareDeveloper == true)
+			and name:sub(1, 6) ~= 'solara' and name:sub(1, 4) ~= 'xeno')
+end
+if store.deferDispatch then
 	local pending, count, closed = {}, 0, false
 	local function queueDispatch(fn, ...)
 		if closed then return end
@@ -1460,7 +1474,7 @@ local function updateVelocity(force)
 				for _, v in entitylib.character.Character:GetDescendants() do
 					modifyVelocity(v)
 				end
-				-- Delta: the write goes through the dispatch pump, not inside DescendantAdded, and is
+				-- Deferred dispatch: the write goes through the dispatch pump, not inside DescendantAdded, and is
 				-- skipped if friction was put back in the meantime.
 				local queueDispatch = store.queueDispatch
 				frictionConnection = entitylib.character.Character.DescendantAdded:Connect(queueDispatch and function(v)
@@ -1517,8 +1531,8 @@ local sortmethods = {
 
 run(function()
 	local oldstart = entitylib.start
-	-- Delta: the game-signal handlers below queue their work for the dispatch pump (see
-	-- store.queueDispatch). nil and a pass-through everywhere else.
+	-- Deferred dispatch: the game-signal handlers below queue their work for the dispatch pump (see
+	-- store.queueDispatch). nil and a pass-through on Solara and Xeno.
 	local queueDispatch, dispatchSafe = store.queueDispatch, store.dispatchSafe
 
 	--[[ A Practice room dummy is identified by either of the two markers.
@@ -1607,7 +1621,7 @@ run(function()
 	updated at once, so anything reading Health or Targetable this frame reads the new value. ]]
 	local pendingUpdates = {}
 
-	--[[ Delta: one pump job sends everything queued since the last one, so no thread is made
+	--[[ Deferred dispatch: one pump job sends everything queued since the last one, so no thread is made
 	inside the write. With nothing listening (every module off) it neither raises the thread
 	identity nor fires. ]]
 	local updatesQueued = false
@@ -1664,7 +1678,7 @@ run(function()
 			entitylib.refreshEntity(plr.Character, plr)
 		end
 		entitylib.PlayerConnections[plr] = {
-			-- Delta: both queued for the pump, so a removal still runs ahead of the arrival after it
+			-- Deferred dispatch: both queued for the pump, so a removal still runs ahead of the arrival after it
 			plr.CharacterAdded:Connect(dispatchSafe(function(char)
 				entitylib.refreshEntity(char, plr)
 			end)),
@@ -1796,7 +1810,7 @@ run(function()
 						end
 						localForwarder:Disconnect()
 					end
-					-- Delta: the BindableEvent is fired from the pump, not inside the attribute write
+					-- Deferred dispatch: the BindableEvent is fired from the pump, not inside the attribute write
 					localForwarder = char.AttributeChanged:Connect(dispatchSafe(function(attr)
 						vapeEvents.AttributeChanged:Fire(attr)
 					end))
@@ -1840,7 +1854,7 @@ run(function()
 						end
 					end
 
-					-- Delta: the timer is started from the pump, not inside the Value write
+					-- Deferred dispatch: the timer is started from the pump, not inside the Value write
 					local onInventoryItem = dispatchSafe(function()
 						task.delay(0.1, function()
 							if bedwars.getInventory then
@@ -1901,7 +1915,7 @@ run(function()
 							entity.HumanoidRootPart = hum.RootPart
 							return
 						end
-						-- Delta: queued for the pump. A local removal takes whatever entitylib.character
+						-- Deferred dispatch: queued for the pump. A local removal takes whatever entitylib.character
 						-- is, so it only goes ahead while that is still this entity.
 						if queueDispatch then
 							queueDispatch(function()
@@ -1978,7 +1992,7 @@ run(function()
 		return lplr:GetAttribute('Team') ~= ent.Player:GetAttribute('Team')
 	end
 
-	-- Delta: only the library's PlayerRemoving handler calls this; queued like the character
+	-- Deferred dispatch: only the library's PlayerRemoving handler calls this; queued like the character
 	-- removals, so its disconnects and EntityRemoved do not run inside that dispatch.
 	if queueDispatch then
 		entitylib.removePlayer = dispatchSafe(entitylib.removePlayer)
@@ -2025,7 +2039,7 @@ end
 ensureCharPrimaryPart(lplr.Character)
 -- Registered for cleanup: every reinject used to leave its copy of this listener behind.
 vape:Clean(lplr.CharacterAdded:Connect(store.queueDispatch and store.dispatchSafe(function(c)
-    --[[ Delta: started from the pump and polled rather than WaitForChild, so the PrimaryPart
+    --[[ Deferred dispatch: started from the pump and polled rather than WaitForChild, so the PrimaryPart
     write is never made inside the CharacterAdded dispatch or the root part's ChildAdded. ]]
     task.spawn(function()
         local deadline = os.clock() + 5
@@ -2162,8 +2176,8 @@ namecallGuard.mode = namecallGuard.supported and 'namecall' or nil
 if namecallGuard.supported then
 local getnamecallmethod = getnamecallmethod
 local mt = getrawmetatable(game)
--- Delta: nothing is written at load; see the Delta block after the hook.
-if not store.deltaExecutor then
+-- With deferred dispatch nothing is written at load; see the block after the hook.
+if not store.deferDispatch then
 setreadonly(mt, false)
 end
 --[[
@@ -2184,8 +2198,8 @@ end
 ]]
 local previousNamecallHook = shared.PistonwareNamecallHook
 local oldNamecall = mt.__namecall
--- Delta: worked out when the hook goes in instead (installDelta below).
-if not store.deltaExecutor then
+-- With deferred dispatch: worked out when the hook goes in instead (installDelta below).
+if not store.deferDispatch then
 if previousNamecallHook and oldNamecall == previousNamecallHook and shared.PistonwareOldNamecall then
     oldNamecall = shared.PistonwareOldNamecall
 end
@@ -2259,13 +2273,13 @@ local namecallHook = function(self, ...)
     end
     return oldNamecall(self, ...)
 end
-if not store.deltaExecutor then
+if not store.deferDispatch then
 mt.__namecall = namecallHook
 shared.PistonwareNamecallHook = namecallHook
 setreadonly(mt, true)
 end
 
-if not store.deltaExecutor then
+if not store.deferDispatch then
 vape:Clean(function()
     table.clear(namecallWatch)
     table.clear(namecallObservers)
@@ -2282,12 +2296,13 @@ vape:Clean(function()
     end
 end)
 else
---[[ Delta: the game's __namecall is left alone until something is registered AND a module is on,
-and is then hooked from a Heartbeat step (never from the code that registered) through the
-executor's own hookmetamethod instead of a raw metatable write. Delta has native code of its own
-on the namecall and property-write paths, and its client was dying at the next place load with
-only this file's always-on code running. The raw write is kept only for a Delta build with no
-hookmetamethod.
+--[[ Deferred dispatch (store.deferDispatch: Delta and every other Knit-path executor): the game's
+__namecall is left alone until something is registered AND a module is on, and is then hooked from
+a Heartbeat step (never from the code that registered) through the executor's own hookmetamethod
+instead of a raw metatable write. Executors have native code of their own on the namecall and
+property-write paths; Delta's client was dying at the next place load with only this file's
+always-on code running, and the same code runs on every Knit-path executor. The raw write is kept
+only for an executor with no hookmetamethod.
 
 Reinjects stay one deep, as at load above. hookmetamethod may leave a wrapper in the metatable
 rather than the function it was given, so the previous injection's hook is recognised by what
@@ -12023,7 +12038,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	
 	for _, event in {'MatchEndEvent', 'EntityDeathEvent', 'BedwarsBedBreak', 'BalloonPopped', 'AngelProgress', 'GrapplingHookFunctions'} do
 		if not vape.Connections then return end
-		-- Delta: re-broadcast from the dispatch pump, not inside the remote's own dispatch.
+		-- Deferred dispatch: re-broadcast from the dispatch pump, not inside the remote's own dispatch.
 		-- Made here, at load, because the store is emptied on uninject.
 		local forward = store.dispatchSafe(function(...)
 			vapeEvents[event]:Fire(...)
@@ -12034,7 +12049,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 	
 	-- Named rather than picked out with select, which walks the arguments again for every field.
-	-- Delta: fired from the dispatch pump, as above.
+	-- Deferred dispatch: fired from the dispatch pump, as above.
 	vape:Clean(bedwars.ZapNetworking.EntityDamageEventZap.On(store.dispatchSafe(function(entityInstance, damage, damageType, fromPosition, fromEntity, knockbackMultiplier, knockbackId, attackData, ...)
 		vapeEvents.EntityDamageEvent:Fire({
 			entityInstance = entityInstance,
@@ -12088,7 +12103,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 
 	--[[ optimized ZapNetworking hook ]]
-	-- Delta: run from the dispatch pump, so the reads and the defer are not made inside Zap's dispatch
+	-- Deferred dispatch: run from the dispatch pump, so the reads and the defer are not made inside Zap's dispatch
 	vape:Clean(bedwars.ZapNetworking.ProjectileLaunchZap.On(store.dispatchSafe(function(origin, projectileType, tool, shooter)
 		local launchedAt = os.clock()
 		local shooterPosition, shooterVelocity
@@ -12129,7 +12144,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end)))
 
 	local projectileNames = {arrow = true, snowball = true}
-	-- Delta: run from the dispatch pump, so no thread is started inside ChildAdded
+	-- Deferred dispatch: run from the dispatch pump, so no thread is started inside ChildAdded
 	vape:Clean(workspace.ChildAdded:Connect(store.dispatchSafe(function(child)
 		if projectileNames[child.Name:lower()] then
 			task.defer(function()
@@ -12151,7 +12166,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end)))
 	
 	for _, event in {'PlaceBlockEvent', 'BreakBlockEvent'} do
-		-- Delta: fired from the dispatch pump, not inside Zap's dispatch
+		-- Deferred dispatch: fired from the dispatch pump, not inside Zap's dispatch
 		vape:Clean(bedwars.ZapNetworking[event..'Zap'].On(store.dispatchSafe(function(...)
 			local data = {
 				blockRef = {
