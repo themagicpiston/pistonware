@@ -757,28 +757,63 @@ local TargetStrafeVector, SpiderShift, WaypointFolder
 local Spider = {Enabled = false}
 local Phase = {Enabled = false}
 
---[[ The loader's look, for the boxes this file draws on the HUD, as the TP Down bar and the AutoBank
-box already are: the loader window's near-black with a tenth of its orange through it, part
-see-through, a soft orange border and rounded corners. Text is the menu's Inter in the loader's light
-grey, labels in its secondary grey, and what stands out in its orange. ]]
+--[[ The overlays' look, for the boxes this file draws on the HUD: Target Info's card. A near-black
+card, mostly opaque, with a faint white edge and rounded corners; text in the Mod Overlay's Inter,
+values bright and labels in a muted grey. The orange is kept only for what is lit (a pressed key). ]]
 local loaderStyle = {
 	Orange = Color3.fromRGB(240, 122, 31),
-	Text = Color3.fromRGB(230, 230, 230),
-	SubText = Color3.fromRGB(163, 161, 157),
+	Text = Color3.fromRGB(240, 240, 240),
+	SubText = Color3.fromRGB(150, 150, 150),
 	Pressed = Color3.fromRGB(20, 20, 20),
-	Transparency = 0.3
+	Background = Color3.fromRGB(16, 16, 16),
+	Transparency = 0.15,
+	Edge = Color3.new(1, 1, 1),
+	EdgeTransparency = 0.9
 }
-loaderStyle.Background = Color3.fromRGB(10, 10, 10):Lerp(loaderStyle.Orange, 0.1)
--- The background and the orange as colour-slider defaults, so a box with colour options starts on them.
+-- The background and the edge as colour-slider defaults, so a box with colour options starts on them.
 loaderStyle.Hue, loaderStyle.Sat, loaderStyle.Value = loaderStyle.Background:ToHSV()
-loaderStyle.OrangeHue, loaderStyle.OrangeSat, loaderStyle.OrangeValue = loaderStyle.Orange:ToHSV()
-loaderStyle.OrangeHex = '#'..loaderStyle.Orange:ToHex()
+loaderStyle.EdgeHue, loaderStyle.EdgeSat, loaderStyle.EdgeValue = loaderStyle.Edge:ToHSV()
 loaderStyle.SubHex = '#'..loaderStyle.SubText:ToHex()
 
--- Props for a box's background colour option, defaulting to the loader box.
+--[[ The look before this one: the loader's near-black with a tenth of its orange, at 70%, and a soft
+orange edge at 45%. A profile saves every option, so a new default never reaches anyone who saved
+the old one; a colour still on exactly the old default is drawn with today's instead. ]]
+local LEGACY_BACKGROUND = Color3.fromRGB(10, 10, 10):Lerp(loaderStyle.Orange, 0.1)
+function loaderStyle.isLegacy(hue, sat, val, opacity, oldColor, oldOpacity)
+	local h, s, v = oldColor:ToHSV()
+	return math.abs(hue - h) < 0.01 and math.abs(sat - s) < 0.01 and math.abs(val - v) < 0.01
+		and math.abs(opacity - oldOpacity) < 0.01
+end
+function loaderStyle.background(hue, sat, val, opacity)
+	if loaderStyle.isLegacy(hue, sat, val, opacity, LEGACY_BACKGROUND, 0.7) then
+		return loaderStyle.Background, 1 - loaderStyle.Transparency
+	end
+	return Color3.fromHSV(hue, sat, val), opacity
+end
+function loaderStyle.edge(hue, sat, val, opacity)
+	if loaderStyle.isLegacy(hue, sat, val, opacity, loaderStyle.Orange, 0.45) then
+		return loaderStyle.Edge, 1 - loaderStyle.EdgeTransparency
+	end
+	return Color3.fromHSV(hue, sat, val), opacity
+end
+-- A background colour option's colour and opacity as drawn, for code that reads the option directly.
+function loaderStyle.colorOf(option)
+	return loaderStyle.background(option.Hue, option.Sat, option.Value, option.Opacity)
+end
+
+-- Props for a box's background colour option, defaulting to the card. Its Function is handed the
+-- colour as drawn, so an old saved default arrives as the card.
 function loaderStyle.backgroundOption(props)
 	props.DefaultHue, props.DefaultSat, props.DefaultValue = loaderStyle.Hue, loaderStyle.Sat, loaderStyle.Value
-	props.DefaultOpacity = 0.7
+	props.DefaultOpacity = 1 - loaderStyle.Transparency
+	local apply = props.Function
+	if apply then
+		props.Function = function(hue, sat, val, opacity, ...)
+			local colour, alpha = loaderStyle.background(hue, sat, val, opacity)
+			local h, s, v = colour:ToHSV()
+			return apply(h, s, v, alpha, ...)
+		end
+	end
 	return props
 end
 
@@ -787,13 +822,13 @@ function loaderStyle.box(obj, radius)
 	obj.BackgroundTransparency = loaderStyle.Transparency
 	obj.BorderSizePixel = 0
 	local corner = Instance.new('UICorner')
-	corner.CornerRadius = radius or UDim.new(0, 8)
+	corner.CornerRadius = radius or UDim.new(0, 12)
 	corner.Parent = obj
 	local stroke = Instance.new('UIStroke')
 	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Color = loaderStyle.Orange
+	stroke.Color = loaderStyle.Edge
 	stroke.Thickness = 1
-	stroke.Transparency = 0.55
+	stroke.Transparency = loaderStyle.EdgeTransparency
 	stroke.Parent = obj
 	return stroke, corner
 end
@@ -821,7 +856,7 @@ function loaderStyle.unit(value, unit)
 	return value..' <font color="'..loaderStyle.SubHex..'">'..unit..'</font>'
 end
 
--- One Legit HUD reading (FPS, Ping, Clock...): a loader box filling its widget, the value centred on it.
+-- One Legit HUD reading (FPS, Ping, Clock...): a card filling its widget, the value centred on it.
 function loaderStyle.reading(parent, text)
 	local label = Instance.new('TextLabel')
 	label.Size = UDim2.fromScale(1, 1)
@@ -5265,9 +5300,6 @@ run(function()
 		Max = RANGE_MAX,
 		Default = RANGE_MAX,
 		Suffix = function(val)
-			if val >= RANGE_MAX then
-				return 'studs (no limit)'
-			end
 			return val == 1 and 'stud' or 'studs'
 		end,
 		Tooltip = 'No pointer is drawn for players further away than this.\nAll the way up is no limit, like Name Tags.'
@@ -7301,7 +7333,7 @@ run(function()
 			end
 		end
 	})
-	-- The loader's box, with the cross as two hairlines in its secondary grey.
+	-- The card, with the cross as two hairlines in its muted grey.
 	bkg = Instance.new('Frame')
 	bkg.Size = UDim2.fromOffset(216, 216)
 	bkg.Position = UDim2.fromOffset(2, 2)
@@ -7335,7 +7367,7 @@ run(function()
 		Function = function(callback)
 			bkg.BackgroundTransparency = callback and loaderStyle.Transparency or 1
 			bar.BackgroundTransparency = callback and 0 or 1
-			stroke.Transparency = callback and 0.55 or 1
+			stroke.Transparency = callback and loaderStyle.EdgeTransparency or 1
 		end
 	})
 	Radar:CreateToggle({
@@ -7516,7 +7548,7 @@ run(function()
 	local infostroke
 	
 	-- The title in the loader's orange, and each entry's name in its secondary grey.
-	local TITLE = '<font color="'..loaderStyle.OrangeHex..'"><b>Session Info</b></font>'
+	local TITLE = '<b>Session Info</b>'
 	local KEY = '<font color="'..loaderStyle.SubHex..'">%s:</font> %s'
 
 	SessionInfo = vape:CreateOverlay({
@@ -7596,7 +7628,7 @@ run(function()
 			end
 		end
 	})
-	-- The loader's box, built before the options: the Border toggle reaches its stroke as it is made.
+	-- The card, built before the options: the Border toggle reaches its stroke as it is made.
 	infoholder = Instance.new('Frame')
 	infoholder.Parent = SessionInfo.Children
 	infostroke = loaderStyle.box(infoholder)
@@ -7667,13 +7699,14 @@ run(function()
 	})
 	BorderColor = SessionInfo:CreateColorSlider({
 		Name = 'Border Color',
-		DefaultHue = loaderStyle.OrangeHue,
-		DefaultSat = loaderStyle.OrangeSat,
-		DefaultValue = loaderStyle.OrangeValue,
-		DefaultOpacity = 0.45,
+		DefaultHue = loaderStyle.EdgeHue,
+		DefaultSat = loaderStyle.EdgeSat,
+		DefaultValue = loaderStyle.EdgeValue,
+		DefaultOpacity = 1 - loaderStyle.EdgeTransparency,
 		Function = function(hue, sat, val, opacity)
-			infostroke.Color = Color3.fromHSV(hue, sat, val)
-			infostroke.Transparency = 1 - opacity
+			local colour, alpha = loaderStyle.edge(hue, sat, val, opacity)
+			infostroke.Color = colour
+			infostroke.Transparency = 1 - alpha
 		end,
 		Darker = true
 	})
@@ -8250,7 +8283,7 @@ run(function()
 						billboard.Adornee = workspace.Terrain
 						billboard.StudsOffsetWorldSpace = Vector3.new(unpack(split[1]:split(',')))
 						billboard.AlwaysOnTop = true
-						-- A small loader box; its border goes with the background when that is cleared.
+						-- A small card; its border goes with the background when that is cleared.
 						local tag = Instance.new('TextLabel')
 						local stroke = loaderStyle.box(tag, UDim.new(0, 6))
 						stroke.Enabled = Background.Value < 1
@@ -8338,7 +8371,7 @@ run(function()
 				Waypoints:Toggle()
 			end
 		end,
-		Default = loaderStyle.Transparency,
+		Default = 0.3,
 		Min = 0,
 		Max = 1,
 		Decimal = 10
@@ -10509,9 +10542,10 @@ run(function()
 		local key = Instance.new('Frame')
 		key.Size = space and UDim2.new(0, 110, 0, 24) or UDim2.new(0, 34, 0, 36)
 		loaderStyle.box(key)
-		key.BackgroundColor3 = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-		key.BackgroundTransparency = 1 - Color.Opacity
-		loaderStyle.border(key, Color.Opacity)
+		local colour, opacity = loaderStyle.colorOf(Color)
+		key.BackgroundColor3 = colour
+		key.BackgroundTransparency = 1 - opacity
+		loaderStyle.border(key, opacity)
 		key.Position = pos
 		key.Name = keybutton.Name
 		key.Parent = holder
@@ -10548,10 +10582,11 @@ run(function()
 			tween:Cancel()
 		end
 		local textColor = pressed and loaderStyle.Pressed or loaderStyle.Text
+		local colour, opacity = loaderStyle.colorOf(Color)
 		key.Tweens = {
 			tweenService:Create(key.Key, TweenInfo.new(0.1), {
-				BackgroundColor3 = pressed and loaderStyle.Orange or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value),
-				BackgroundTransparency = pressed and 0 or 1 - Color.Opacity
+				BackgroundColor3 = pressed and loaderStyle.Orange or colour,
+				BackgroundTransparency = pressed and 0 or 1 - opacity
 			}),
 			tweenService:Create(key.Text, TweenInfo.new(0.1), {TextColor3 = textColor})
 		}

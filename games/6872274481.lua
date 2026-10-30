@@ -773,6 +773,36 @@ function loaderStyle.box(obj, radius)
 	return loaderStyle.stroke(obj)
 end
 
+--[[ The draggable overlays' look (Reach Display here; universal.lua draws the rest the same way):
+Target Info's card. A near-black card, mostly opaque, with a faint white edge, values bright and
+labels muted. Fields on loaderStyle rather than locals: this chunk is near the local cap. ]]
+loaderStyle.Card = {
+	Background = Color3.fromRGB(16, 16, 16),
+	Transparency = 0.15,
+	Text = Color3.fromRGB(240, 240, 240),
+	SubText = Color3.fromRGB(150, 150, 150),
+	Edge = Color3.new(1, 1, 1),
+	EdgeTransparency = 0.9
+}
+loaderStyle.Card.Hue, loaderStyle.Card.Sat, loaderStyle.Card.Value = loaderStyle.Card.Background:ToHSV()
+loaderStyle.Card.SubHex = '#'..loaderStyle.Card.SubText:ToHex()
+function loaderStyle.card(obj, radius)
+	obj.BackgroundColor3 = loaderStyle.Card.Background
+	obj.BackgroundTransparency = loaderStyle.Card.Transparency
+	obj.BorderSizePixel = 0
+	loaderStyle.corner(obj, radius or 12)
+	return loaderStyle.stroke(obj, loaderStyle.Card.Edge, loaderStyle.Card.EdgeTransparency)
+end
+--[[ A colour option still saved on the loader box's old default (its background at 70%) is drawn as
+the card: a profile saves every option, so a new default never reaches anyone who saved the old. ]]
+function loaderStyle.cardColor(hue, sat, val, opacity)
+	if math.abs(hue - loaderStyle.Hue) < 0.01 and math.abs(sat - loaderStyle.Sat) < 0.01
+		and math.abs(val - loaderStyle.Value) < 0.01 and math.abs(opacity - (1 - loaderStyle.Transparency)) < 0.01 then
+		return loaderStyle.Card.Background, 1 - loaderStyle.Card.Transparency
+	end
+	return Color3.fromHSV(hue, sat, val), opacity
+end
+
 -- Inter through the font registry, so the label follows it if it finishes loading late.
 function loaderStyle.text(label, role, textColor)
 	label.TextColor3 = textColor or loaderStyle.Text
@@ -23544,7 +23574,7 @@ run(function()
 	local label
 
 	local function unit(value)
-		return tostring(value)..' <font color="'..loaderStyle.SubHex..'">studs</font>'
+		return tostring(value)..' <font color="'..loaderStyle.Card.SubHex..'">studs</font>'
 	end
 
 	ReachDisplay = vape.Legit:CreateModule({
@@ -23566,29 +23596,30 @@ run(function()
 		Blacklist = 'Gotham',
 		Function = function()
 			if label then
-				loaderStyle.text(label, 'SemiBold')
+				loaderStyle.text(label, 'SemiBold', loaderStyle.Card.Text)
 			end
 		end
 	})
 	ReachDisplay:CreateColorSlider({
 		Name = 'Color',
-		DefaultHue = loaderStyle.Hue,
-		DefaultSat = loaderStyle.Sat,
-		DefaultValue = loaderStyle.Value,
-		DefaultOpacity = 1 - loaderStyle.Transparency,
+		DefaultHue = loaderStyle.Card.Hue,
+		DefaultSat = loaderStyle.Card.Sat,
+		DefaultValue = loaderStyle.Card.Value,
+		DefaultOpacity = 1 - loaderStyle.Card.Transparency,
 		Function = function(hue, sat, val, opacity)
-			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-			label.BackgroundTransparency = 1 - opacity
+			local colour, alpha = loaderStyle.cardColor(hue, sat, val, opacity)
+			label.BackgroundColor3 = colour
+			label.BackgroundTransparency = 1 - alpha
 		end
 	})
-	-- The loader's box, with the reading in its light grey and the unit in its secondary grey.
+	-- The card, with the reading bright and the unit muted.
 	label = Instance.new('TextLabel')
 	label.Size = UDim2.fromScale(1, 1)
-	loaderStyle.box(label)
+	loaderStyle.card(label)
 	label.RichText = true
 	label.TextSize = 15
 	label.Text = unit('0.00')
-	loaderStyle.text(label, 'SemiBold')
+	loaderStyle.text(label, 'SemiBold', loaderStyle.Card.Text)
 	label.Parent = ReachDisplay.Children
 end)
 	

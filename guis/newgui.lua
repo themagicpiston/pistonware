@@ -6819,13 +6819,13 @@ end
 
 --[[
 	The key footer: the old Pistonware banner with the time left on the key, back as the loader's
-	bottom row. It runs along the bottom of the menu window in the loader's console look -- its
+	bottom row. It runs along the bottom of the menu window in the loader's colours -- its
 	near-black window, grey border and 10 px corners, the >_ badge, the status chevron and word, the
 	line in the loader's footer grey -- with the version and a [discord] link on the right, where the
-	loader keeps its opt-out. The lines are the old ones word for word; a
-	window too narrow for them (a phone in portrait) gets a short form. Built with ui.new rather
-	than ui.text so the Inter restyle leaves the console face alone, and inside the window so the
-	window's phone zoom applies to it. The expiry is read on every refresh: the loader stores it.
+	loader keeps its opt-out. Its text is in the Mod Overlay's Inter; only the >_ badge keeps the
+	console face. The lines are the old ones word for word; a window too narrow for them (a phone in
+	portrait) gets a short form. Built inside the window so the window's phone zoom applies to it.
+	The expiry is read on every refresh: the loader stores it.
 ]]
 function build.keyFooter()
 	local main = vape.Categories.Main
@@ -6835,6 +6835,9 @@ function build.keyFooter()
 
 	-- The loader's own palette (its Window, Border, Badge, Accent, Footer and Line), not the menu theme.
 	local CODE = Font.fromEnum(Enum.Font.Code)
+	local INTER = fonts.face('Medium')
+	-- Potassium measures Inter at about 0.83 of its drawn width, so a fit is checked with room to spare.
+	local INTER_MEASURE = 1.2
 	local ORANGE = Color3.fromRGB(240, 122, 31)
 	local GREY = Color3.fromRGB(110, 110, 110)
 	local LINE = Color3.fromRGB(237, 237, 237)
@@ -6871,7 +6874,7 @@ function build.keyFooter()
 		Name = 'KeyDuration',
 		BackgroundTransparency = 1,
 		ClipsDescendants = true,
-		FontFace = CODE,
+		FontFace = INTER,
 		Position = UDim2.fromOffset(TEXT_LEFT, 0),
 		RichText = true,
 		Size = UDim2.new(1, -200, 1, 0),
@@ -6896,7 +6899,7 @@ function build.keyFooter()
 		Name = 'Version',
 		AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundTransparency = 1,
-		FontFace = CODE,
+		FontFace = INTER,
 		LayoutOrder = 2,
 		Size = UDim2.fromOffset(0, 22),
 		Text = 'v'..vape.Version,
@@ -6909,7 +6912,7 @@ function build.keyFooter()
 		AutoButtonColor = false,
 		AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundTransparency = 1,
-		FontFace = CODE,
+		FontFace = INTER,
 		LayoutOrder = 1,
 		Size = UDim2.fromOffset(0, 22),
 		Text = '[discord]',
@@ -6917,6 +6920,10 @@ function build.keyFooter()
 		TextSize = 14,
 		ZIndex = 2
 	}, corner)
+	-- In the font registry, as ui.text's labels are, so they follow Inter if it finishes loading late.
+	for _, object in {label, discord, corner:FindFirstChild('Version')} do
+		fonts.Registry[object] = {Role = 'Medium'}
+	end
 	-- Lit under the pointer, never on a touch screen (ui.hover).
 	ui.hover(discord, function()
 		discord.TextColor3 = LINE
@@ -6964,13 +6971,13 @@ function build.keyFooter()
 		local word, hex, chevron, lead, value, short = state()
 		local cornerWidth = 120
 		pcall(function()
-			cornerWidth = getfontbounds('v'..vape.Version, 14, CODE).X + getfontbounds('[discord]', 14, CODE).X + 14
+			cornerWidth = (getfontbounds('v'..vape.Version, 14, INTER).X + getfontbounds('[discord]', 14, INTER).X) * INTER_MEASURE + 14
 		end)
 		local room = window.Size.X.Offset - TEXT_LEFT - cornerWidth - 16 - 12
 		label.Size = UDim2.new(1, -(TEXT_LEFT + cornerWidth + 16 + 12), 1, 0)
 		local fits = window.Size.X.Offset >= 700
 		pcall(function()
-			fits = getfontbounds(chevron..' '..(word and word..'  ' or '')..lead..value, 14, CODE).X <= room
+			fits = getfontbounds(chevron..' '..(word and word..'  ' or '')..lead..value, 14, INTER).X * INTER_MEASURE <= room
 		end)
 		local body = fits and lead..(value ~= '' and '<font color="#EDEDED">'..value..'</font>' or '')
 			or (value ~= '' and '<font color="#EDEDED">'..short..'</font>' or short)
@@ -14070,8 +14077,8 @@ components.Overlay = function(props, children, api)
 	window = ui.new('TextButton', {
 		AnchorPoint = fixed and Vector2.new(1, 0) or Vector2.zero,
 		AutoButtonColor = false,
-		BackgroundColor3 = Color3.fromRGB(38, 38, 38),
-		BackgroundTransparency = fixed and 1 or 0,
+		BackgroundColor3 = Color3.fromRGB(16, 16, 16),
+		BackgroundTransparency = fixed and 1 or 0.15,
 		BorderSizePixel = 0,
 		Name = props.Name..'Overlay',
 		Position = fixed and UDim2.fromScale(1, 0) or ui.hudPlace('Overlay', component.HudSlot),
@@ -14086,41 +14093,22 @@ components.Overlay = function(props, children, api)
 		ui.hudScale(window)
 	end
 	ui.corner(window, 10)
-	--[[ The handle it is dragged by while the menu is open is the loader's titlebar: its grey bar and
-	border, the >_ badge in its orange, the name in its console face, and the pin as one of its
-	window controls, grey until pinned. ]]
-	local CONSOLE_FONT = Font.fromEnum(Enum.Font.Code)
-	local LOADER_ORANGE, LOADER_GLYPH = Color3.fromRGB(240, 122, 31), Color3.fromRGB(190, 190, 190)
-	local stroke = ui.stroke(window, Color3.fromRGB(52, 52, 52), 1, 0)
+	--[[ The handle it is dragged by while the menu is open is drawn like the Target Info card: a
+	near-black card, mostly opaque, with a faint white edge, the name in the Mod Overlay's Inter, and
+	the pin at its right, grey until pinned. ]]
+	local PIN_ON, PIN_OFF = Color3.fromRGB(240, 122, 31), Color3.fromRGB(150, 150, 150)
+	local stroke = ui.stroke(window, Color3.new(1, 1, 1), 1, 0.9)
 	stroke.Enabled = not fixed
 	if not fixed then
 		addDragHandler(window)
 	end
-	local badge = ui.new('TextLabel', {
-		BackgroundColor3 = Color3.fromRGB(22, 22, 22),
-		BorderSizePixel = 0,
-		FontFace = CONSOLE_FONT,
-		Position = UDim2.fromOffset(7, 6),
-		Size = UDim2.fromOffset(24, 20),
-		Text = '>_',
-		TextColor3 = LOADER_ORANGE,
-		TextSize = 12,
-		Visible = not fixed
-	}, window)
-	ui.corner(badge, 5)
-	local title = ui.new('TextLabel', {
-		BackgroundTransparency = 1,
-		FontFace = CONSOLE_FONT,
-		Position = UDim2.fromOffset(39, 0),
-		Size = UDim2.new(1, -72, 0, 32),
-		Text = display,
-		TextColor3 = Color3.fromRGB(232, 232, 232),
-		TextSize = 14,
+	local title = ui.text(window, {Text = display, TextSize = 14, Weight = 'SemiBold', Color = Color3.fromRGB(240, 240, 240), Props = {
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -44, 0, 32),
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		TextXAlignment = Enum.TextXAlignment.Left,
 		Visible = not fixed
-	}, window)
-	local pin = ui.icon(window, 'pin', 14, {Class = 'TextButton', Color = LOADER_GLYPH, Props = {
+	}})
+	local pin = ui.icon(window, 'pin', 14, {Class = 'TextButton', Color = PIN_OFF, Props = {
 		AnchorPoint = Vector2.new(1, 0.5), Name = 'Pin', Position = UDim2.new(1, -8, 0, 16), Visible = not fixed
 	}})
 	addTooltip(pin, 'Pin: keep it on screen with the menu closed')
@@ -14181,7 +14169,7 @@ components.Overlay = function(props, children, api)
 	function component:Pin()
 		if fixed then return end
 		self.Pinned = not self.Pinned
-		pin.TextColor3 = self.Pinned and LOADER_ORANGE or LOADER_GLYPH
+		pin.TextColor3 = self.Pinned and PIN_ON or PIN_OFF
 		vape:RequestSave()
 	end
 
@@ -14206,16 +14194,14 @@ components.Overlay = function(props, children, api)
 
 		if clickgui.Visible then
 			window.Size = UDim2.fromOffset(window.Size.X.Offset, 32)
-			window.BackgroundTransparency = 0
+			window.BackgroundTransparency = 0.15
 			stroke.Enabled = true
-			badge.Visible = true
 			title.Visible = true
 			pin.Visible = true
 		else
 			window.Size = UDim2.fromOffset(window.Size.X.Offset, 0)
 			window.BackgroundTransparency = 1
 			stroke.Enabled = false
-			badge.Visible = false
 			title.Visible = false
 			pin.Visible = false
 		end
@@ -15241,16 +15227,30 @@ components.TwoSlider = function(props, children, api)
 		Size = UDim2.new(0.5, 0, 1, 0),
 		Text = ''
 	}, twoslider)
-	--[[ Each knob's value in a hint over it while the track is hovered (with a mouse) or dragged (a
-	finger too), as the plain slider's: built the first time they show. ]]
-	local tipMin, tipMax, hoverEntry
-	local hovering, dragging = false, false
-	local function placeTip(tip, value, appearing)
+	--[[ One hint, as Slinky's (the owner's 2026-10-30 recording): while the track is hovered (with a
+	mouse) it gives the whole range, '4.5 - 7.6 blocks' (one value when the ends meet), over the
+	middle of the fill; while a knob is dragged (a finger too) it gives that knob's value over that
+	knob, and the range again once it is let go. It sits over the knobs where they are drawn, so it
+	rides along as they glide. Built the first time it shows. ]]
+	local tip, hoverEntry, follow
+	-- 'Min' or 'Max' while that knob is held, nil otherwise.
+	local hovering, dragging = false, nil
+	local function tipText()
+		if dragging then
+			return sliderText(dragging == 'Max' and component.ValueMax or component.ValueMin, props.Suffix, props.Decimal)
+		end
+		local low, high = math.min(component.ValueMin, component.ValueMax), math.max(component.ValueMin, component.ValueMax)
+		if low == high then
+			return sliderText(low, props.Suffix, props.Decimal)
+		end
+		return sliderText(low, nil, props.Decimal)..' - '..sliderText(high, props.Suffix, props.Decimal)
+	end
+	local function placeTip(appearing)
 		local corner, size = holder.AbsolutePosition, holder.AbsoluteSize
-		-- Over its knob, wherever that is drawn.
-		local where = tip == tipMax and drawn.Max or tip == tipMin and drawn.Min or sliderFraction(value)
+		local low, high = knob.Position.X.Scale, knobmax.Position.X.Scale
+		local where = dragging == 'Max' and high or dragging == 'Min' and low or (low + high) / 2
 		local centre = Vector2.new(corner.X + where * size.X, corner.Y + size.Y / 2)
-		-- Only while the knob itself is showing: its row open and on its tab, and inside its page.
+		-- Only while the knobs themselves are showing: the row open and on its tab, and inside its page.
 		if not ui.rowShowing(holder, centre) then
 			ui.tipHide(tip)
 			return
@@ -15263,36 +15263,42 @@ components.TwoSlider = function(props, children, api)
 	end
 	local function showTips()
 		if hovering or dragging then
-			if not tipMin then
-				tipMin, tipMax = ui.newTip('SliderTip', true), ui.newTip('SliderTip', true)
-				-- Asked again when the page scrolls under a still pointer (ui.placeTips), once for both.
-				local function place()
+			if not tip then
+				tip = ui.newTip('SliderTip', true)
+				-- Asked again when the page scrolls under a still pointer (ui.placeTips).
+				tip.Place = function()
 					if hoverEntry then
 						local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
 						hoverEntry.Check(ui.within(point, hit.AbsolutePosition, hit.AbsoluteSize))
 					end
-					if tipMin.Label.Visible then
-						placeTip(tipMin, component.ValueMin, false)
-					end
-					if tipMax.Label.Visible then
-						placeTip(tipMax, component.ValueMax, false)
+					if tip.Label.Visible then
+						placeTip(false)
 					end
 				end
-				tipMin.Place, tipMax.Place = place, place
 				pcall(function()
 					holder.Destroying:Connect(function()
-						tipMin.Label:Destroy()
-						tipMax.Label:Destroy()
+						tip.Label:Destroy()
 					end)
 				end)
 			end
-			tipMin.Label.Text = sliderText(component.ValueMin, props.Suffix, props.Decimal)
-			tipMax.Label.Text = sliderText(component.ValueMax, props.Suffix, props.Decimal)
-			placeTip(tipMin, component.ValueMin, not tipMin.Label.Visible)
-			placeTip(tipMax, component.ValueMax, not tipMax.Label.Visible)
-		elseif tipMin then
-			ui.tipHide(tipMin)
-			ui.tipHide(tipMax)
+			tip.Label.Text = tipText()
+			placeTip(not tip.Label.Visible)
+		elseif tip then
+			ui.tipHide(tip)
+		end
+	end
+	--[[ While a knob is held the hint is put over it every frame, so it follows the knob's glide; a
+	frame step, never a handler on the knob's own Position. ]]
+	local function setFollow(on)
+		if on and not follow then
+			follow = runService.RenderStepped:Connect(function()
+				if tip and tip.Label.Visible then
+					placeTip(false)
+				end
+			end)
+		elseif not on and follow then
+			follow:Disconnect()
+			follow = nil
 		end
 	end
 	props.Function = props.Function or function() end
@@ -15343,17 +15349,31 @@ components.TwoSlider = function(props, children, api)
 		}
 	end
 
-	--[[ Slinky moves a knob in the frame its value changes, with no easing; one being dragged is drawn
-	under the pointer, 1:1 as the plain slider's, whatever step its value is on. ]]
-	local function drawKnob(isMax, where)
+	--[[ A programmatic change moves a knob in the frame its value changes, with no easing. One being
+	dragged glides to where the pointer has it, as Slinky's does (the owner's 2026-10-30 recording): a
+	click on the track slides it there in about a tenth of a second, and a fast drag trails the
+	pointer by as much. ]]
+	local GLIDE = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local function drawKnob(isMax, where, glide)
 		drawn[isMax and 'Max' or 'Min'] = where
 		local low, high = drawn.Min, drawn.Max
-		fill.Position = UDim2.fromScale(math.min(low, high), 0)
-		fill.Size = UDim2.fromScale(math.abs(high - low), 1)
-		knob.Position = UDim2.fromScale(low, 0.5)
-		knobmax.Position = UDim2.fromScale(high, 0.5)
-		-- The hints follow the knobs in the same frame.
-		if tipMin and (tipMin.Label.Visible or tipMax.Label.Visible) then
+		local goals = {
+			[fill] = {Position = UDim2.fromScale(math.min(low, high), 0), Size = UDim2.fromScale(math.abs(high - low), 1)},
+			[knob] = {Position = UDim2.fromScale(low, 0.5)},
+			[knobmax] = {Position = UDim2.fromScale(high, 0.5)}
+		}
+		for object, goal in goals do
+			if glide then
+				tween:Tween(object, GLIDE, goal)
+			else
+				tween:Cancel(object)
+				for key, value in goal do
+					object[key] = value
+				end
+			end
+		end
+		-- The hint's words change in the same frame; where it sits follows the knobs as they are drawn.
+		if tip and tip.Label.Visible then
 			showTips()
 		end
 	end
@@ -15368,7 +15388,7 @@ components.TwoSlider = function(props, children, api)
 		maxvalue.Text = tostring(self.ValueMax)
 		minvalue.Text = tostring(self.ValueMin)
 
-		drawKnob(isMax, type(position) == 'number' and math.clamp(position, 0, 1) or sliderFraction(value))
+		drawKnob(isMax, type(position) == 'number' and math.clamp(position, 0, 1) or sliderFraction(value), type(position) == 'number')
 
 		props.Function(self.ValueMin, self.ValueMax, isMax)
 		vape:RequestSave()
@@ -15385,22 +15405,30 @@ components.TwoSlider = function(props, children, api)
 			ui.startSliderEdit(box, maxCheck and component.ValueMax or component.ValueMin)
 			return
 		end
-		dragging = true
+		dragging = maxCheck and 'Max' or 'Min'
 		showTips()
+		setFollow(true)
 		trackDrag(input, holder, function(position)
 			local value = math.floor((props.Min + (props.Max - props.Min) * position) * props.Decimal) / props.Decimal
 			-- Every pointer move lands here: the knob goes under it, and only a new step is a new value.
 			if value ~= component[maxCheck and 'ValueMax' or 'ValueMin'] then
 				component:SetValue(maxCheck, value, position)
 			else
-				drawKnob(maxCheck, position)
+				drawKnob(maxCheck, position, true)
 			end
 		end, function()
-			dragging = false
+			dragging = nil
+			setFollow(false)
 			showTips()
+			-- Put over the knobs again once they have finished gliding to where the drag left them.
+			task.delay(GLIDE.Time + 0.02, function()
+				if tip and tip.Label.Visible and not dragging then
+					placeTip(false)
+				end
+			end)
 		end)
 	end)
-	-- The hints' hover zone: the track's length, 10.5 px either side of its centre line.
+	-- The hint's hover zone: the track's length, 10.5 px either side of its centre line.
 	hoverEntry = ui.hover(hit, function()
 		hovering = true
 		showTips()

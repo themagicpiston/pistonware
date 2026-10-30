@@ -747,6 +747,8 @@ local Strings = {
 	expired         = 'That key has expired - renew it, then submit it again.',
 	time_left       = '%s left',
 	lifetime        = 'lifetime',
+	license_expires = 'Your license expires in %s',
+	license_lifetime = 'Your license never expires',
 	banned          = 'Key is blacklisted.',
 	incorrect       = 'Key is incorrect or has been deleted.',
 	invalid_format  = 'Invalid key format.',
@@ -1528,7 +1530,9 @@ local AsciiLineHeight = 18
 pushes them (and the bottom of the window) down instead of colliding with them. ]]
 local AsciiTop = TitleBarHeight + 16
 local StatusY = AsciiTop + #PistonFace * AsciiLineHeight + 16
-local LineY = StatusY + 32
+-- How long the key has left, under the status once it is known (SetLicense), as Slinky's loader has it.
+local LicenseY = StatusY + 32
+local LineY = LicenseY + 28
 local AnswersY = LineY + 30
 local WindowHeight = AnswersY + 34 + 30 + 22 + 16
 
@@ -1976,6 +1980,17 @@ local function createConsole()
 	status.Font = Enum.Font.Code
 	status.Parent = window
 
+	local license = Instance.new('TextLabel')
+	license.BackgroundTransparency = 1
+	license.Position = UDim2.fromOffset(ContentPadding, LicenseY)
+	license.Size = UDim2.new(1, -ContentPadding * 2, 0, 24)
+	license.Text = ''
+	license.TextColor3 = Color3.fromRGB(158, 158, 158)
+	license.TextSize = 17
+	license.TextXAlignment = Enum.TextXAlignment.Left
+	license.Font = Enum.Font.Code
+	license.Parent = window
+
 	local line = Instance.new('TextLabel')
 	line.BackgroundTransparency = 1
 	line.Position = UDim2.fromOffset(ContentPadding, LineY)
@@ -2159,6 +2174,10 @@ local function createConsole()
 	function console:SetLine(text, color)
 		line.Text = text
 		line.TextColor3 = color or Palette.Line
+	end
+
+	function console:SetLicense(text)
+		license.Text = text or ''
 	end
 
 	--[[ alpha is how far through the boot we are; the face is drawn to match, one row at a time.
@@ -2443,6 +2462,7 @@ local function createHeadlessConsole()
 	local console = {}
 	function console:SetStatus() end
 	function console:SetLine() end
+	function console:SetLicense() end
 	function console:SetProgress() end
 	function console:Finish() end
 	--[[ The one call that still reaches the player: a failed reload has usually already torn the
@@ -2985,6 +3005,17 @@ do
 	--[[ Authenticated: hand the console back to the boot it was holding up. ]]
 	phase('key gate')
 	console:SetStatus('INJECTING')
+	--[[ The public build only, from what check_key reported (rememberExpiry): a lifetime key, or the
+	time left, coarse as the 'Key valid' detail is. Nothing when LuaArmor did not say. ]]
+	if PUBLIC_BUILD then
+		local expire = tonumber(shared.PistonwareKeyExpire)
+		local left = expire and expire > 0 and formatDuration(expire - os.time()) or nil
+		if expire == -1 then
+			console:SetLicense(t('license_lifetime'))
+		elseif left then
+			console:SetLicense(t('license_expires', left))
+		end
+	end
 	console:SetLine('Injecting into ROBLOX...')
 	console:SetProgress(0.12)
 end
