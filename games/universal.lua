@@ -10657,7 +10657,128 @@ run(function()
 		Max = 120
 	})
 end)
-	
+
+--[[ Sync to Mod Overlay Position, for the FPS and Ping readings. The reading goes in the gap under
+the Mod Overlay's watermark, below the "Pistonware" name and over the list's first line, worked out
+from where the overlay is drawn on this screen rather than from pixels saved on another one. The
+spots are the owner's 1920 x 1080 layout (Text size 1.2, logo watermark), where the name runs from
+x 1778 to 1915 and the list starts 61 px down: FPS a quarter of the way along the name and Ping
+three quarters, both centred 8.9 overlay units over the list. The reading is scaled with the
+overlay, so on a phone, where the list is drawn smaller, it still fits the gap.
+
+Once synced it stays synced, through a rescale, a rotation or a profile loaded on another device:
+the state is a hidden option saved with the profile, and the module's step puts the reading back
+whenever the overlay moves. Dragging the reading with the menu open ends it. ]]
+loaderStyle.OverlayGap = {Units = 8.9, Reference = 1.2}
+
+function loaderStyle.overlaySync(module, label, across)
+	local gap = loaderStyle.OverlayGap
+	-- Scales the reading around its middle, card and all, so it stays centred on its spot.
+	label.AnchorPoint = Vector2.new(0.5, 0.5)
+	label.Position = UDim2.fromScale(0.5, 0.5)
+	local fit = Instance.new('UIScale')
+	fit.Name = 'OverlayFit'
+	fit.Parent = label
+	-- The Position this last wrote: anything else there is a drag, or a clamp after a rescale.
+	local placed
+	local Synced = module:CreateToggle({
+		Name = 'Synced to Mod Overlay',
+		Function = function(callback)
+			if not callback then
+				fit.Scale = 1
+				placed = nil
+			end
+		end,
+		Visible = false
+	})
+
+	-- The reading lives in Pistonware's GUI, which needs the raised identity to read or move.
+	local function raise()
+		if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+			pcall(setthreadidentity, 7)
+		end
+	end
+
+	-- The watermark's name and the list under it, or why there is no gap to sync to.
+	local function overlayParts()
+		local overlay = vape.Categories['Text GUI']
+		if not (overlay and overlay.Button and overlay.Button.Enabled and overlay.Children) then
+			return nil, 'Turn on the Mod Overlay first.'
+		end
+		local children = overlay.Children
+		local mark = children:FindFirstChild('LogoImage')
+		local name = mark and mark.Visible and mark:FindFirstChildOfClass('TextLabel')
+		if not name then
+			local logo = children:FindFirstChild('Logo')
+			name = logo and logo.Visible and logo or nil
+		end
+		local holder = children:FindFirstChild('Holder')
+		if not (name and holder) or name.AbsoluteSize.X <= 0 or name.Size.Y.Offset <= 0 then
+			return nil, 'Turn on the Mod Overlay watermark first.'
+		end
+		return name, holder
+	end
+
+	local function place()
+		raise()
+		local name, holder = overlayParts()
+		if not name then return false, holder end
+		local widget = module.Children
+		local parent = widget and widget.Parent
+		if not parent then return false, 'The reading is not on screen.' end
+		local menuScale = parent:FindFirstChildOfClass('UIScale')
+		menuScale = math.max(menuScale and menuScale.Scale or 1, 0.05)
+		local zoom = widget:FindFirstChild('HudZoom')
+		zoom = zoom and zoom.Scale or 1
+		-- The overlay's screen pixels per unit, 1.2 on the reference layout.
+		local unit = name.AbsoluteSize.Y / name.Size.Y.Offset
+		fit.Scale = math.clamp(unit / gap.Reference / (menuScale * zoom), 0.4, 2.5)
+		local centre = Vector2.new(name.AbsolutePosition.X + across * name.AbsoluteSize.X, holder.AbsolutePosition.Y - gap.Units * unit)
+		local corner = (centre - widget.AbsoluteSize / 2 - parent.AbsolutePosition) / menuScale
+		local position = UDim2.fromOffset(math.floor(corner.X + 0.5), math.floor(corner.Y + 0.5))
+		if widget.Position ~= position then
+			widget.Position = position
+		end
+		placed = position
+		return true
+	end
+
+	module:CreateButton({
+		Name = 'Sync to Mod Overlay Position',
+		Function = function()
+			local ok, why = place()
+			if not ok then
+				notif(module.Name, why, 5, 'warning')
+				return
+			end
+			if not Synced.Enabled then
+				Synced:Toggle()
+			end
+		end,
+		Tooltip = 'Puts the reading in the gap under the Mod Overlay watermark, on any screen.\nIt stays there until you drag it.'
+	})
+
+	-- The module's step while it is on: keeps a synced reading in its gap.
+	return function()
+		task.spawn(function()
+			placed = nil
+			while module.Enabled do
+				if Synced.Enabled then
+					raise()
+					local widget = module.Children
+					if placed and widget and widget.Position ~= placed and clickGuiOpen() then
+						Synced:Toggle()
+						notif(module.Name, 'Moved, so no longer synced to the Mod Overlay.', 4)
+					else
+						pcall(place)
+					end
+				end
+				task.wait(0.25)
+			end
+		end)
+	end
+end
+
 run(function()
 	--[[
 		Grabbing an accurate count of the current framerate
@@ -10665,11 +10786,15 @@ run(function()
 	]]
 	local FPS
 	local label
-	
+	local syncStep
+
 	FPS = vape.Legit:CreateModule({
 		Name = 'FPS',
 		Function = function(callback)
 			if callback then
+				if syncStep then
+					syncStep()
+				end
 				--[[ The frame times of the last second, oldest at first and newest at last. Dropping the
 				ones over a second old from the front replaces shifting every entry along each frame. ]]
 				local frames, first, last = {}, 1, 0
@@ -10710,6 +10835,7 @@ run(function()
 		end
 	}))
 	label = loaderStyle.reading(FPS.Children, loaderStyle.unit('inf', 'FPS'))
+	syncStep = loaderStyle.overlaySync(FPS, label, 0.253)
 end)
 	
 run(function()
@@ -10910,11 +11036,15 @@ end)
 run(function()
 	local Ping
 	local label
-	
+	local syncStep
+
 	Ping = vape.Legit:CreateModule({
 		Name = 'Ping',
 		Function = function(callback)
 			if callback then
+				if syncStep then
+					syncStep()
+				end
 				repeat
 					label.Text = loaderStyle.unit(math.floor(tonumber(game:GetService('Stats'):FindFirstChild('PerformanceStats').Ping:GetValue())), 'ms')
 					task.wait(1)
@@ -10938,6 +11068,7 @@ run(function()
 		end
 	}))
 	label = loaderStyle.reading(Ping.Children, loaderStyle.unit('0', 'ms'))
+	syncStep = loaderStyle.overlaySync(Ping, label, 0.772)
 end)
 	
 run(function()

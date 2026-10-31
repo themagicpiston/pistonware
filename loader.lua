@@ -1647,11 +1647,15 @@ local AsciiLineHeight = 18
 pushes them (and the bottom of the window) down instead of colliding with them. ]]
 local AsciiTop = TitleBarHeight + 16
 local StatusY = AsciiTop + #PistonFace * AsciiLineHeight + 16
--- How long the key has left, under the status once it is known (SetLicense), as Slinky's loader has it.
-local LicenseY = StatusY + 32
-local LineY = LicenseY + 28
+local LineY = StatusY + 32
 local AnswersY = LineY + 30
 local WindowHeight = AnswersY + 34 + 30 + 22 + 16
+--[[ How long the key has left, under the status once it is known (SetLicense), as Slinky's loader has
+it. The row only takes room while it shows: the line and the answers under it move down by it and
+the window grows to match. Kept open for the whole boot, it left a blank row over the line through
+the key check and the loading, and the window a row taller than it needed. ]]
+local LicenseY = StatusY + 32
+local LicenseRow = 28
 
 local Palette = {
 	Window = Color3.fromRGB(10, 10, 10),
@@ -1829,12 +1833,14 @@ local function createConsole()
 	equivalent) and maximise fills the viewport, both toggling back on a second click. ]]
 	local minimized, maximized = false, false
 	local restorePosition = window.Position
+	-- WindowHeight, plus the license row while it shows (SetLicense).
+	local windowHeight = WindowHeight
 
 	local function applyWindowState(animate)
-		local viewport = camera and camera.ViewportSize or Vector2.new(WindowWidth, WindowHeight)
+		local viewport = camera and camera.ViewportSize or Vector2.new(WindowWidth, windowHeight)
 		--[[ Sizes are pre-UIScale, so divide by the scale to land on the viewport once scaled. ]]
 		local width = maximized and (viewport.X / uiscale.Scale) or WindowWidth
-		local height = maximized and (viewport.Y / uiscale.Scale) or WindowHeight
+		local height = maximized and (viewport.Y / uiscale.Scale) or windowHeight
 		local size = UDim2.fromOffset(width, minimized and TitleBarHeight or height)
 		local position = maximized and UDim2.fromScale(0.5, 0.5) or restorePosition
 		if animate then
@@ -1845,9 +1851,9 @@ local function createConsole()
 	end
 
 	local function applyScale()
-		local viewport = camera and camera.ViewportSize or Vector2.new(WindowWidth, WindowHeight)
+		local viewport = camera and camera.ViewportSize or Vector2.new(WindowWidth, windowHeight)
 		if viewport.X <= 0 or viewport.Y <= 0 then return end
-		local fit = math.min(viewport.X * 0.94 / WindowWidth, viewport.Y * 0.92 / WindowHeight)
+		local fit = math.min(viewport.X * 0.94 / WindowWidth, viewport.Y * 0.92 / windowHeight)
 		local scale = math.min(fit, viewport.Y / 1080)
 		--[[ The 1080p cap leaves a landscape phone at a third of its height with 6px text, so
 		touch-only devices take the fit instead. Capped at 0.7 (only tablets get that far) and
@@ -2295,6 +2301,14 @@ local function createConsole()
 
 	function console:SetLicense(text)
 		license.Text = text or ''
+		-- Room for the row only while it has something to say: see LicenseRow.
+		local shift = license.Text ~= '' and LicenseRow or 0
+		if WindowHeight + shift ~= windowHeight then
+			windowHeight = WindowHeight + shift
+			line.Position = UDim2.fromOffset(ContentPadding, LineY + shift)
+			answers.Position = UDim2.fromOffset(ContentPadding, AnswersY + shift)
+			applyScale()
+		end
 	end
 
 	--[[ alpha is how far through the boot we are; the face is drawn to match, one row at a time.
