@@ -4947,45 +4947,53 @@ run(function()
 	-- about 1.8x the near ring, as in Slinky's screenshots).
 	local FAR_SPREAD = 0.85
 
-	local function newDrawing(class)
+	--[[ The raised identity, for everything here that makes, moves or removes a pointer, the frame
+	loop included, as in Player ESP: where the Drawing library is built out of GUI objects (phone
+	executors like Delta), a write without it can fail, and a RenderStepped callback does not always
+	carry it. The text arrows live in Pistonware's GUI, which needs it too. Guarded: on an executor
+	whose ceiling is below 8 a bare setthreadidentity(8) throws. ]]
+	local function raiseIdentity()
+		if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+			pcall(setthreadidentity, 7)
+		end
+	end
+
+	local function applyProps(object, props)
+		for key, value in props do
+			object[key] = value
+		end
+	end
+
+	--[[ A drawing the executor cannot make, or one that refuses a property, is removed again and
+	left out. The properties used to be set outside the check, so one refused threw out of Added
+	with the drawings already made left on screen and nothing to remove them. ]]
+	local function newDrawing(class, props)
 		local ok, object = pcall(function()
 			return Drawing.new(class)
 		end)
-		return ok and object or nil
+		if not ok or object == nil then return nil end
+		if not pcall(applyProps, object, props) then
+			pcall(function()
+				object:Remove()
+			end)
+			return nil
+		end
+		return object
 	end
 
 	--[[ Two filled Triangles make the dart, split along the line from the tip to the notch (a
 	concave shape is not filled the same way by every executor as one Quad), over an unfilled
 	Quad drawn thick enough that only its outer edge shows past them as the outline. An executor
-	without the Drawing library gets the old image arrow instead, rotated the same way, so the
-	module still points somewhere. ]]
+	without the Drawing library, or without Triangles, gets the old image arrow instead, rotated
+	the same way, so the module still points somewhere. ]]
 	local function newPointer()
-		local right, left = newDrawing('Triangle'), newDrawing('Triangle')
+		local half = {Filled = true, Thickness = 1, Transparency = 1, ZIndex = 2, Visible = false}
+		local right, left = newDrawing('Triangle', half), newDrawing('Triangle', half)
 		if right and left then
-			for _, half in {right, left} do
-				half.Filled = true
-				half.Thickness = 1
-				half.Transparency = 1
-				half.ZIndex = 2
-				half.Visible = false
-			end
-			local outline = newDrawing('Quad')
-			if outline then
-				outline.Filled = false
-				outline.Thickness = DART.Outline
-				outline.Transparency = 1
-				outline.ZIndex = 1
-				outline.Visible = false
-			end
+			local outline = newDrawing('Quad', {Filled = false, Thickness = DART.Outline, Transparency = 1, ZIndex = 1, Visible = false})
 			-- A line down the split in the fill colour: two anti-aliased Triangles that only meet
 			-- there let the background show through along it.
-			local seam = newDrawing('Line')
-			if seam then
-				seam.Thickness = 1
-				seam.Transparency = 1
-				seam.ZIndex = 2
-				seam.Visible = false
-			end
+			local seam = newDrawing('Line', {Thickness = 1, Transparency = 1, ZIndex = 2, Visible = false})
 			return {Right = right, Left = left, Outline = outline, Seam = seam, Visible = false, Layer = 0}
 		end
 		if right then
@@ -5009,21 +5017,22 @@ run(function()
 		return {Image = arrow, Visible = false}
 	end
 
+	-- Marked only once every part took it, so a write that failed is tried again the next frame.
 	local function setVisible(pointer, visible)
 		if pointer.Visible == visible then return end
-		pointer.Visible = visible
 		if pointer.Image then
 			pointer.Image.Visible = visible
-			return
+		else
+			pointer.Right.Visible = visible
+			pointer.Left.Visible = visible
+			if pointer.Outline then
+				pointer.Outline.Visible = visible
+			end
+			if pointer.Seam then
+				pointer.Seam.Visible = visible
+			end
 		end
-		pointer.Right.Visible = visible
-		pointer.Left.Visible = visible
-		if pointer.Outline then
-			pointer.Outline.Visible = visible
-		end
-		if pointer.Seam then
-			pointer.Seam.Visible = visible
-		end
+		pointer.Visible = visible
 	end
 
 	local function dropPointer(pointer)
@@ -5050,9 +5059,7 @@ run(function()
 	local function Added(ent)
 		if not Targets.Players.Enabled and ent.Player then return end
 		if not Targets.NPCs.Enabled and ent.NPC then return end
-		if vape.ThreadFix then
-			setthreadidentity(8)
-		end
+		raiseIdentity()
 		-- Making the drawings can yield (the actor relay waits on each one), so the player is
 		-- checked again after: gone, or the module off, and they are thrown away.
 		local pointer = newPointer()
@@ -5066,9 +5073,7 @@ run(function()
 	local function Removed(ent)
 		local pointer = Reference[ent]
 		if pointer then
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			raiseIdentity()
 			Reference[ent] = nil
 			if closestEnt == ent then
 				closestEnt = nil
@@ -5092,11 +5097,120 @@ run(function()
 		return math.clamp((distance - Transition.ValueMin) / span, 0, 1)
 	end
 
+	-- What every pointer shares this frame, filled in by Loop before it draws them.
+	local Frame = {}
+
+	local function drawPointer(ent, pointer)
+		local distance = pointer.Distance
+		if not distance then
+			setVisible(pointer, false)
+			return
+		end
+
+		-- 0 straight ahead, positive to the right, measured flat on the ground
+		local relative = Frame.Basis:PointToObjectSpace(pointer.Position)
+		local angle = math.atan2(relative.X, -relative.Z)
+		if math.deg(math.abs(angle)) < Frame.HalfFov then
+			setVisible(pointer, false)
+			return
+		end
+
+		local t = farness(distance)
+		local closestColor = Frame.ClosestColor
+		local color
+		if closestColor and ent == closestEnt then
+			color = closestColor
+		elseif Frame.Mode == 'Distance' then
+			color = Frame.Near:Lerp(Frame.Far, t)
+		elseif Frame.Mode == 'Name Tag' then
+			color = entitylib.getEntityColor(ent) or Color3.new(1, 1, 1)
+		else
+			color = (ent.Friend or not ent.Targetable) and Frame.FriendColor or Frame.EnemyColor
+		end
+
+		local center, squash, length = Frame.Center, Frame.Squash, Frame.Length
+		local radius = Frame.BaseRadius
+		if DistanceRadius.Enabled then
+			radius += radius * FAR_SPREAD * t
+		end
+		radius = math.min(radius, Frame.MaxRadius)
+		if pointer.Image then
+			local arrow = pointer.Image
+			local dir = Vector2.new(math.sin(angle), -math.cos(angle))
+			local at = center + dir * (radius + length * 0.5) * squash
+			arrow.Position = UDim2.fromOffset(at.X, at.Y)
+			arrow.Rotation = math.deg(angle)
+			arrow.TextSize = math.max(length * 1.2, 8)
+			if arrow.TextColor3 ~= color then
+				arrow.TextColor3 = color
+			end
+			setVisible(pointer, true)
+			return
+		end
+		local dir = Vector2.new(math.sin(angle), -math.cos(angle))
+		local side = Vector2.new(-dir.Y, dir.X) * Frame.HalfWidth
+		local back = dir * radius
+		local tip = center + dir * (radius + length) * squash
+		local notch = center + dir * (radius + Frame.NotchAt) * squash
+		local wingR = center + (back + side) * squash
+		local wingL = center + (back - side) * squash
+		--[[ Written only when they change: this runs every frame for every pointer. Each value is
+		noted after its writes went through, so a write that failed is made again next frame. ]]
+		if tip ~= pointer.Tip or notch ~= pointer.Notch or wingR ~= pointer.WingR or wingL ~= pointer.WingL then
+			local right, left, outline = pointer.Right, pointer.Left, pointer.Outline
+			right.PointA, right.PointB, right.PointC = tip, wingR, notch
+			left.PointA, left.PointB, left.PointC = tip, notch, wingL
+			if outline then
+				outline.PointA, outline.PointB, outline.PointC, outline.PointD = tip, wingR, notch, wingL
+			end
+			local seam = pointer.Seam
+			if seam then
+				-- Half a pixel short of the notch and a pixel short of the tip, so neither end of
+				-- it sticks out of the dart.
+				local along = tip - notch
+				local span = along.Magnitude
+				if span > 3 then
+					local unit = along / span
+					seam.From, seam.To = notch + unit * 0.5, tip - unit
+				else
+					seam.From, seam.To = notch, notch
+				end
+			end
+			pointer.Tip, pointer.Notch, pointer.WingR, pointer.WingL = tip, notch, wingR, wingL
+		end
+		if color ~= pointer.Color then
+			pointer.Right.Color = color
+			pointer.Left.Color = color
+			if pointer.Seam then
+				pointer.Seam.Color = color
+			end
+			if pointer.Outline then
+				pointer.Outline.Color = Color3.new(color.R * DART.Shade, color.G * DART.Shade, color.B * DART.Shade)
+			end
+			pointer.Color = color
+		end
+		-- The closest dart is drawn over the others, outline and all, so a player beside them
+		-- can't cover it.
+		local layer = closestColor and ent == closestEnt and 2 or 0
+		if layer ~= pointer.Layer then
+			pointer.Right.ZIndex, pointer.Left.ZIndex = 2 + layer, 2 + layer
+			if pointer.Seam then
+				pointer.Seam.ZIndex = 2 + layer
+			end
+			if pointer.Outline then
+				pointer.Outline.ZIndex = 1 + layer
+			end
+			pointer.Layer = layer
+		end
+		setVisible(pointer, true)
+	end
+
 	local function Loop()
+		raiseIdentity()
 		-- hidden while the menu is open; the first frame after it closes redraws them
 		if clickGuiOpen() then
 			for _, pointer in Reference do
-				setVisible(pointer, false)
+				pcall(setVisible, pointer, false)
 			end
 			return
 		end
@@ -5139,11 +5253,7 @@ run(function()
 
 		-- The same for every pointer this frame.
 		local px = math.clamp(viewport.Y / 1080, 0.5, 2)
-		local size = Scale.Value
-		local length = DART.Length * size * px
-		local halfWidth, notchAt = length * DART.HalfWidth, length * DART.Notch
-		local baseRadius = Radius.Value * px
-		local halfFov = IgnoreFOV.Value / 2
+		local length = DART.Length * Scale.Value * px
 		--[[ 3D lays the ring back like Minecraft clients do: tipped by the pitch, flattened to half
 		its height looking level or up, and opening out to round past 42° looking down. The dart
 		is flattened with it. ]]
@@ -5152,115 +5262,29 @@ run(function()
 			local pitch = -math.deg(math.asin(math.clamp(look.Y, -1, 1)))
 			yScale = math.cos(math.rad(math.clamp(pitch, 42, 90) - 102))
 		end
-		local squash = Vector2.new(1, yScale)
+		Frame.Basis = basis
+		Frame.Center = center
+		Frame.Length = length
+		Frame.HalfWidth, Frame.NotchAt = length * DART.HalfWidth, length * DART.Notch
+		Frame.BaseRadius = Radius.Value * px
+		Frame.HalfFov = IgnoreFOV.Value / 2
+		Frame.Squash = Vector2.new(1, yScale)
 		--[[ The widest the ring can be with the whole dart still on screen: on a small viewport a
 		large Radius, spread further for far players, put their darts past its edge. ]]
-		local maxRadius = math.max(math.min(center.X - 6, (center.Y - 6) / math.max(yScale, 0.1)) - length, 0)
-		local mode = ColorMode.Value
-		local near, far = hsv(NearColor), hsv(FarColor)
-		local enemy, friend = hsv(Color), hsv(FriendColor)
-		local closestColor = Closest.Enabled and hsv(ClosestColor) or nil
+		Frame.MaxRadius = math.max(math.min(center.X - 6, (center.Y - 6) / math.max(yScale, 0.1)) - length, 0)
+		Frame.Mode = ColorMode.Value
+		Frame.Near, Frame.Far = hsv(NearColor), hsv(FarColor)
+		Frame.EnemyColor, Frame.FriendColor = hsv(Color), hsv(FriendColor)
+		Frame.ClosestColor = Closest.Enabled and hsv(ClosestColor) or nil
 
+		--[[ One pointer failing (a part gone mid-respawn, a property the executor refuses) hides that
+		pointer for the frame instead of stopping the loop for everyone after it. What it last held
+		is forgotten, so all of it is written again once it draws. ]]
 		for ent, pointer in Reference do
-			local distance = pointer.Distance
-			if not distance then
-				setVisible(pointer, false)
-				continue
+			if not pcall(drawPointer, ent, pointer) then
+				pointer.Tip, pointer.Color, pointer.Layer = nil, nil, nil
+				pcall(setVisible, pointer, false)
 			end
-
-			-- 0 straight ahead, positive to the right, measured flat on the ground
-			local relative = basis:PointToObjectSpace(pointer.Position)
-			local angle = math.atan2(relative.X, -relative.Z)
-			if math.deg(math.abs(angle)) < halfFov then
-				setVisible(pointer, false)
-				continue
-			end
-
-			local t = farness(distance)
-			local color
-			if closestColor and ent == closestEnt then
-				color = closestColor
-			elseif mode == 'Distance' then
-				color = near:Lerp(far, t)
-			elseif mode == 'Name Tag' then
-				color = entitylib.getEntityColor(ent) or Color3.new(1, 1, 1)
-			else
-				color = (ent.Friend or not ent.Targetable) and friend or enemy
-			end
-
-			local radius = baseRadius
-			if DistanceRadius.Enabled then
-				radius += radius * FAR_SPREAD * t
-			end
-			radius = math.min(radius, maxRadius)
-			if pointer.Image then
-				local arrow = pointer.Image
-				local dir = Vector2.new(math.sin(angle), -math.cos(angle))
-				local at = center + dir * (radius + length * 0.5) * squash
-				arrow.Position = UDim2.fromOffset(at.X, at.Y)
-				arrow.Rotation = math.deg(angle)
-				arrow.TextSize = math.max(length * 1.2, 8)
-				if arrow.TextColor3 ~= color then
-					arrow.TextColor3 = color
-				end
-				setVisible(pointer, true)
-				continue
-			end
-			local dir = Vector2.new(math.sin(angle), -math.cos(angle))
-			local side = Vector2.new(-dir.Y, dir.X) * halfWidth
-			local back = dir * radius
-			local tip = center + dir * (radius + length) * squash
-			local notch = center + dir * (radius + notchAt) * squash
-			local wingR = center + (back + side) * squash
-			local wingL = center + (back - side) * squash
-			-- Written only when they change: this runs every frame for every pointer.
-			if tip ~= pointer.Tip or notch ~= pointer.Notch or wingR ~= pointer.WingR or wingL ~= pointer.WingL then
-				pointer.Tip, pointer.Notch, pointer.WingR, pointer.WingL = tip, notch, wingR, wingL
-				local right, left, outline = pointer.Right, pointer.Left, pointer.Outline
-				right.PointA, right.PointB, right.PointC = tip, wingR, notch
-				left.PointA, left.PointB, left.PointC = tip, notch, wingL
-				if outline then
-					outline.PointA, outline.PointB, outline.PointC, outline.PointD = tip, wingR, notch, wingL
-				end
-				local seam = pointer.Seam
-				if seam then
-					-- Half a pixel short of the notch and a pixel short of the tip, so neither end of
-					-- it sticks out of the dart.
-					local along = tip - notch
-					local span = along.Magnitude
-					if span > 3 then
-						local unit = along / span
-						seam.From, seam.To = notch + unit * 0.5, tip - unit
-					else
-						seam.From, seam.To = notch, notch
-					end
-				end
-			end
-			if color ~= pointer.Color then
-				pointer.Color = color
-				pointer.Right.Color = color
-				pointer.Left.Color = color
-				if pointer.Seam then
-					pointer.Seam.Color = color
-				end
-				if pointer.Outline then
-					pointer.Outline.Color = Color3.new(color.R * DART.Shade, color.G * DART.Shade, color.B * DART.Shade)
-				end
-			end
-			-- The closest dart is drawn over the others, outline and all, so a player beside them
-			-- can't cover it.
-			local layer = closestColor and ent == closestEnt and 2 or 0
-			if layer ~= pointer.Layer then
-				pointer.Layer = layer
-				pointer.Right.ZIndex, pointer.Left.ZIndex = 2 + layer, 2 + layer
-				if pointer.Seam then
-					pointer.Seam.ZIndex = 2 + layer
-				end
-				if pointer.Outline then
-					pointer.Outline.ZIndex = 1 + layer
-				end
-			end
-			setVisible(pointer, true)
 		end
 	end
 
@@ -5711,10 +5735,26 @@ run(function()
 	local methodused
 	local HURT_TIME = 0.5
 	local HURT_COLOR = Color3.fromRGB(255, 40, 40)
+	local TEXT_SIZE = 20
+	-- The name's shadow sits this far down and right of it; its background is this much bigger.
+	local DROP_OFFSET = Vector2.new(1, 1)
+	local BACKGROUND_PADDING = Vector2.new(8, 4)
 
 	local function ESPWorldToViewport(pos)
 		local newpos = gameCamera:WorldToViewportPoint(pos)
 		return Vector2.new(newpos.X, newpos.Y)
+	end
+
+	--[[ The raised identity, for everything here that makes, moves or removes a drawing, the frame
+	loops included. Where the Drawing library is built out of GUI objects in a protected container,
+	as on phone executors like Delta, a write without it can fail, and a RenderStepped callback does
+	not always run with the identity of the thread that connected it. Cat Vape's ESP raises it at the
+	top of every frame loop; this one only did when drawings were made or removed. Guarded: on an
+	executor whose ceiling is below 8 a bare setthreadidentity(8) throws. ]]
+	local function raiseIdentity()
+		if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+			pcall(setthreadidentity, 7)
+		end
 	end
 
 	--[[ Every Drawing property write is a call into the executor, and most of what is drawn each
@@ -5735,6 +5775,10 @@ run(function()
 		set(line, 'From', from)
 		set(line, 'To', to)
 	end
+
+	--[[ Whether each player's drawings were last shown or hidden. Most frames change neither, and
+	this skips going through every drawing to find that out. ]]
+	local Shown = setmetatable({}, {__mode = 'k'})
 
 	local function passes(ent)
 		if not Targets.Players.Enabled and ent.Player then return false end
@@ -5795,10 +5839,24 @@ run(function()
 		return hurtTint(ent, now, baseColor(ent))
 	end
 
-	local function newDrawing(kind, props)
-		local obj = Drawing.new(kind)
+	local function applyProps(obj, props)
 		for key, value in props do
 			obj[key] = value
+		end
+	end
+
+	--[[ A drawing the executor cannot make, or one that refuses a property (some phone executors
+	have no Quad), is removed again and left out. Added used to throw halfway, which stopped that
+	player's ESP and left the drawings already made with nothing to remove them. Everything below
+	takes a missing drawing as switched off. ]]
+	local function newDrawing(kind, props)
+		local made, obj = pcall(Drawing.new, kind)
+		if not made or obj == nil then return nil end
+		if not pcall(applyProps, obj, props) then
+			pcall(function()
+				obj:Remove()
+			end)
+			return nil
 		end
 		Written[obj] = table.clone(props)
 		return obj
@@ -5813,22 +5871,82 @@ run(function()
 	local function drawHealthBar(EntityESP, ent, left, top, bottom)
 		local fraction = healthFraction(ent)
 		local x = left - 5
-		setLine(EntityESP.HealthBorder, Vector2.new(x, top - 1) // 1, Vector2.new(x, bottom + 1) // 1)
-		set(EntityESP.HealthLine, 'Visible', fraction > 0)
-		setLine(EntityESP.HealthLine, Vector2.new(x, bottom) // 1, Vector2.new(x, bottom - (bottom - top) * fraction) // 1)
-		set(EntityESP.HealthLine, 'Color', Color3.fromHSV(fraction / 2.5, 0.89, 0.75))
+		local track, bar = EntityESP.HealthBorder, EntityESP.HealthLine
+		if track then
+			setLine(track, Vector2.new(x, top - 1) // 1, Vector2.new(x, bottom + 1) // 1)
+		end
+		if bar then
+			set(bar, 'Visible', fraction > 0)
+			setLine(bar, Vector2.new(x, bottom) // 1, Vector2.new(x, bottom - (bottom - top) * fraction) // 1)
+			set(bar, 'Color', Color3.fromHSV(fraction / 2.5, 0.89, 0.75))
+		end
 	end
 
 	local function nameText(ent)
 		return ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
 	end
 
+	local function readTextBounds(text)
+		return text.TextBounds
+	end
+
+	--[[ The name's size on screen, for its background. Some executors' Text has no TextBounds, or
+	reports none until it has been drawn once; the size is then judged from the name's length, at
+	about half the text size per character. ]]
+	local function textBounds(text)
+		local ok, bounds = pcall(readTextBounds, text)
+		if ok and typeof(bounds) == 'Vector2' and bounds.X > 0 then
+			return bounds
+		end
+		local name = tostring(Written[text].Text or '')
+		return Vector2.new((utf8.len(name) or #name) * TEXT_SIZE * 0.5, TEXT_SIZE)
+	end
+
+	--[[ The skeleton joins the rig's joints. On R15, BedWars' rig, a joint is the rig attachment its
+	motor turns about, read off the part that moves, so the lines bend with every animation. R6 has
+	no rig attachments, so its joints are points along each part. A joint is {part, attachment,
+	height}: the attachment when the part has one, otherwise the point that fraction of the part's
+	height from its middle (0.5 is the top, -0.5 the bottom). ]]
+	local R15_JOINTS = {
+		Head = {'Head', nil, 0},
+		Neck = {'UpperTorso', 'NeckRigAttachment', 0.5},
+		Waist = {'UpperTorso', 'WaistRigAttachment', -0.5}
+	}
+	local R6_JOINTS = {
+		Head = {'Head', nil, 0},
+		Neck = {'Torso', nil, 0.5},
+		Waist = {'Torso', nil, -0.5}
+	}
+	-- One line per pair of joints.
+	local BONES = {{'Neck', 'Head'}, {'Neck', 'Waist'}}
+	for _, side in {'Left', 'Right'} do
+		R15_JOINTS[side..'Shoulder'] = {side..'UpperArm', side..'ShoulderRigAttachment', 0.5}
+		R15_JOINTS[side..'Elbow'] = {side..'LowerArm', side..'ElbowRigAttachment', 0.5}
+		R15_JOINTS[side..'Hand'] = {side..'Hand', nil, 0}
+		R15_JOINTS[side..'Hip'] = {side..'UpperLeg', side..'HipRigAttachment', 0.5}
+		R15_JOINTS[side..'Knee'] = {side..'LowerLeg', side..'KneeRigAttachment', 0.5}
+		R15_JOINTS[side..'Ankle'] = {side..'Foot', side..'AnkleRigAttachment', 0.5}
+		R6_JOINTS[side..'Shoulder'] = {side..' Arm', nil, 0.5}
+		R6_JOINTS[side..'Elbow'] = {side..' Arm', nil, 0}
+		R6_JOINTS[side..'Hand'] = {side..' Arm', nil, -0.5}
+		R6_JOINTS[side..'Hip'] = {side..' Leg', nil, 0.5}
+		R6_JOINTS[side..'Knee'] = {side..' Leg', nil, 0}
+		R6_JOINTS[side..'Ankle'] = {side..' Leg', nil, -0.5}
+		table.insert(BONES, {'Neck', side..'Shoulder'})
+		table.insert(BONES, {side..'Shoulder', side..'Elbow'})
+		table.insert(BONES, {side..'Elbow', side..'Hand'})
+		table.insert(BONES, {'Waist', side..'Hip'})
+		table.insert(BONES, {side..'Hip', side..'Knee'})
+		table.insert(BONES, {side..'Knee', side..'Ankle'})
+	end
+	local RigCache = setmetatable({}, {__mode = 'k'})
+	local JointScreen = {}
+
 	local ESPAdded = {
 		Drawing2D = function(ent)
 			if not passes(ent) then return end
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			local text = Name.Enabled and nameText(ent)
+			raiseIdentity()
 			local EntityESP = {}
 			if Filled.Enabled then
 				EntityESP.Fill = newDrawing('Square', {Filled = true, Transparency = 0.25, ZIndex = 0, Thickness = 1})
@@ -5840,20 +5958,21 @@ run(function()
 			if HealthBar.Enabled then
 				addHealthBar(EntityESP)
 			end
-			if Name.Enabled then
-				if Background.Enabled then
-					EntityESP.TextBKG = newDrawing('Square', {Transparency = 0.35, ZIndex = 0, Thickness = 1, Filled = true, Color = Color3.new()})
+			if text then
+				EntityESP.Text = newDrawing('Text', {Text = text, ZIndex = 2, Center = true, Size = TEXT_SIZE})
+				-- The shadow and the background are only for a name that could be drawn.
+				if EntityESP.Text then
+					EntityESP.Drop = newDrawing('Text', {Color = Color3.new(), Text = text, ZIndex = 1, Center = true, Size = TEXT_SIZE})
+					if Background.Enabled then
+						EntityESP.TextBKG = newDrawing('Square', {Transparency = 0.35, ZIndex = 0, Thickness = 1, Filled = true, Color = Color3.new()})
+					end
 				end
-				EntityESP.Drop = newDrawing('Text', {Color = Color3.new(), Text = nameText(ent), ZIndex = 1, Center = true, Size = 20})
-				EntityESP.Text = newDrawing('Text', {Text = EntityESP.Drop.Text, ZIndex = 2, Center = true, Size = 20})
 			end
 			Reference[ent] = EntityESP
 		end,
 		Drawing3D = function(ent)
 			if not passes(ent) then return end
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			raiseIdentity()
 			local EntityESP = {Lines = {}, Faces = {}}
 			if BoundingBox.Enabled then
 				for i = 1, 12 do
@@ -5862,8 +5981,9 @@ run(function()
 			end
 			if Filled.Enabled then
 				for i = 1, 6 do
-					local ok, face = pcall(newDrawing, 'Quad', {Filled = true, Transparency = 0.15, Thickness = 1, ZIndex = 1})
-					if not ok then break end
+					local face = newDrawing('Quad', {Filled = true, Transparency = 0.15, Thickness = 1, ZIndex = 1})
+					-- An executor without Quad fails the first one, and the box is drawn unfilled.
+					if not face then break end
 					EntityESP.Faces[i] = face
 				end
 			end
@@ -5874,12 +5994,10 @@ run(function()
 		end,
 		DrawingSkeleton = function(ent)
 			if not passes(ent) then return end
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			raiseIdentity()
 			local EntityESP = {Lines = {}}
-			for _, name in {'Head', 'HeadFacing', 'Torso', 'UpperTorso', 'LowerTorso', 'LeftArm', 'RightArm', 'LeftLeg', 'RightLeg'} do
-				EntityESP.Lines[name] = newDrawing('Line', {Thickness = math.max(LineWidth.Value, 2)})
+			for i in BONES do
+				EntityESP.Lines[i] = newDrawing('Line', {Thickness = math.max(LineWidth.Value, 2)})
 			end
 			Reference[ent] = EntityESP
 		end
@@ -5901,10 +6019,9 @@ run(function()
 		local EntityESP = Reference[ent]
 		LastHealth[ent] = nil
 		HurtAt[ent] = nil
+		RigCache[ent] = nil
 		if EntityESP then
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			raiseIdentity()
 			Reference[ent] = nil
 			eachDrawing(EntityESP, function(obj)
 				Written[obj] = nil
@@ -5941,16 +6058,18 @@ run(function()
 		end
 		local EntityESP = Reference[ent]
 		if EntityESP and EntityESP.Text then
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			raiseIdentity()
 			local text = nameText(ent)
 			set(EntityESP.Text, 'Text', text)
-			set(EntityESP.Drop, 'Text', text)
+			if EntityESP.Drop then
+				set(EntityESP.Drop, 'Text', text)
+			end
 		end
 	end
 
+	-- Marked shown only once every drawing took it, so one that refused is tried again next frame.
 	local function setAll(EntityESP, visible)
+		if Shown[EntityESP] == visible then return end
 		for key, obj in EntityESP do
 			if key == 'Lines' or key == 'Faces' then
 				for _, line in obj do
@@ -5960,6 +6079,7 @@ run(function()
 				set(obj, 'Visible', visible)
 			end
 		end
+		Shown[EntityESP] = visible
 	end
 
 	-- Hidden when out of range or off screen; otherwise the root on screen and where it is.
@@ -5984,145 +6104,169 @@ run(function()
 		return rootVis and rootPos or nil, position
 	end
 
+	local function draw2D(ent, EntityESP, origin, menuOpen, now, camera)
+		local rootPos, position = screenRoot(ent, EntityESP, origin, menuOpen)
+		if not rootPos then return end
+
+		local look = CFrame.lookAlong(position, camera.LookVector)
+		local topPos = gameCamera:WorldToViewportPoint((look * CFrame.new(2, ent.HipHeight, 0)).p)
+		local bottomPos = gameCamera:WorldToViewportPoint((look * CFrame.new(-2, -ent.HipHeight - 1, 0)).p)
+		--[[ Placed by its top-left corner with a positive size. Taken straight from the two corners the
+		height came out negative, the top corner being higher on screen: a native Drawing library
+		draws that anyway, but one built out of GUI frames, as on phone executors, may draw nothing. ]]
+		local width, height = math.abs(topPos.X - bottomPos.X), math.abs(topPos.Y - bottomPos.Y)
+		local left, top = rootPos.X - width / 2, rootPos.Y - height / 2
+		local boxPos, boxSize = Vector2.new(left, top) // 1, Vector2.new(width, height) // 1
+		local color = entityColor(ent, now)
+		local main, border, fill = EntityESP.Main, EntityESP.Border, EntityESP.Fill
+		if main then
+			set(main, 'Position', boxPos)
+			set(main, 'Size', boxSize)
+			set(main, 'Color', color)
+		end
+		if border then
+			set(border, 'Position', boxPos)
+			set(border, 'Size', boxSize)
+		end
+		if fill then
+			local fillColor, fillAlpha = fillFor(ent, now, color, 0.25)
+			set(fill, 'Position', boxPos)
+			set(fill, 'Size', boxSize)
+			set(fill, 'Color', fillColor)
+			set(fill, 'Transparency', fillAlpha)
+		end
+		if EntityESP.HealthLine or EntityESP.HealthBorder then
+			drawHealthBar(EntityESP, ent, left, top, top + height)
+		end
+		local text = EntityESP.Text
+		if text then
+			local textPos = Vector2.new(rootPos.X, top - 28) // 1
+			set(text, 'Color', color)
+			set(text, 'Position', textPos)
+			if EntityESP.Drop then
+				set(EntityESP.Drop, 'Position', textPos + DROP_OFFSET)
+			end
+			local background = EntityESP.TextBKG
+			if background then
+				local bounds = textBounds(text)
+				set(background, 'Size', (bounds + BACKGROUND_PADDING) // 1)
+				set(background, 'Position', (textPos - Vector2.new((bounds.X + BACKGROUND_PADDING.X) / 2, BACKGROUND_PADDING.Y / 2)) // 1)
+			end
+		end
+	end
+
 	local BOX_EDGES = {{1, 2}, {3, 4}, {5, 6}, {7, 8}, {1, 3}, {1, 5}, {5, 7}, {7, 3}, {2, 4}, {2, 6}, {6, 8}, {8, 4}}
 	local BOX_FACES = {{1, 3, 4, 2}, {5, 7, 8, 6}, {1, 5, 6, 2}, {3, 7, 8, 4}, {1, 3, 7, 5}, {2, 4, 8, 6}}
 	local BOX_CORNERS = {
 		Vector3.new(1.5, 1, 1.5), Vector3.new(1.5, -1, 1.5), Vector3.new(-1.5, 1, 1.5), Vector3.new(-1.5, -1, 1.5),
 		Vector3.new(1.5, 1, -1.5), Vector3.new(1.5, -1, -1.5), Vector3.new(-1.5, 1, -1.5), Vector3.new(-1.5, -1, -1.5)
 	}
+	local BoxPoints = {}
 
-	--[[ Run through pcall by the skeleton loop, which costs no new closure per player each frame. A
-	part missing mid-respawn throws before any line moves, so the lines keep where they were. ]]
-	local function drawSkeleton(ent, lines)
-		local rigcheck = ent.Humanoid.RigType == Enum.HumanoidRigType.R6
-		local offset = rigcheck and CFrame.new(0, -0.8, 0) or CFrame.identity
-		local torso = ent.Character[(rigcheck and 'Torso' or 'UpperTorso')].CFrame
-		local headCFrame = ent.Head.CFrame
-		local head = ESPWorldToViewport(headCFrame.p)
-		local headfront = ESPWorldToViewport((headCFrame * CFrame.new(0, 0, -0.5)).p)
-		local toplefttorso = ESPWorldToViewport((torso * CFrame.new(-1.5, 0.8, 0)).p)
-		local toprighttorso = ESPWorldToViewport((torso * CFrame.new(1.5, 0.8, 0)).p)
-		local toptorso = ESPWorldToViewport((torso * CFrame.new(0, 0.8, 0)).p)
-		local bottomtorso = ESPWorldToViewport((torso * CFrame.new(0, -0.8, 0)).p)
-		local bottomlefttorso = ESPWorldToViewport((torso * CFrame.new(-0.5, -0.8, 0)).p)
-		local bottomrighttorso = ESPWorldToViewport((torso * CFrame.new(0.5, -0.8, 0)).p)
-		local leftarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Arm' or 'LeftHand')].CFrame * offset).p)
-		local rightarm = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Arm' or 'RightHand')].CFrame * offset).p)
-		local leftleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Left Leg' or 'LeftFoot')].CFrame * offset).p)
-		local rightleg = ESPWorldToViewport((ent.Character[(rigcheck and 'Right Leg' or 'RightFoot')].CFrame * offset).p)
-		setLine(lines.Head, toptorso, head)
-		setLine(lines.HeadFacing, head, headfront)
-		setLine(lines.UpperTorso, toplefttorso, toprighttorso)
-		setLine(lines.Torso, toptorso, bottomtorso)
-		setLine(lines.LowerTorso, bottomlefttorso, bottomrighttorso)
-		setLine(lines.LeftArm, toplefttorso, leftarm)
-		setLine(lines.RightArm, toprighttorso, rightarm)
-		setLine(lines.LeftLeg, bottomlefttorso, leftleg)
-		setLine(lines.RightLeg, bottomrighttorso, rightleg)
+	local function draw3D(ent, EntityESP, origin, menuOpen, now)
+		local rootPos, position = screenRoot(ent, EntityESP, origin, menuOpen)
+		if not rootPos then return end
+
+		local height = ent.HipHeight
+		local left, top, bottom = math.huge, math.huge, -math.huge
+		for i, corner in BOX_CORNERS do
+			local point = ESPWorldToViewport(position + Vector3.new(corner.X, corner.Y * height, corner.Z))
+			BoxPoints[i] = point
+			left = math.min(left, point.X)
+			top, bottom = math.min(top, point.Y), math.max(bottom, point.Y)
+		end
+		local color = entityColor(ent, now)
+		for i, line in EntityESP.Lines do
+			local edge = BOX_EDGES[i]
+			setLine(line, BoxPoints[edge[1]], BoxPoints[edge[2]])
+			set(line, 'Color', color)
+		end
+		local fill, fillAlpha = fillFor(ent, now, color, 0.15)
+		for i, face in EntityESP.Faces do
+			local corners = BOX_FACES[i]
+			set(face, 'PointA', BoxPoints[corners[1]])
+			set(face, 'PointB', BoxPoints[corners[2]])
+			set(face, 'PointC', BoxPoints[corners[3]])
+			set(face, 'PointD', BoxPoints[corners[4]])
+			set(face, 'Color', fill)
+			set(face, 'Transparency', fillAlpha)
+		end
+		if EntityESP.HealthLine or EntityESP.HealthBorder then
+			drawHealthBar(EntityESP, ent, left, top, bottom)
+		end
 	end
 
-	local ESPLoop = {
-		Drawing2D = function()
+	--[[ Each joint's part and attachment, found once per character rather than every frame for every
+	player. A character still missing a part (one loading in) is looked at again the next frame. ]]
+	local function rigFor(ent)
+		local character = ent.Character
+		local rig = RigCache[ent]
+		if rig and rig.Character == character then
+			return rig
+		end
+		local specs = ent.Humanoid.RigType == Enum.HumanoidRigType.R6 and R6_JOINTS or R15_JOINTS
+		local joints = {}
+		for name, spec in specs do
+			local part = character:FindFirstChild(spec[1])
+			if not (part and part:IsA('BasePart')) then return nil end
+			local attachment = spec[2] and part:FindFirstChild(spec[2])
+			joints[name] = {part, attachment and attachment:IsA('Attachment') and attachment or nil, spec[3]}
+		end
+		rig = {Character = character, Joints = joints}
+		RigCache[ent] = rig
+		return rig
+	end
+
+	local function jointPosition(joint)
+		local attachment = joint[2]
+		if attachment then
+			return attachment.WorldPosition
+		end
+		local part = joint[1]
+		return part.CFrame:PointToWorldSpace(Vector3.new(0, part.Size.Y * joint[3], 0))
+	end
+
+	-- Every joint is found before a line moves, so a rig that is not all there is hidden whole.
+	local function drawSkeleton(ent, EntityESP, origin, menuOpen, now)
+		if not screenRoot(ent, EntityESP, origin, menuOpen) then return end
+
+		local rig = rigFor(ent)
+		if not rig then
+			setAll(EntityESP, false)
+			return
+		end
+		for name, joint in rig.Joints do
+			JointScreen[name] = ESPWorldToViewport(jointPosition(joint))
+		end
+		local color = entityColor(ent, now)
+		for i, line in EntityESP.Lines do
+			local bone = BONES[i]
+			setLine(line, JointScreen[bone[1]], JointScreen[bone[2]])
+			set(line, 'Color', color)
+		end
+	end
+
+	--[[ One player's drawing failing (a part gone mid-respawn, a property the executor refuses) hides
+	that player for the frame instead of stopping the loop for everyone after them. ]]
+	local function frameLoop(drawOne)
+		return function()
+			raiseIdentity()
 			local now = os.clock()
 			local camera = gameCamera.CFrame
 			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or camera.Position
 			local menuOpen = clickGuiOpen()
 			for ent, EntityESP in Reference do
-				local rootPos, position = screenRoot(ent, EntityESP, origin, menuOpen)
-				if not rootPos then continue end
-
-				local look = CFrame.lookAlong(position, camera.LookVector)
-				local topPos = gameCamera:WorldToViewportPoint((look * CFrame.new(2, ent.HipHeight, 0)).p)
-				local bottomPos = gameCamera:WorldToViewportPoint((look * CFrame.new(-2, -ent.HipHeight - 1, 0)).p)
-				local sizex, sizey = topPos.X - bottomPos.X, topPos.Y - bottomPos.Y
-				local posx, posy = (rootPos.X - sizex / 2), (rootPos.Y - sizey / 2)
-				local boxPos, boxSize = Vector2.new(posx, posy) // 1, Vector2.new(sizex, sizey) // 1
-				local color = entityColor(ent, now)
-				if EntityESP.Main then
-					set(EntityESP.Main, 'Position', boxPos)
-					set(EntityESP.Main, 'Size', boxSize)
-					set(EntityESP.Main, 'Color', color)
-					set(EntityESP.Border, 'Position', boxPos)
-					set(EntityESP.Border, 'Size', boxSize)
+				if not pcall(drawOne, ent, EntityESP, origin, menuOpen, now, camera) then
+					pcall(setAll, EntityESP, false)
 				end
-				if EntityESP.Fill then
-					local fill, fillAlpha = fillFor(ent, now, color, 0.25)
-					set(EntityESP.Fill, 'Position', boxPos)
-					set(EntityESP.Fill, 'Size', boxSize)
-					set(EntityESP.Fill, 'Color', fill)
-					set(EntityESP.Fill, 'Transparency', fillAlpha)
-				end
-				if EntityESP.HealthLine then
-					local top, bottom = math.min(posy, posy + sizey), math.max(posy, posy + sizey)
-					drawHealthBar(EntityESP, ent, math.min(posx, posx + sizex), top, bottom)
-				end
-				if EntityESP.Text then
-					local textPos = Vector2.new(posx + (sizex / 2), posy + (sizey - 28)) // 1
-					set(EntityESP.Text, 'Color', color)
-					set(EntityESP.Text, 'Position', textPos)
-					set(EntityESP.Drop, 'Position', textPos + Vector2.new(1, 1))
-					if EntityESP.TextBKG then
-						local bounds = EntityESP.Text.TextBounds
-						set(EntityESP.TextBKG, 'Size', bounds + Vector2.new(8, 4))
-						set(EntityESP.TextBKG, 'Position', textPos - Vector2.new(4 + (bounds.X / 2), 0))
-					end
-				end
-			end
-		end,
-		Drawing3D = function()
-			local now = os.clock()
-			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
-			local menuOpen = clickGuiOpen()
-			local points = {}
-			for ent, EntityESP in Reference do
-				local rootPos, position = screenRoot(ent, EntityESP, origin, menuOpen)
-				if not rootPos then continue end
-
-				local height = ent.HipHeight
-				local left, top, right, bottom = math.huge, math.huge, -math.huge, -math.huge
-				for i, corner in BOX_CORNERS do
-					local point = ESPWorldToViewport(position + Vector3.new(corner.X, corner.Y * height, corner.Z))
-					points[i] = point
-					left, right = math.min(left, point.X), math.max(right, point.X)
-					top, bottom = math.min(top, point.Y), math.max(bottom, point.Y)
-				end
-				local color = entityColor(ent, now)
-				for i, line in EntityESP.Lines do
-					local edge = BOX_EDGES[i]
-					setLine(line, points[edge[1]], points[edge[2]])
-					set(line, 'Color', color)
-				end
-				local fill, fillAlpha = fillFor(ent, now, color, 0.15)
-				for i, face in EntityESP.Faces do
-					local corners = BOX_FACES[i]
-					set(face, 'PointA', points[corners[1]])
-					set(face, 'PointB', points[corners[2]])
-					set(face, 'PointC', points[corners[3]])
-					set(face, 'PointD', points[corners[4]])
-					set(face, 'Color', fill)
-					set(face, 'Transparency', fillAlpha)
-				end
-				if EntityESP.HealthLine then
-					drawHealthBar(EntityESP, ent, left, top, bottom)
-				end
-			end
-		end,
-		DrawingSkeleton = function()
-			local now = os.clock()
-			local origin = entitylib.isAlive and entitylib.character.RootPart.Position or gameCamera.CFrame.Position
-			local menuOpen = clickGuiOpen()
-			for ent, EntityESP in Reference do
-				local rootPos = screenRoot(ent, EntityESP, origin, menuOpen)
-				if not rootPos then continue end
-
-				local lines = EntityESP.Lines
-				local color = entityColor(ent, now)
-				for _, line in lines do
-					set(line, 'Color', color)
-				end
-				pcall(drawSkeleton, ent, lines)
 			end
 		end
+	end
+
+	local ESPLoop = {
+		Drawing2D = frameLoop(draw2D),
+		Drawing3D = frameLoop(draw3D),
+		DrawingSkeleton = frameLoop(drawSkeleton)
 	}
 
 	local function restart()
@@ -8020,6 +8164,30 @@ run(function()
 	local Behind
 	local Reference = {}
 	
+	--[[ The raised identity, for everything here that makes, moves or removes a line, the frame loop
+	included, as in Player ESP: where the Drawing library is built out of GUI objects (phone
+	executors like Delta), a write without it can fail, and a RenderStepped callback does not always
+	carry it. Guarded: on an executor whose ceiling is below 8 a bare setthreadidentity(8) throws. ]]
+	local function raiseIdentity()
+		if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+			pcall(setthreadidentity, 7)
+		end
+	end
+	
+	--[[ Each line's properties as last written. Every write is a call into the executor, and the
+	frame loop writes through set, which skips one that matches the last. Only this module writes
+	these lines, so the last write is what each one holds. Colour and transparency are written by
+	the frame loop too, from the options as they are, so nothing else touches a line. ]]
+	local Written = setmetatable({}, {__mode = 'k'})
+	
+	local function set(line, key, value)
+		local last = Written[line]
+		if last[key] ~= value then
+			line[key] = value
+			last[key] = value
+		end
+	end
+	
 	local function Passes(ent)
 		if not Targets.Players.Enabled and ent.Player then return false end
 		if not Targets.NPCs.Enabled and ent.NPC then return false end
@@ -8027,26 +8195,42 @@ run(function()
 		return true
 	end
 	
+	local function tracerColor(ent)
+		return entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+	end
+	
+	local function applyProps(line, props)
+		for key, value in props do
+			line[key] = value
+		end
+	end
+	
+	--[[ A line the executor cannot make, or one that refuses a property, is removed again and left
+	out, instead of throwing out of Added for every player. ]]
 	local function Added(ent)
 		if not Passes(ent) then return end
-		if vape.ThreadFix then
-			setthreadidentity(8)
+		raiseIdentity()
+		local props = {Thickness = 1, Transparency = 1 - Transparency.Value, Color = tracerColor(ent)}
+		local made, EntityTracer = pcall(function()
+			return Drawing.new('Line')
+		end)
+		if not made or EntityTracer == nil then return end
+		if not pcall(applyProps, EntityTracer, props) then
+			pcall(function()
+				EntityTracer:Remove()
+			end)
+			return
 		end
-	
-		local EntityTracer = Drawing.new('Line')
-		EntityTracer.Thickness = 1
-		EntityTracer.Transparency = 1 - Transparency.Value
-		EntityTracer.Color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+		Written[EntityTracer] = props
 		Reference[ent] = EntityTracer
 	end
 	
 	local function Removed(ent)
 		local v = Reference[ent]
 		if v then
-			if vape.ThreadFix then
-				setthreadidentity(8)
-			end
+			raiseIdentity()
 			Reference[ent] = nil
+			Written[v] = nil
 			pcall(function()
 				v.Visible = false
 				v:Remove()
@@ -8070,49 +8254,56 @@ run(function()
 		end
 	end
 	
-	local function ColorFunc(hue, sat, val)
-		if DistanceColor.Enabled then return end
-		local tracerColor = Color3.fromHSV(hue, sat, val)
-		for ent, EntityTracer in Reference do
-			EntityTracer.Color = entitylib.getEntityColor(ent) or tracerColor
+	local function drawTracer(ent, EntityTracer, startVector)
+		local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude
+		if Distance.Enabled and distance then
+			if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
+				set(EntityTracer, 'Visible', false)
+				return
+			end
 		end
+	
+		local pos = ent[EndPosition.Value == 'Torso' and 'RootPart' or 'Head'].Position
+		local rootPos, rootVis = gameCamera:WorldToViewportPoint(pos)
+		if not rootVis and Behind.Enabled then
+			local tempPos = gameCamera.CFrame:PointToObjectSpace(pos)
+			tempPos = CFrame.Angles(0, 0, (math.atan2(tempPos.Y, tempPos.X) + math.pi)):VectorToWorldSpace((CFrame.Angles(0, math.rad(89.9), 0):VectorToWorldSpace(Vector3.new(0, 0, -1))))
+			rootPos = gameCamera:WorldToViewportPoint(gameCamera.CFrame:pointToWorldSpace(tempPos))
+			rootVis = true
+		end
+	
+		set(EntityTracer, 'From', startVector)
+		set(EntityTracer, 'To', Vector2.new(rootPos.X, rootPos.Y))
+		set(EntityTracer, 'Transparency', 1 - Transparency.Value)
+		if DistanceColor.Enabled then
+			if distance then
+				set(EntityTracer, 'Color', Color3.fromHSV(math.min((distance / 128) / 2.8, 0.4), 0.89, 0.75))
+			end
+		else
+			set(EntityTracer, 'Color', tracerColor(ent))
+		end
+		set(EntityTracer, 'Visible', rootVis)
 	end
 	
 	local function Loop()
+		raiseIdentity()
 		-- hidden while the menu is open; the first frame after it closes redraws them
 		if clickGuiOpen() then
 			for _, EntityTracer in Reference do
-				if EntityTracer.Visible then EntityTracer.Visible = false end
+				pcall(set, EntityTracer, 'Visible', false)
 			end
 			return
 		end
-		local screenSize = vape.gui.AbsoluteSize
+		--[[ Drawing works in viewport pixels. Pistonware's GUI ignores the inset, so its size was the
+		viewport's; read off the camera, the loop doesn't touch the GUI's Instance. ]]
+		local screenSize = gameCamera.ViewportSize
 		local startVector = StartPosition.Value == 'Mouse' and inputService:GetMouseLocation() or Vector2.new(screenSize.X / 2, (StartPosition.Value == 'Middle' and screenSize.Y / 2 or screenSize.Y))
 	
+		--[[ One line failing (a part gone mid-respawn, a property the executor refuses) hides that
+		line for the frame instead of stopping the loop for everyone after it. ]]
 		for ent, EntityTracer in Reference do
-			local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude
-			if Distance.Enabled and distance then
-				if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-					EntityTracer.Visible = false
-					continue
-				end
-			end
-	
-			local pos = ent[EndPosition.Value == 'Torso' and 'RootPart' or 'Head'].Position
-			local rootPos, rootVis = gameCamera:WorldToViewportPoint(pos)
-			if not rootVis and Behind.Enabled then
-				local tempPos = gameCamera.CFrame:PointToObjectSpace(pos)
-				tempPos = CFrame.Angles(0, 0, (math.atan2(tempPos.Y, tempPos.X) + math.pi)):VectorToWorldSpace((CFrame.Angles(0, math.rad(89.9), 0):VectorToWorldSpace(Vector3.new(0, 0, -1))))
-				rootPos = gameCamera:WorldToViewportPoint(gameCamera.CFrame:pointToWorldSpace(tempPos))
-				rootVis = true
-			end
-	
-			local endVector = Vector2.new(rootPos.X, rootPos.Y)
-			EntityTracer.Visible = rootVis
-			EntityTracer.From = startVector
-			EntityTracer.To = endVector
-			if DistanceColor.Enabled and distance then
-				EntityTracer.Color = Color3.fromHSV(math.min((distance / 128) / 2.8, 0.4), 0.89, 0.75)
+			if not pcall(drawTracer, ent, EntityTracer, startVector) then
+				pcall(set, EntityTracer, 'Visible', false)
 			end
 		end
 	end
@@ -8121,6 +8312,14 @@ run(function()
 		Name = 'Tracers',
 		Function = function(callback)
 			if callback then
+				-- Checked by use, as in Player ESP: some executors hand Drawing over as userdata.
+				if not pcall(function() assert(Drawing.new) end) then
+					notif('Tracers', 'Your executor has no Drawing library to draw with.', 5, 'warning')
+					if Tracers.Enabled then
+						Tracers:Toggle(nil, true)
+					end
+					return
+				end
 				Tracers:Clean(entitylib.Events.EntityRemoved:Connect(Removed))
 				for _, v in entitylib.List do
 					if Reference[v] then
@@ -8135,9 +8334,6 @@ run(function()
 					Added(ent)
 				end))
 				Tracers:Clean(entitylib.Events.EntityUpdated:Connect(Updated))
-				Tracers:Clean(vape.Categories.Friends.ColorUpdate.Event:Connect(function()
-					ColorFunc(Color.Hue, Color.Sat, Color.Value)
-				end))
 				Tracers:Clean(runService.RenderStepped:Connect(Loop))
 			else
 				for i in Reference do
@@ -8176,23 +8372,14 @@ run(function()
 			end
 		end
 	})
+	-- Both are read by the frame loop as they change.
 	Color = Tracers:CreateColorSlider({
-		Name = 'Player Color',
-		Function = function(hue, sat, val)
-			if Tracers.Enabled then
-				ColorFunc(hue, sat, val)
-			end
-		end
+		Name = 'Player Color'
 	})
 	Transparency = Tracers:CreateSlider({
 		Name = 'Transparency',
 		Min = 0,
 		Max = 1,
-		Function = function(val)
-			for _, tracer in Reference do
-				tracer.Transparency = 1 - val
-			end
-		end,
 		Decimal = 10
 	})
 	DistanceColor = Tracers:CreateToggle({

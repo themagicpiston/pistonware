@@ -131,6 +131,8 @@ on line one and leave the queued re-injection doing nothing at all. ]]
 if shared.vape then pcall(function() shared.vape:Uninject() end) end
 
 local vape
+-- For checking a download quietly: the wrapper below alerts on every compile error.
+local rawLoadstring = loadstring
 local loadstring = function(...)
 	local res, err = loadstring(...)
 	if err and vape then
@@ -298,9 +300,11 @@ local function hasContent(path, chunkName)
 	if not ok or type(body) ~= 'string' or body == '' then return false end
 	if path:match('%.lua$') then
 		--[[ Compiled under the name the file will run as, so the chunk can be kept for that run
-		(see validatedChunks) with its error traces unchanged. ]]
+		(see validatedChunks) with its error traces unchanged. Quietly: a copy that does not compile
+		is fetched again, and an alert for it showed on boots that then loaded. A boot that cannot
+		get a working file says so where it fails. ]]
 		local name = chunkName or path
-		local compileOk, chunk = pcall(loadstring, body, name)
+		local compileOk, chunk = pcall(rawLoadstring, body, name)
 		local valid = compileOk and type(chunk) == 'function'
 		if valid and chunkName then
 			validatedChunks[path] = {body = body, name = name, chunk = chunk}
@@ -377,6 +381,8 @@ local profileApplied = false
 -- shared survives reinjection on several executors, so every new boot owns a fresh state.
 shared.PistonwareBootFailed = nil
 shared.PistonwareBootFailure = nil
+-- Set when a game file this boot downloaded did not land on disk; the loader then holds its marker.
+shared.PistonwareCacheWriteFailed = nil
 --[[ Which boot owns the session. A reinject while the BedWars payload is still loading starts a new
 boot, but the old one's profile waiter is still polling: without this it would wake later and fail
 or apply into the new session, leaving saving off with no message. ]]
@@ -389,6 +395,19 @@ end
 -- nothing to block, and failBoot below re-applies the block once it exists.
 if vape and vape.BlockSaving then vape:BlockSaving() elseif vape then vape.SaveBlocked = true end
 
+--[[ The loader's mark that this account's boot is under way (loader.lua cache.repair), at the path
+it names. Emptied once the boot has finished, and when it stopped for a reason that fetching the
+files again cannot change. A developer boot has none. ]]
+local function clearBootPending()
+	local path = rawget(shared, 'PistonwareBootPending')
+	if type(path) == 'string' and path ~= '' then
+		pcall(writefile, path, '')
+	end
+end
+
+-- Whether this boot moved a settings file aside (applyProfile), for what failBoot says.
+local profileSetAside = false
+
 local function failBoot(stageName, err)
 	if not isCurrentBoot() then return false end
 	if not shared.PistonwareBootFailed then
@@ -397,6 +416,34 @@ local function failBoot(stageName, err)
 			stage = tostring(stageName or 'unknown'),
 			error = tostring(err or 'unknown failure')
 		}
+		--[[ Said on screen, not only in the error buffer: a boot stopped here leaves the menu without
+		its profile (blurred, on defaults) and nothing saying why, and Xeno has no getgenv to reach the
+		buffer from. The loader's next run repairs the install (loader.lua cache.repair). ]]
+		local stageText = tostring(stageName or 'unknown')
+		local message = stageText == 'bedwars.session'
+			and "Your key session wasn't accepted, so the BedWars modules stayed off."
+			or stageText == 'profile.apply' and (profileSetAside
+				and "Your settings couldn't be read, so they were set aside. Run Pistonware again to load fresh ones."
+				or "Your settings couldn't be loaded. Run Pistonware again: the next run repairs its files.")
+			or ("Pistonware couldn't finish loading (%s). Run it again: the next run repairs its files."):format(stageText)
+		--[[ The key server refused the session; fetching every file again cannot change that, and
+		doing it on each run for as long as the refusal lasted cost a full download every time. ]]
+		if stageText == 'bedwars.session' then
+			clearBootPending()
+		end
+		task.spawn(function()
+			local deadline = os.clock() + 30
+			repeat
+				if type(vape) == 'table' and type(vape.CreateNotification) == 'function' then
+					pcall(vape.CreateNotification, vape, 'Pistonware', message, 20, 'alert')
+					return
+				end
+				task.wait(0.5)
+			until os.clock() > deadline
+			pcall(function()
+				game:GetService('StarterGui'):SetCore('SendNotification', {Title = 'Pistonware', Text = message, Duration = 20})
+			end)
+		end)
 	end
 	profileApplied = false
 	if vape and vape.BlockSaving then
@@ -463,12 +510,53 @@ local function finishLoading()
 		local loadOk, _, canSave = xpcall(function()
 			return vape:Load(nil, customProfile)
 		end, errorTrace)
+		--[[ canSave false is vape:Load saying a file would not decode. Saving stays blocked for this
+		session, so the broken file would never be rewritten and every boot would fail the same way:
+		a config saved as an error page did exactly that until the folder was deleted. Each file
+		that does not decode is moved aside to <name>.broken.txt (kept, not lost), and the config
+		sync is offered again on the next run. ]]
+		if loadOk and canSave == false then
+			pcall(function()
+				local httpService = game:GetService('HttpService')
+				local paths = {'pistonware/profiles/'..game.GameId..'.gui.txt'}
+				if type(vape.Profile) == 'string' and vape.Place ~= nil then
+					table.insert(paths, 'pistonware/profiles/'..vape.Profile..tostring(vape.Place)..'.txt')
+				end
+				local setAside = false
+				for _, path in paths do
+					local readOk, body = pcall(readfile, path)
+					if isfile(path) and readOk and type(body) == 'string' then
+						-- As vape:Load reads it: JSON that is a table ('429' alone decodes, as a number).
+						local decodes, decoded = pcall(httpService.JSONDecode, httpService, body)
+						if not (decodes and type(decoded) == 'table') then
+							local kept = pcall(writefile, (path:gsub('%.txt$', '.broken.txt')), body)
+							if type(delfile) == 'function' then
+								pcall(delfile, path)
+							else
+								-- No delfile: an empty but valid file loads as defaults.
+								pcall(writefile, path, path:find('%.gui%.txt$') and '{"v":1,"Categories":{}}'
+									or '{"v":1,"Categories":{},"Modules":{},"Legit":{}}')
+							end
+							setAside = true
+							bufferWarn('profile.setaside', path..(kept and ' did not decode and was moved to .broken.txt'
+								or ' did not decode and was cleared (its copy in .broken.txt could not be written)'))
+						end
+					end
+				end
+				if setAside then
+					profileSetAside = true
+					pcall(writefile, 'pistonware/profiles/profilecommit.txt', '')
+				end
+			end)
+		end
 		if not loadOk or canSave == false then
 			failBoot('profile.apply', loadOk and 'profile data could not be loaded safely' or _)
 			bufferWarn('profile.apply', 'profile application failed -- profile saving is blocked for this session')
 			return
 		end
 		debugWarn('[pistonware] profile load returned')
+		-- The boot finished: the loader's next run has nothing to repair (loader.lua cache.repair).
+		clearBootPending()
 
 		--[[
 			No autosave loop, and nothing timed anywhere in the save path.
@@ -1811,6 +1899,9 @@ if not shared.VapeIndependent then
 	not a failed boot: universal.lua is then the whole module set, so its profile still loads
 	and saves. A download that failed outright stays a failed boot. ]]
 	local adapterMissing = false
+	-- Why the last body GitHub sent was refused, for the failed-boot message, and the compile error
+	-- of one that did not compile.
+	local rejected, compileError
 		local cached = cacheAllowed() and hasContent(gamePath, tostring(game.PlaceId)) or nil
 	-- Any non-whitespace character; find stops at the first one instead of copying the whole file.
 	if cached and cached:find('%S') then
@@ -1820,19 +1911,94 @@ if not shared.VapeIndependent then
 		--[[ Single fetch (the old code requested this URL twice: once to probe, then again
 		inside downloadFile) and load straight from the response, so a stale/corrupt
 		cache file can't shadow what we just downloaded. ]]
-		local suc, res = pcall(function()
-			return pistonwareHttpGet(projectRawUrl('games/'..game.PlaceId..'.lua'), true)
-		end)
-		if suc and res and res ~= '' and res ~= '404: Not Found' then
-			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
+		--[[ Up to four tries, as every other file gets, since one missed request here stopped the whole
+		boot. A 404 is final: GitHub has no file for this place, which is an unsupported game. ]]
+		local res
+		--[[ Once a repair has found GitHub's raw files out of reach (loader.lua repairOffline), a place
+		file with an intact copy on disk stops after one failed try and runs that copy; one with
+		nothing to fall back to keeps every try, since a single missed request would fail the boot.
+		The copy is read, and compiled, only once a try has failed. nil: not read; false: none. ]]
+		local offline = release.repairFallback == true and release.repairOffline == true
+		local onDisk
+		for attempt = 1, 4 do
+			local suc, body = pcall(function()
+				return pistonwareHttpGet(projectRawUrl('games/'..game.PlaceId..'.lua'), true)
+			end)
+			if suc and body == '404: Not Found' then
+				adapterMissing = true
+				break
+			end
+			if suc and type(body) == 'string' and body ~= '' and not body:match('^%d%d%d: ') then
+				--[[ Taken only when it is no error page some executors hand back as the body, and it
+				compiles: written over the cached copy, a page or a cut-off file cost a working file
+				and the boot with it. Kept under the name it runs as, so it is not compiled twice. ]]
+				local head = body:sub(1, 200):lower()
+				if head:find('<!doctype html', 1, true) or head:find('<html', 1, true) then
+					rejected = 'GitHub sent an error page'
+				else
+					local compileOk, chunk, err = pcall(rawLoadstring, body, tostring(game.PlaceId))
+					if compileOk and type(chunk) == 'function' then
+						validatedChunks[gamePath] = {body = body, name = tostring(game.PlaceId), chunk = chunk}
+						res = body
+						break
+					end
+					--[[ Kept for the report when nothing runs. Every try is still made: a compile error only
+					names a line, so two different bad bodies (an error page in plain text, two downloads
+					cut short in the same comment) read the same and say nothing about the next one. ]]
+					rejected = 'the download did not compile'
+					compileError = tostring(compileOk and err or chunk)
+				end
+			end
+			if offline then
+				if onDisk == nil then
+					onDisk = hasContent(gamePath, tostring(game.PlaceId)) or false
+				end
+				if onDisk and onDisk:find('%S') then break end
+			end
+			if attempt < 4 then
+				task.wait(attempt)
+			end
+		end
+		--[[ A repair boot whose cache was current for this release (loader.lua repairFallback) runs
+		the intact copy on disk when GitHub's raw files are out of reach, as the loader does for its
+		own files. Without it every boot failed here for as long as they were, where a boot without
+		the repair ran from cache. A 404 stays final: an unsupported game. ]]
+		if not res and not adapterMissing and release.repairFallback == true then
+			if onDisk == nil then
+				onDisk = hasContent(gamePath, tostring(game.PlaceId)) or false
+			end
+			if onDisk and onDisk:find('%S') then
+				bufferWarn('cache.repair', 'could not fetch '..gamePath..' again; the intact copy on disk runs')
+				gameScriptStarted = runGameScript(onDisk, tostring(game.PlaceId))
+			end
+		end
+		if res then
+			local cachedBody = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res
+			local wrote = pcall(writefile, gamePath, cachedBody)
+			if wrote then
+				local readOk, back = pcall(readfile, gamePath)
+				wrote = readOk and back == cachedBody
+			end
+			if not wrote then
+				-- The loader holds its release marker back, so the next boot fetches this file again.
+				shared.PistonwareCacheWriteFailed = true
+			end
 			gameScriptStarted = runGameScript(res, tostring(game.PlaceId))
-		elseif suc and res == '404: Not Found' then
-			adapterMissing = true
 		end
 	end
 	if not gameScriptStarted then
-		if not adapterMissing then
-			failBoot('game.download', 'no usable game adapter could be loaded for '..tostring(game.PlaceId))
+		if not adapterMissing and compileError then
+			--[[ What GitHub sent does not compile, a broken push: reported as a compile failure always
+			was, with the file and line on screen and in the error buffer. ]]
+			if vape then
+				pcall(vape.CreateNotification, vape, 'Pistonware', 'Failed to load : '..compileError, 30, 'alert')
+			end
+			local trace = errorTrace(compileError)
+			failBoot('game.compile', trace)
+			reportRuntimeError('game.compile', compileError, trace)
+		elseif not adapterMissing then
+			failBoot('game.download', 'no usable game adapter could be loaded for '..tostring(game.PlaceId)
+				..(rejected and ' ('..rejected..')' or ''))
 		end
 		gameScriptFinished = true
 	end

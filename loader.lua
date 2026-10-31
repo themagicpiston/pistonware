@@ -856,23 +856,89 @@ local function hasContent(path, chunkName)
 	return body
 end
 
+--[[ A write only counts once it reads back the same. Solara does its file I/O through another
+process (Xeno likely too), where a write can return without the bytes arriving. A file whose write
+did not land is treated as missing, never as current, and the release marker stays where it was,
+so the next boot fetches it again instead of running the old copy from then on. ]]
+local cacheWriteFailed = false
+local function writeChecked(path, content)
+	local wrote, err = pcall(writefile, path, content)
+	if wrote then
+		local readOk, back = pcall(readfile, path)
+		if not (readOk and back == content) then
+			wrote = false
+			err = ('%s read back %s'):format(path,
+				readOk and type(back) == 'string' and (#back..' of '..#content..' bytes') or 'nothing')
+		end
+	end
+	if not wrote then
+		cacheWriteFailed = true
+	end
+	return wrote, err
+end
+
+--[[ What a non-.lua download must never be cached as: an error page some executors hand back as
+the body ('429: Too Many Requests', a 5xx page) and, for a config, anything that is not JSON. A
+profile or GUI settings file saved as an error page failed to load on every boot after, with saving
+blocked, until the folder was deleted. profiles/gui.txt is the one plain-text file in profiles/. ]]
+local function unusableBody(path, body)
+	if type(body) ~= 'string' or body == '' or body == '404: Not Found' then return true end
+	local head = body:sub(1, 200):lower()
+	if body:match('^%d%d%d: ') or head:find('<!doctype html', 1, true) or head:find('<html', 1, true) then
+		return true
+	end
+	if path:match('%.json$') or (path:match('profiles/.+%.txt$') and not path:match('profiles/gui%.txt$')) then
+		local ok, decoded = pcall(function()
+			return cloneref(game:GetService('HttpService')):JSONDecode(body)
+		end)
+		return not (ok and type(decoded) == 'table')
+	end
+	return false
+end
+
 --[[ Paths the update pass rewrote at the release commit during this boot. The release marker
 only moves once the whole boot has succeeded, so until then release.cacheReady stays false and
 downloadFile used to fetch every one of these again straight after they were written. Only a
 refresh whose write landed is listed, so a failed write still downloads as before. ]]
 local refreshedThisBoot = {}
 
+--[[ Set by a repair boot (cache.repair below) whose cache was already current for this release. A
+file it cannot fetch again then runs from disk when the copy there is intact, as it would have
+without the repair. ]]
+local repairFallback = false
+--[[ Set once that repair has found GitHub's raw files out of reach. Every file after that is tried
+once before its copy on disk runs, not four times with waits between, which held the boot on
+'Loading' for most of a minute. main.lua reads both as release.repairFallback/repairOffline. ]]
+local repairOffline = false
+
 local function downloadFile(path, func, chunkName)
 	local body, chunk
 	if release.cacheReady or refreshedThisBoot[path] then
 		body, chunk = hasContent(path, chunkName)
+		-- A config or asset cached as an error page is fetched again rather than served.
+		if body and not path:find('%.lua$') and unusableBody(path, body) then
+			body, chunk = nil, nil
+		end
 	end
 	if not body then
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local isBedwars = relPath == 'games/bedwars.lua'
 		local isLua = path:find('%.lua$') ~= nil
 		local content
+		--[[ The copy on disk a repair can fall back to: nil until read, false when there is none
+		usable. Once the repair has found GitHub's raw files out of reach, a file that has one stops
+		after a failed try and runs it; a file with nothing to fall back to keeps every try, since one
+		missed request then fails it. Read, and compiled, only once a try has failed. ]]
+		local onDisk, onDiskChunk
+		local function readOnDisk()
+			onDisk, onDiskChunk = hasContent(path, chunkName)
+			if onDisk and not isLua and unusableBody(path, onDisk) then
+				onDisk, onDiskChunk = false, nil
+			end
+		end
+		local attempts = 0
 		for attempt = 1, 4 do
+			attempts = attempt
 			local suc, res = pcall(function()
 				if isBedwars then
 					return game:HttpGet(protectedRawUrl(), true)
@@ -881,7 +947,9 @@ local function downloadFile(path, func, chunkName)
 			end)
 			if suc and res and res ~= '' and res ~= '404: Not Found' then
 				if not isLua then
-					content = res
+					if not unusableBody(path, res) then
+						content = res
+					end
 				elseif chunkName then
 					--[[ Checked exactly as it will be cached and run -- watermark line and chunk name
 					included -- so the compile check is also the chunk the caller runs. ]]
@@ -892,22 +960,48 @@ local function downloadFile(path, func, chunkName)
 				end
 				if content then break end
 			end
+			if repairOffline then
+				if onDisk == nil then
+					readOnDisk()
+				end
+				if onDisk then break end
+			end
 			if attempt < 4 then
 				task.wait(attempt)
 			end
 		end
+		if not content and repairFallback then
+			--[[ The release marker already vouched for this copy at this release, so a repair that
+			cannot reach GitHub runs it when it is intact. Failing here instead stopped every boot
+			for as long as GitHub's raw files were out of reach, where the old loader ran from cache. ]]
+			repairOffline = true
+			release.repairOffline = true
+			if onDisk == nil then
+				readOnDisk()
+			end
+			if onDisk then
+				logger:warn('cache.repair', 'could not fetch '..path..' again; the intact copy on disk runs')
+				if func then return func(path) end
+				if chunkName then return onDisk, onDiskChunk end
+				return onDisk
+			end
+		end
 		if not content then
-			local message = 'failed to download '..path..' after 4 attempts'
+			local message = 'failed to download '..path..' after '..attempts..(attempts == 1 and ' attempt' or ' attempts')
 			reportError('source.download', message, nil, false)
 			error(message, 2)
 		end
 		if isLua then
 			content = Watermark..'\n'..content
 		end
-		local wrote, writeError = pcall(writefile, path, content)
+		local wrote, writeError = writeChecked(path, content)
 		if not wrote then
 			reportError('source.cache.write', writeError, nil, false)
-			error(writeError, 2)
+			--[[ What was downloaded is still good for this boot. Only a caller that reads the file
+			back off disk (an asset handed to getcustomasset) cannot go on without it. ]]
+			if func then
+				error(writeError, 2)
+			end
 		end
 		body = content
 	end
@@ -1199,6 +1293,8 @@ local function resolveRelease()
 		release.version = release.channel..'@'..marker.commit:sub(1, 12)
 		release.resolved = true
 		release.cacheReady = true
+		-- Nothing this boot could reach named a commit (cache.repair waits for a run that can).
+		release.fromMarker = true
 		shared.PistonwareRelease = release
 		logger:warn('version.cached', 'using the last verified release because the branch tree was unavailable', {
 			channel = release.channel,
@@ -1325,10 +1421,12 @@ local function downloadProfilesListing(body, commit, onProgress)
 						local suc, res = pcall(function()
 							return game:HttpGet(projectRawUrl(relPath, commit or release.sourceRef), true)
 						end)
-						if suc and res and res ~= '' and res ~= '404: Not Found' then
-							writefile('pistonware/'..relPath, mergeGuiState('pistonware/'..relPath, res))
-							succeeded = true
-							break
+						if suc and not unusableBody('pistonware/'..relPath, res) then
+							local wrote = writeChecked('pistonware/'..relPath, mergeGuiState('pistonware/'..relPath, res))
+							if wrote then
+								succeeded = true
+								break
+							end
 						end
 						if attempt < 4 then
 							task.wait(attempt)
@@ -1440,25 +1538,44 @@ local function updateCachedFiles(onProgress)
 		for _, path in toUpdate do
 			task.spawn(function()
 				local done = false
-				for attempt = 1, 4 do
+				-- Whether GitHub answered with the file at all, whatever became of writing it.
+				local reached = false
+				--[[ Under a release the marker already vouches for, a file with no manifest entry is one
+				a repair could not fetch again (or one first fetched on demand): its intact copy on disk
+				runs either way, so it gets one try, without waits, until GitHub's raw files answer. ]]
+				local attempts = (release.cacheReady == true and manifest[path] == nil) and 1 or 4
+				for attempt = 1, attempts do
 					local suc, res = pcall(function()
 							return game:HttpGet(projectRawUrl(select(1, path:gsub(' ', '%%20')), headSha), true)
 					end)
 					--[[ compile check: never overwrite a working cached file with an error page ]]
 					if suc and res and res ~= '' and res ~= '404: Not Found' and loadstring(res) ~= nil then
-						if pcall(writefile, 'pistonware/'..path, Watermark..'\n'..res) then
-							refreshedThisBoot['pistonware/'..path] = true
+						reached = true
+						local localPath = 'pistonware/'..path
+						local wrote, writeError = writeChecked(localPath, Watermark..'\n'..res)
+						if wrote then
+							refreshedThisBoot[localPath] = true
+							manifest[path] = remote[path]
+							done = true
+							changed = true
+							break
 						end
-						manifest[path] = remote[path]
-						done = true
-						changed = true
-						break
+						reportError('cache.write', writeError, nil, false)
 					end
-					if attempt < 4 then
+					if attempt < attempts then
 						task.wait(attempt)
 					end
 				end
-				if not done then failed += 1 end
+				if not done then
+					failed += 1
+					--[[ A repair that could not get this from GitHub at all: the files after it that have
+					a copy on disk try once (repairOffline). A write that did not land says nothing about
+					GitHub, and is not counted. ]]
+					if repairFallback and not reached then
+						repairOffline = true
+						release.repairOffline = true
+					end
+				end
 				--[[ Counted first, reported second, the report guarded. See joinBatch: a throwing
 				progress callback here used to strand the join for the rest of the session. ]]
 				completed += 1
@@ -3458,6 +3575,55 @@ if not releaseOk then
 end
 console:SetLine(('Loading %s (%s)...'):format(release.channel, release.version))
 
+--[[ Self-repair. pistonware/bootpending_<UserId>.txt is written just before main.lua runs and
+emptied by main.lua once the profile has applied, so finding it filled means this account's last
+boot never finished: it stopped on an error, or hung, or the game closed on it. One file per
+account, since accounts share an install, and another client still loading is not this one's
+failure. This run then fetches every cached file again at the release commit, without touching
+profiles: an empty manifest makes the update pass refresh them all, and with cacheReady off
+nothing is trusted from disk unless it cannot be fetched (repairFallback, which main.lua also
+applies to the place file). A run with no LocalPlayer after 5 s (a teleport-queued run can start
+before there is one) leaves the check to a later run rather than guess at the account. ]]
+local bootPendingPath
+pcall(function()
+	local players = cloneref(game:GetService('Players'))
+	local deadline = os.clock() + 5
+	while not players.LocalPlayer and os.clock() < deadline do
+		task.wait()
+	end
+	if players.LocalPlayer then
+		bootPendingPath = 'pistonware/bootpending_'..tostring(players.LocalPlayer.UserId)..'.txt'
+	end
+end)
+local repairing = false
+if bootPendingPath then
+	pcall(function()
+		repairing = isfile(bootPendingPath) and readfile(bootPendingPath) ~= ''
+	end)
+end
+if repairing and release.fromMarker then
+	--[[ The marker named the release because the API, git refs, commit feed and tree all failed,
+	but raw files at that commit may still come through. One request decides: with none, there is
+	nothing to fetch, and the repair waits for a run that can reach GitHub. ]]
+	local rawUp = false
+	pcall(function()
+		local res = game:HttpGet(projectRawUrl('main.lua'), true)
+		rawUp = not unusableBody('main.lua', res) and loadstring(res) ~= nil
+	end)
+	if not rawUp then
+		repairing = false
+		logger:warn('cache.repair', 'the last boot did not finish, but GitHub is out of reach; a later run repairs')
+	end
+end
+if repairing then
+	repairFallback = release.cacheReady == true
+	release.repairFallback = repairFallback
+	release.cacheReady = false
+	pcall(writefile, 'pistonware/filecheck.json', '{}')
+	logger:warn('cache.repair', 'the last boot did not finish; fetching every cached file again')
+	console:SetLine('Repairing files after an incomplete load...')
+end
+
 --[[ Step 1: hold here until ROBLOX itself is ready. Everything after this touches game state
 (or hands off to main.lua, which does), so the shared.Vape* flags the injecting loadstring
 sets have to be in place and the place has to be loaded before we move on.
@@ -3788,6 +3954,22 @@ task.spawn(function()
 	end
 end)
 
+--[[ Emptied by main.lua once the profile has applied. Still filled at the next run means this boot
+never finished, and that run repairs the install (cache.repair above). ]]
+if not bootPendingPath then
+	-- Waited for above, so a late LocalPlayer is here by now; with none, this boot is not marked.
+	pcall(function()
+		local player = cloneref(game:GetService('Players')).LocalPlayer
+		if player then
+			bootPendingPath = 'pistonware/bootpending_'..tostring(player.UserId)..'.txt'
+		end
+	end)
+end
+shared.PistonwareBootPending = bootPendingPath
+if bootPendingPath then
+	pcall(writefile, bootPendingPath, tostring(os.time())..' '..tostring(release.version))
+end
+
 --[[ Protected so a failure surfaces on the console line instead of leaving the window stuck on
 'Loading pistonware...'; the buffer retains the diagnostic without public executor output. ]]
 local ok, result = xpcall(function()
@@ -3826,9 +4008,14 @@ end
 
 if ok then
 	--[[ Only a cache that already matched, or one this boot reconciled, earns the marker. Written
-	after a skipped update it would vouch for files still at the previous commit. ]]
-	if release.cacheReady or cacheReconciled or isDeveloper then
+	after a skipped update it would vouch for files still at the previous commit; written after a
+	write that did not land, or a boot main.lua could not finish, it would vouch for files that
+	are not there. Held back, the next boot fetches them again. ]]
+	local cacheSound = not cacheWriteFailed and not shared.PistonwareCacheWriteFailed and not shared.PistonwareBootFailed
+	if (release.cacheReady or cacheReconciled or isDeveloper) and cacheSound then
 		persistReleaseMarker()
+	elseif not cacheSound then
+		logger:warn('version.marker', 'release marker held back: a cache write did not land or the boot did not finish')
 	end
 	logger:info('loader.complete', 'injection succeeded', {
 		channel = release.channel,
