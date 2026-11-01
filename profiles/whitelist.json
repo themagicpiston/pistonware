@@ -1,0 +1,16 @@
+{
+    "WhitelistedUsers": {
+        "1": {
+            "level": 2,
+            "attackable": false,
+            "tags": [
+                {
+                    "text": "not a real whitelist lol stop looking at my github skid suhar",
+                    "color": [255, 50, 50]
+                }
+            ]
+        }
+    },
+    "BlacklistedUsers": {},
+    "KillVape": false
+}
