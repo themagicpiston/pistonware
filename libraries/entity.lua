@@ -921,6 +921,12 @@ entitylib.isVulnerable = function(entity)
 	return not cached.Shielded
 end
 
+--[[ Whether a player is hidden in a disguise, for the queries' Milo setting. Nothing here knows of
+one: a game that has them sets this (BedWars: Milo hiding as a block). ]]
+entitylib.isDisguised = function(entity)
+	return false
+end
+
 entitylib.getEntityColor = function(entity)
 	entity = entity.Player
 	return entity and tostring(entity.TeamColor) ~= 'White' and entity.TeamColor.Color or nil
@@ -1083,6 +1089,8 @@ local function entityPartIsEligible(entity, settings, partName)
 	if not settings.Players and entity.Player then return end
 	if not settings.NPCs and entity.NPC then return end
 	if not entity.Targetable then return end
+	-- Ignore Milo (the Targets row): a player hidden in a disguise the game says is one.
+	if settings.Milo and entity.Player and entitylib.isDisguised(entity) then return end
 	local part = entity[partName]
 	if not part or not entitylib.isVulnerable(entity) then return end
 	return part

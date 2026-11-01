@@ -1507,8 +1507,18 @@ run(function()
 		return UICleanup ~= nil and UICleanup.Enabled and TopbarPosition ~= nil and TopbarPosition.Value == 'Middle'
 	end
 
-	-- Docked beside the buttons only while UI Cleanup is on with Button Next To Topbar.
+	-- Hide Pistonware Mobile Button: the button is still there to tap, but nothing of it shows.
+	function topbar.hidden()
+		local hide = vape.HideVapeButton
+		return type(hide) == 'table' and hide.Enabled == true
+	end
+
+	--[[ Docked beside the buttons while UI Cleanup is on with Button Next To Topbar, and whenever the
+	button is hidden. Hidden it takes no room (vapeButton), and left in the corner it would lie
+	unseen over the game's last button and take its taps; beside the row it covers only the empty
+	strip or the scores. ]]
 	function topbar.docked()
+		if topbar.hidden() then return true end
 		return UICleanup ~= nil and UICleanup.Enabled and NextToTopbar ~= nil and NextToTopbar.Enabled
 	end
 
@@ -1529,10 +1539,11 @@ run(function()
 
 	--[[ The room the mobile button takes in the row -- its width and the 7 px the GUI keeps from the
 	game's buttons -- or 0 where there is no button (a PC), and whether the GUI wants it in the
-	corner. A GUI without the corner always docks it. ]]
+	corner. A GUI without the corner always docks it. A hidden button takes none: with nothing
+	showing there is nothing to keep clear, and the bar stays where the game puts it. ]]
 	function topbar.vapeButton()
 		local button = vape.VapeButton
-		if topbar.Unloaded or not (button and button.Parent) then
+		if topbar.Unloaded or not (button and button.Parent) or topbar.hidden() then
 			return 0, false
 		end
 		return math.max(button.AbsoluteSize.X, 32) + 7, vape.SetVapeButtonDocked ~= nil and not vape.VapeButtonDocked
@@ -1804,4 +1815,18 @@ run(function()
 		topbar.Unloaded = true
 		topbar.restore()
 	end)
+	--[[ Hide Pistonware Mobile Button is the GUI's, and it changes the room the button takes and where
+	it docks, so the bar is laid out again whenever it is switched (a click or a profile load). ]]
+	local hideButton = vape.HideVapeButton
+	if type(hideButton) == 'table' and type(hideButton.Toggle) == 'function' then
+		local toggle = hideButton.Toggle
+		hideButton.Toggle = function(self, ...)
+			local results = table.pack(toggle(self, ...))
+			topbar.refresh()
+			return table.unpack(results, 1, results.n)
+		end
+		vape:Clean(function()
+			hideButton.Toggle = toggle
+		end)
+	end
 end)

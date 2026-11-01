@@ -14643,6 +14643,9 @@ components.Targets = function(props, children, api)
 		end
 		self.Invisible:Color(hue, sat, val, isRainbow)
 		self.Walls:Color(hue, sat, val, isRainbow)
+		if self.Milo then
+			self.Milo:Color(hue, sat, val, isRainbow)
+		end
 	end
 
 	function component:Load(data)
@@ -14661,6 +14664,11 @@ components.Targets = function(props, children, api)
 		if self.Walls.Enabled ~= data.Walls then
 			self.Walls:Toggle()
 		end
+
+		-- A profile saved before the row existed has no Milo, and keeps the module's default.
+		if self.Milo and data.Milo ~= nil and self.Milo.Enabled ~= data.Milo then
+			self.Milo:Toggle()
+		end
 	end
 
 	function component:Save(data)
@@ -14670,6 +14678,10 @@ components.Targets = function(props, children, api)
 			Invisible = self.Invisible.Enabled,
 			Walls = self.Walls.Enabled
 		}
+		-- Saved off as well as on: left out, a profile that turned it off would load it back on.
+		if self.Milo then
+			data.Targets.Milo = self.Milo.Enabled
+		end
 	end
 
 	function component:UpdateText()
@@ -14711,6 +14723,20 @@ components.Targets = function(props, children, api)
 		end
 	}, targets, {Options = {}})
 
+	--[[ Only on a module that asks for it (props.Milo, its default): the BedWars modules, which skip a
+	player Milo has hidden as a block while it is on. ]]
+	if props.Milo ~= nil then
+		component.Milo = components.Toggle({
+			Name = 'Ignore Milo',
+			Darker = true,
+			LayoutOrder = 4,
+			Tooltip = 'Players hidden as a block by Milo are not targeted.',
+			Function = function()
+				props.Function()
+			end
+		}, targets, {Options = {}})
+	end
+
 	if props.Players then
 		component.Players:Toggle()
 	end
@@ -14725,6 +14751,10 @@ components.Targets = function(props, children, api)
 
 	if props.Walls then
 		component.Walls:Toggle()
+	end
+
+	if props.Milo then
+		component.Milo:Toggle()
 	end
 	component:UpdateText()
 
