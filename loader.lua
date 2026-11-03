@@ -8,19 +8,6 @@ local function installPistonwareBuffer(developerMode)
 	local dumping, dumpScheduled, pendingDump = false, false, false
 	local filesystemReady = false
 	local buffer = {}
-	--[[ For now, a boot trace in every build: warnings, errors and the few lines that mark how far a
-	boot got also go to the executor console, so a player's Roblox log shows where a boot stopped.
-	Capped, since an error can repeat every frame. The rest stays developer-only. ]]
-	local traced = {
-		['loader.start'] = true,
-		['version.resolved'] = true,
-		['boot.phase'] = true,
-		['console.ready'] = true,
-		['loader.complete'] = true,
-		['runtime.stage'] = true,
-		['runtime.debug'] = true
-	}
-	local traceLeft = 150
 
 	pcall(function()
 		filesystemReady = type(isfolder) == 'function' and isfolder('pistonware') and true or false
@@ -141,22 +128,6 @@ local function installPistonwareBuffer(developerMode)
 			else
 				pcall(nativePrint, line)
 			end
-		elseif traceLeft > 0 and (entry.level ~= 'info' or traced[entry.event]) then
-			traceLeft -= 1
-			local shown = traceLeft > 0 and line or line..' (trace limit reached)'
-			--[[ The key itself comes out too: safeText knows only the script_key= and ?key= shapes,
-			and these lines reach a console players share in screenshots. ]]
-			pcall(function()
-				local genv = type(getgenv) == 'function' and getgenv() or nil
-				local keys = {rawget(shared, 'PistonwareKey'), script_key, genv and rawget(genv, 'script_key')}
-				for index = 1, 3 do
-					local key = keys[index]
-					if type(key) == 'string' and #key >= 6 then
-						shown = shown:gsub((key:gsub('%p', '%%%0')), '<redacted>')
-					end
-				end
-			end)
-			pcall(entry.level == 'info' and nativePrint or nativeWarn, shown)
 		end
 		if entry.level == 'error' or entry.level == 'fatal' then requestDump() end
 		return line

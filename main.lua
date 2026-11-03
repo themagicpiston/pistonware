@@ -420,7 +420,6 @@ local function failBoot(stageName, err)
 		its profile (blurred, on defaults) and nothing saying why, and Xeno has no getgenv to reach the
 		buffer from. The loader's next run repairs the install (loader.lua cache.repair). ]]
 		local stageText = tostring(stageName or 'unknown')
-		bufferWarn('boot.failed', 'boot stopped at '..stageText, {error = tostring(err or 'unknown failure')})
 		local message = stageText == 'bedwars.session'
 			and "Your key session wasn't accepted, so the BedWars modules stayed off."
 			or stageText == 'profile.apply' and (profileSetAside
@@ -555,12 +554,7 @@ local function finishLoading()
 			bufferWarn('profile.apply', 'profile application failed -- profile saving is blocked for this session')
 			return
 		end
-		-- Where the menu is and whether its blur is on: a blurred menu was the Solara report.
-		local menuState = 'menu state unknown'
-		pcall(function()
-			menuState = ('menu in %s, Blur background %s'):format(vape.gui.Parent.ClassName, tostring(vape.Blur.Enabled))
-		end)
-		debugWarn('[pistonware] profile load returned ('..menuState..')')
+		debugWarn('[pistonware] profile load returned')
 		-- The boot finished: the loader's next run has nothing to repair (loader.lua cache.repair).
 		clearBootPending()
 

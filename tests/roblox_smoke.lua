@@ -354,14 +354,7 @@ do
 	publicBuffer.print('test.print', 'public print')
 	publicBuffer.warn('test.warn', 'public warning')
 	publicBuffer.error('test.error', 'script_key=secret', {url = 'https://example.test/?key=secret'})
-	--[[ The boot trace (loader.lua installPistonwareBuffer, for now in every build): the warning and
-	the error reach the console, redacted like the dump, and plain info lines stay off it. ]]
-	expect(#consoleLines == 2, 'public buffer printed something other than its warning and error')
-	expect(consoleLines[1]:find('warn:', 1, true) == 1 and consoleLines[1]:find('public warning', 1, true), 'public warning did not reach the console')
-	expect(consoleLines[2]:find('warn:', 1, true) == 1 and consoleLines[2]:find('test.error', 1, true), 'public error did not reach the console')
-	for _, line in consoleLines do
-		expect(not line:find('secret', 1, true), 'the boot trace printed a key')
-	end
+	expect(#consoleLines == 0, 'public buffer wrote to the executor console')
 	local dumped, dumpPath, entryCount = publicBuffer.dump('smoke')
 	expect(dumped and type(files[dumpPath]) == 'string', 'public buffer did not write its dump')
 	expect(dumpPath:find('pistonware/errors/', 1, true) == 1, 'buffer dump used the wrong folder')
@@ -372,18 +365,6 @@ do
 	expect(#snapshot == 512 and dropped == 12, 'buffer ring did not enforce its capacity')
 	local guarded, guardedError = publicBuffer.guard('test.guard', false, function() error('guarded failure') end)
 	expect(not guarded and tostring(guardedError):find('guarded failure', 1, true), 'buffer guard did not return its failure')
-	consoleLines = {}
-	publicBuffer.log('boot.phase', 'traced phase')
-	expect(#consoleLines == 1 and consoleLines[1]:find('print:', 1, true) == 1 and consoleLines[1]:find('traced phase', 1, true),
-		'a boot-progress line did not reach the console')
-	-- A key in a shape safeText does not know still comes out of the console line.
-	consoleLines = {}
-	local keyBefore = rawget(shared, 'PistonwareKey')
-	rawset(shared, 'PistonwareKey', 'Kx9-trace-key')
-	publicBuffer.warn('test.key', 'key Kx9-trace-key was refused', {body = '{"script_key":"Kx9-trace-key"}'})
-	rawset(shared, 'PistonwareKey', keyBefore)
-	expect(#consoleLines == 1 and not consoleLines[1]:find('Kx9-trace-key', 1, true) and consoleLines[1]:find('<redacted>', 1, true),
-		'the boot trace printed the key')
 
 	consoleLines = {}
 	local developerBuffer = installBuffer(true)
