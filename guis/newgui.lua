@@ -3376,6 +3376,16 @@ local mobileBlur
 	wipes Lighting between rounds cannot leave the toggle pointing at a dead effect.
 ]]
 local function setMobileBlur(enabled)
+	--[[ Tagged, so one an earlier injection left behind (its Uninject never got this far) is found
+	and removed here instead of blurring the world until the next server. ]]
+	pcall(function()
+		for _, child in lighting:GetChildren() do
+			if child ~= mobileBlur and child:GetAttribute('PistonwareMenuBlur') then
+				child:Destroy()
+			end
+		end
+	end)
+
 	if enabled then
 		if mobileBlur and mobileBlur.Parent then return end
 
@@ -3384,6 +3394,7 @@ local function setMobileBlur(enabled)
 
 		effect.Name = randomString()
 		effect.Size = 18
+		pcall(effect.SetAttribute, effect, 'PistonwareMenuBlur', true)
 		effect.Parent = lighting
 		mobileBlur = effect
 	elseif mobileBlur then
@@ -3407,6 +3418,27 @@ function vape:BlurCheck()
 	end
 
 	setthreadidentity(8)
+	--[[ The native blur covers every ScreenGui not marked OnTopOfCoreBlur, and a menu in PlayerGui is
+	not drawn over it: Solara's never gets the flag, and whether the flag holds in PlayerGui at all is
+	unknown. That menu was blurred along with the game and could not be read, so it takes the
+	BlurEffect a phone gets, which blurs only the world. A read here that fails means the menu is not
+	in PlayerGui (callbacks can always read that), and the native path below is right for it. The
+	native blur is switched off in case an earlier build left it on, but not over Roblox's own
+	connection-error blur. ]]
+	local underBlur = false
+	pcall(function()
+		underBlur = gui ~= nil and gui.Parent ~= nil and gui.Parent:IsA('PlayerGui')
+	end)
+	if underBlur then
+		pcall(function()
+			if guiService:GetErrorType() == Enum.ConnectionError.OK then
+				runService:SetRobloxGuiFocused(false)
+			end
+		end)
+		setMobileBlur(wanted)
+		return
+	end
+
 	pcall(function()
 		runService:SetRobloxGuiFocused((open or guiService:GetErrorType() ~= Enum.ConnectionError.OK) and self.Blur.Enabled)
 	end)
