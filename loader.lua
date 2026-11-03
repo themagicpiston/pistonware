@@ -734,7 +734,7 @@ local Strings = {
 	saved_incorrect = 'Saved key no longer exists - get a new one.',
 	saved_banned    = 'Saved key is blacklisted.',
 	placeholder     = 'Paste your key here',
-	work_ink        = 'Work.ink',
+	work_ink        = 'Work.ink (Recommended)',
 	loot_labs       = 'LootLabs',
 	paste           = 'Paste',
 	submit          = 'Submit',
@@ -2420,7 +2420,7 @@ local function createConsole()
 
 		local box = Instance.new('TextBox')
 		box.LayoutOrder = 1
-		box.Size = UDim2.fromOffset(320, 34)
+		box.Size = UDim2.fromOffset(260, 34)
 		box.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
 		box.BorderSizePixel = 0
 		box.ClearTextOnFocus = false
@@ -2481,11 +2481,11 @@ local function createConsole()
 
 		--[[ One button per key provider, in the order the caller lists them, so adding a
 		provider is an entry in that list rather than an edit in here. The widths across the
-		whole row are chosen to fit: 948px usable, 910px used with every button showing. ]]
+		whole row are chosen to fit: 948px usable, 945px used with every button showing. ]]
 		local order = 1
 		for _, link in opts.links or {} do
 			order += 1
-			local button = answerButton(link.text, 105, order)
+			local button = answerButton(link.text, link.width or 105, order)
 			hint(button, link.tooltip)
 			button.MouseButton1Click:Connect(function()
 				link.onClick(say)
@@ -3035,11 +3035,11 @@ do
 				submitTip = t('tip_submit'),
 				helpText = t('need_help'),
 				helpTip = t('tip_help'),
-				--[[ The order here is the order on screen, and each entry carries its own URL
-				and its own line of hover help -- the console draws whatever it is handed and
-				knows nothing about LuaArmor. ]]
+				--[[ The order here is the order on screen, and each entry carries its own URL,
+				its own line of hover help and, when its label is longer than 105px, its width
+				-- the console draws whatever it is handed and knows nothing about LuaArmor. ]]
 				links = {
-					{text = t('work_ink'), tooltip = t('tip_work_ink'), onClick = function(say)
+					{text = t('work_ink'), width = 200, tooltip = t('tip_work_ink'), onClick = function(say)
 						copyLink('Work.ink', WORKINK_URL, say)
 					end},
 					{text = t('loot_labs'), tooltip = t('tip_loot_labs'), onClick = function(say)
