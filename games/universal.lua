@@ -5602,6 +5602,7 @@ run(function()
 		end,
 		Tooltip = 'Colors other players so you can see them through walls.\nChoose a glow or box style, its colors and transparency.'
 	})
+	Chams:CreateDivider({Text = 'Main'})
 	Teammates = Chams:CreateToggle({
 		Name = 'Priority Only',
 		DisplayName = 'Hide friendlies',
@@ -6793,7 +6794,124 @@ run(function()
 		Tooltip = 'Shows your health in the middle of the screen.'
 	})
 end)
-	
+
+run(function()
+	local MotionBlur
+	local Strength
+	local SpeedBlur
+	--[[ How the blur follows the camera. The turn speed is averaged over about 25 ms (TURN_SMOOTH), so
+	a mouse that reports less often than the screen draws reads as one steady turn. Under DEADZONE
+	degrees a second (aiming) it adds nothing; past it the turn eases toward full blur, about two thirds
+	of the way 500 degrees a second further on, and never stops short at a hard cap. Speed Blur works the
+	same way on how far you are over running pace sideways (FLAT) or over a jump's fall (FALL), and gives
+	at most SPEED_SHARE of the peak on its own. The blur comes in at RISE and fades at FALL_RATE, all per
+	second of real frame time, so every frame rate looks the same, and below OFF it is switched off, so a
+	still camera costs nothing. A turn of more than CUT degrees in one frame from a camera that was nearly
+	still is the camera being placed (a teleport, a cutscene), not turned, and adds nothing; the same
+	again straight after is a fast turn at a low frame rate. For SETTLE seconds after you respawn, when
+	the camera is snapped behind the new character, turning adds nothing either. ]]
+	local tuning = {
+		PEAK = 32, DEADZONE = 120, TURN_SCALE = 500, TURN_SMOOTH = 40, CUT = 75, SETTLE = 0.2,
+		FLAT = 28, FALL = 70, SPEED_SCALE = 60, SPEED_SHARE = 0.7,
+		RISE = 20, FALL_RATE = 7, OFF = 0.25
+	}
+
+	MotionBlur = vape.Categories.Render:CreateModule({
+		Name = 'MotionBlur',
+		Function = function(callback)
+			if callback then
+				local blur, camera, lastLook
+				local size, rate, lastAngle, settle = 0, 0, 0, 0
+
+				local function show(value)
+					if value < tuning.OFF then
+						if blur and blur.Enabled then
+							blur.Enabled = false
+						end
+						return
+					end
+					-- made again if the game cleared Lighting (only whether it has a parent: lightingService
+					-- is a cloneref, which need not compare equal to the Parent read back)
+					if not blur or not blur.Parent then
+						if blur then
+							pcall(blur.Destroy, blur)
+						end
+						blur = nil
+						local ok, effect = pcall(function()
+							local made = Instance.new('BlurEffect')
+							made.Size = 0
+							made.Parent = lightingService
+							return made
+						end)
+						if not ok then return end
+						blur = effect
+					end
+					blur.Size = value
+					if not blur.Enabled then
+						blur.Enabled = true
+					end
+				end
+
+				MotionBlur:Clean(function()
+					if blur then
+						pcall(blur.Destroy, blur)
+						blur = nil
+					end
+				end)
+				-- a respawn snaps the camera behind the new character in one frame (see tuning)
+				MotionBlur:Clean(lplr.CharacterAdded:Connect(function()
+					settle = tuning.SETTLE
+				end))
+				MotionBlur:Clean(runService.RenderStepped:Connect(function(delta)
+					-- only guards the division: the FPS Unlocker goes to 999 and fpscap further
+					local step = math.max(delta, 1e-4)
+					settle = math.max(settle - delta, 0)
+					local turn = 0
+					if gameCamera then
+						local look = gameCamera.CFrame.LookVector
+						local angle = 0
+						if camera == gameCamera and lastLook and settle == 0 then
+							angle = math.deg(math.atan2(look:Cross(lastLook).Magnitude, look:Dot(lastLook)))
+							-- angle <= 180 is false for a NaN camera
+							if angle < tuning.CUT or (angle <= 180 and lastAngle >= tuning.CUT / 3) then
+								turn = angle / step
+							end
+						end
+						camera, lastLook, lastAngle = gameCamera, look, angle
+					end
+					rate += (turn - rate) * (1 - math.exp(-tuning.TURN_SMOOTH * step))
+
+					local fast = 0
+					if SpeedBlur.Enabled and entitylib.isAlive then
+						local velocity = entitylib.character.RootPart.AssemblyLinearVelocity
+						fast = math.max(math.sqrt(velocity.X * velocity.X + velocity.Z * velocity.Z) - tuning.FLAT, -velocity.Y - tuning.FALL, 0)
+					end
+
+					local turning = rate > tuning.DEADZONE and 1 - math.exp(-(rate - tuning.DEADZONE) / tuning.TURN_SCALE) or 0
+					local moving = fast > 0 and tuning.SPEED_SHARE * (1 - math.exp(-fast / tuning.SPEED_SCALE)) or 0
+					local target = tuning.PEAK * (Strength.Value / 100) * (1 - (1 - turning) * (1 - moving))
+					size += (target - size) * (1 - math.exp(-(target > size and tuning.RISE or tuning.FALL_RATE) * step))
+					show(size)
+				end))
+			end
+		end,
+		Tooltip = 'Blurs the screen on fast turns and at high speed.\nSlow aiming and walking stay sharp; the blur fades out smoothly.'
+	})
+	Strength = MotionBlur:CreateSlider({
+		Name = 'Strength',
+		Min = 10,
+		Max = 100,
+		Default = 50,
+		Suffix = '%',
+		Tooltip = 'How strong the blur gets, from turning and from speed.'
+	})
+	SpeedBlur = MotionBlur:CreateToggle({
+		Name = 'Speed Blur',
+		Default = true,
+		Tooltip = 'Also blurs when you move much faster than running, like a long fall or a strong speed boost. Walking and jumping stay sharp.'
+	})
+end)
+
 run(function()
 	local NameTags
 	local Targets

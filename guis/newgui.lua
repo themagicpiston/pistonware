@@ -779,6 +779,8 @@ local theme = {
 	Pill = Color3.fromRGB(64, 64, 64),
 	PillHover = Color3.fromRGB(80, 80, 80),
 	Badge = Color3.fromRGB(40, 40, 40),
+	-- The HOLD badge while hold is on: #323232, a shade over the key badge's (video 10-11-25).
+	HoldOn = Color3.fromRGB(50, 50, 50),
 	Outline = Color3.fromRGB(64, 64, 64),
 	Track = Color3.fromRGB(64, 64, 64),
 	TrackOff = Color3.fromRGB(64, 64, 64),
@@ -796,6 +798,8 @@ local theme = {
 	SubTextLit = Color3.fromRGB(187, 187, 187),
 	Muted = Color3.fromRGB(102, 102, 102),
 	Red = Color3.fromRGB(221, 70, 71),
+	-- A list row's x at rest, #424242; it goes theme.Red under the pointer (the owner's video 2).
+	CloseRest = Color3.fromRGB(66, 66, 66),
 	Yellow = Color3.fromRGB(245, 190, 60),
 	Green = Color3.fromRGB(82, 196, 106),
 	-- One place for the sizes the cards are built from, so the layout code and the rows agree.
@@ -822,7 +826,10 @@ local theme = {
 	NotifyText = Color3.fromRGB(223, 223, 223), -- a notification's message, #DFDFDF
 	NotifyGreen = Color3.fromRGB(141, 237, 51), -- the success tag, Slinky's profile green #8DED33
 	Backdrop = Color3.fromRGB(48, 48, 48), -- behind a modal, at 0.75 opacity
-	FollowFast = 21.9, -- the tab pill, the tab page and a card's height
+	FollowFast = 21.9, -- the tab pill and the tab page
+	--[[ A card's height: Roblox's Exponential Out over 0.3 s, which a follower at 10 ln 2 / 0.3 a
+	second draws exactly (a setting a toggle reveals, the owner's video 10-11-25 at 49.98-50.25 s). ]]
+	FollowCard = 23.1,
 	FollowDrop = 10.75, -- a dropdown box's height
 	SwitchTime = 0.10, -- a switch's knob and track, Sine InOut
 	TipInfo = TweenInfo.new(0.10, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
@@ -1959,30 +1966,76 @@ function ui.hover(gui, enter, leave, region)
 		end
 		set(lit)
 	end
-	gui.MouseEnter:Connect(function()
+	local connections = {}
+	table.insert(connections, gui.MouseEnter:Connect(function()
 		entry.Check(true)
-	end)
+	end))
 	if region then
-		gui.MouseMoved:Connect(function()
+		table.insert(connections, gui.MouseMoved:Connect(function()
 			entry.Check(true)
-		end)
+		end))
 	end
-	gui.MouseLeave:Connect(function()
+	table.insert(connections, gui.MouseLeave:Connect(function()
 		entry.Check(false)
-	end)
+	end))
+	--[[ For a hover that ends before its gui does (a reveal a setting turns off): its connections go
+	and it leaves both registries, without calling leave, whose target may be gone already. It is
+	shaped as a connection is, so it can sit in a list of them. ]]
+	function entry.Disconnect()
+		for _, connection in connections do
+			connection:Disconnect()
+		end
+		table.clear(connections)
+		if ui.hovered[gui] == entry.Rest then
+			ui.hovered[gui] = nil
+		end
+		entry.Lit = false
+		ui.hoverables[entry] = nil
+	end
 	ui.hoverables[entry] = true
 	return entry
 end
 
--- After a modal closes: whatever is under the still pointer lights straight away.
+--[[ After a modal closes: whatever is under the still pointer lights straight away -- in the menu a
+row really showing (ui.rowShowing), outside it (an overlay window's pin) one shown all the way up to
+the scaled layer. ]]
 function ui.rehover()
 	local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
 	for entry in ui.hoverables do
 		local gui = entry.Gui
-		if gui.Parent and ui.within(point, gui.AbsolutePosition, gui.AbsoluteSize) and ui.rowShowing(gui, point) then
-			entry.Check(true)
+		if gui.Parent and ui.within(point, gui.AbsolutePosition, gui.AbsoluteSize) then
+			local showing
+			if gui:IsDescendantOf(clickgui) then
+				showing = ui.rowShowing(gui, point)
+			else
+				local node = gui
+				while node and node ~= scaledgui and not (node:IsA('GuiObject') and not node.Visible) do
+					node = node.Parent
+				end
+				showing = node == scaledgui
+			end
+			if showing then
+				entry.Check(true)
+			end
 		end
 	end
+end
+
+--[[ A list's rows rebuilt under a still pointer (an entry added or taken away): after the click that
+rebuilt them, what the pointer rests on now lights and what moved away from it goes out. Once per
+frame, and only with the menu open. ]]
+function ui.rehoverSoon()
+	if ui.rehoverQueued then return end
+	ui.rehoverQueued = true
+	task.defer(function()
+		ui.rehoverQueued = false
+		if vape.Loaded == nil or not (clickgui and clickgui.Visible) then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		ui.restHovered()
+		ui.rehover()
+	end)
 end
 
 -- Run at the end of the frame the menu is shut in (its Visible handler, build.gui).
@@ -2458,6 +2511,8 @@ function ui.confirm(body, onContinue, continueText)
 	end)
 
 	local function dismiss()
+		-- Off the Escape stack however it closes (ui.escape).
+		ui.popEscape(blocker)
 		if ui.modal == blocker then
 			ui.modal = nil
 		end
@@ -2478,7 +2533,315 @@ function ui.confirm(body, onContinue, continueText)
 		dismiss()
 		task.spawn(onContinue)
 	end)
+	-- Escape cancels it, as a click off the card does, and leaves the menu up.
+	ui.pushEscape(blocker, dismiss)
 	return blocker
+end
+
+--[[
+	Escape, as in Slinky: it closes the menu inside the menu that is open -- a confirmation, a colour
+	picker, an item search, an open dropdown, the module search -- and leaves the menu up; with none
+	open it shuts the menu, exactly as the menu's key does. Each inner menu puts how it closes on this
+	stack when it opens, newest on top, and takes it off when it closes, however it closes. Roblox's
+	own menu may still open on the same press; nothing here stops it. One press can be reported three
+	ways -- the key, Roblox's menu opening (GuiService.MenuOpened, for a client where the key never
+	arrives) and a text box losing the keyboard to it -- so the first report acts and the others of
+	that press are ignored: one press never closes both an inner menu and the menu. Roblox's menu
+	opening and an Escape key going down within 0.1 s of each other, in either order, are one press,
+	unless the opening was nearer the key before. A press after it is a press of its own, however
+	soon it comes.
+]]
+ui.escapes = {}
+-- When an Escape last acted, a click or tap began, an Escape key went down, a text box let go of the
+-- keyboard, and Roblox's menu opened and shut (os.clock).
+ui.escapeAt, ui.escapePress, ui.escapeKey, ui.escapeFocus, ui.escapeMenuAt, ui.escapeMenuShut = -1, -1, -1, -1, -1, -1
+-- When the Escape key before the latest one went down (-1: none).
+ui.escapeKeyPrev = -1
+-- The press the last action was, by when its key went down (-1: a report that came before its key,
+-- or with none), and the text box that last let go of the keyboard.
+ui.escapeActed, ui.escapeFocusBox = -1, nil
+
+-- owner: what the inner menu is (its backdrop); live(), when given, says whether it is still open.
+function ui.pushEscape(owner, close, live)
+	ui.popEscape(owner)
+	table.insert(ui.escapes, {Owner = owner, Close = close, Live = live})
+end
+
+function ui.popEscape(owner)
+	for index = #ui.escapes, 1, -1 do
+		if ui.escapes[index].Owner == owner then
+			table.remove(ui.escapes, index)
+		end
+	end
+end
+
+-- The newest inner menu still open; one that went without saying so (destroyed, hidden) is dropped.
+function ui.escapeTop()
+	for index = #ui.escapes, 1, -1 do
+		local entry = ui.escapes[index]
+		local open = not (typeof(entry.Owner) == 'Instance' and entry.Owner.Parent == nil)
+		if open and entry.Live then
+			local ok, live = pcall(entry.Live)
+			open = ok and live == true
+		end
+		if open then
+			return entry
+		end
+		table.remove(ui.escapes, index)
+	end
+	return nil
+end
+
+--[[ One report of an Escape press: 'key' (pressAt: when its key went down), 'menu' (Roblox's menu
+opened) or 'focus' (a text box in an inner menu lost the keyboard to it). Returns whether it closed
+something. Never with the menu shut, and not while a bind waits for a key: there Escape clears the
+bind. ]]
+function ui.escape(source, pressAt)
+	if vape.Loaded == nil or vape.Binding or not (clickgui and clickgui.Visible) then return false end
+	local now = os.clock()
+	local top = ui.escapeTop()
+	local lists = layout ~= nil and layout.OpenLists ~= nil and next(layout.OpenLists) ~= nil
+	-- When this report's press was reported, and the Escape key it went down with (-1: none known).
+	local at, key = now, -1
+	if source == 'key' then
+		pressAt = pressAt or now
+		--[[ Its press acted already: through a report after the key, which took this press, or one
+		just before it, which had no key of its own yet. ]]
+		if pressAt == ui.escapeActed or (ui.escapeActed == -1 and math.abs(pressAt - ui.escapeAt) < 0.1) then return false end
+		--[[ The press that shuts Roblox's menu, opened by an earlier one, is that menu's. A menu that
+		opened at most 0.1 s before this key went down opened on this press (Roblox can report its menu
+		opening before the key) unless it opened nearer the key before this one: that key's press opened
+		it, and this one shuts it, however soon after it comes. ]]
+		local menuOpen = false
+		pcall(function()
+			menuOpen = guiService.MenuIsOpen == true
+		end)
+		local before = pressAt == ui.escapeKey and ui.escapeKeyPrev or -1
+		local earlier = ui.escapeMenuAt < pressAt - 0.1
+			or (before ~= -1 and math.abs(ui.escapeMenuAt - before) < math.abs(pressAt - ui.escapeMenuAt))
+		if (menuOpen and earlier) or now - ui.escapeMenuShut < 0.1 then return false end
+	else
+		--[[ The key this report's press went down with: one up to 0.1 s after it (Roblox can report its
+		menu opening first) or up to 0.35 s before it (a box letting go, or the menu opening, can come
+		late). With that key the press is told by it, and acts unless it acted already, however soon
+		after an earlier press it comes. With none, a report just after an Escape acted is that
+		Escape's. ]]
+		if source == 'menu' then
+			at = ui.escapeMenuAt
+		end
+		local lead = ui.escapeKey - at
+		if ui.escapeKey ~= -1 and lead < 0.1 and lead > -0.35 then
+			key = ui.escapeKey
+			if key == ui.escapeActed or (ui.escapeActed == -1 and math.abs(key - ui.escapeAt) < 0.1) then return false end
+		elseif now - ui.escapeAt < 0.35 then
+			return false
+		end
+		if source == 'menu' then
+			-- With no keyboard there is no Escape: Roblox's menu was opened from its button.
+			if not inputService.KeyboardEnabled then return false end
+			-- Roblox's menu opened from its own button: a click or tap just before, and no Escape held.
+			local down = false
+			pcall(function()
+				down = inputService:IsKeyDown(Enum.KeyCode.Escape) == true
+			end)
+			if not down and now - ui.escapePress < 0.6 then return false end
+		end
+	end
+	-- With no inner menu open, a text box's own report closes nothing.
+	if source == 'focus' and not top and not lists then return false end
+	--[[ Typing in a box, Escape only takes the keyboard away from it -- unless that box is the newest
+	inner menu's own (its search or hex box), whose menu it closes. Roblox's chat letting go, or a
+	box anywhere else, closes nothing. ]]
+	if source ~= 'focus' then
+		local focused
+		pcall(function()
+			focused = inputService:GetFocusedTextBox()
+		end)
+		local released = now - ui.escapeFocus < 0.1
+		if focused or released then
+			local box = released and ui.escapeFocusBox or focused
+			local own = false
+			if top and typeof(top.Owner) == 'Instance' and typeof(box) == 'Instance' then
+				pcall(function()
+					own = box:IsDescendantOf(top.Owner)
+				end)
+			end
+			if not own then return false end
+		end
+	end
+	ui.escapeAt = now
+	-- The press this was: a key's own, or the key that went down with this report, just before or after it.
+	ui.escapeActed = source == 'key' and pressAt or (key ~= -1 and math.abs(key - at) < 0.1 and key or -1)
+	if top then
+		ui.popEscape(top.Owner)
+		pcall(top.Close)
+	elseif lists then
+		for close in table.clone(layout.OpenLists) do
+			pcall(close)
+		end
+	elseif vape.GUIBind and vape.GUIBind.Triggered then
+		-- The menu shuts exactly as its key shuts it.
+		vape.GUIBind.Triggered:Fire(true)
+	else
+		clickgui.Visible = false
+		vape:BlurCheck()
+	end
+	return true
+end
+
+-- A report acted on after the event that brought it, never inside it: a close writes and destroys.
+function ui.escapeLater(source, pressAt)
+	task.defer(function()
+		if vape.Loaded == nil then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		ui.escape(source, pressAt)
+	end)
+end
+
+--[[
+	The card every menu inside the menu is drawn on (Search item, a colour), lifted from ui.confirm:
+	pinned under the top bar, as wide as the confirmation, at the window's zoom (less on a screen too
+	short for opts.FitHeight). It comes in as the confirmation does, over 0.3 s, Quint Out: the
+	backdrop greys the screen out to 0.75 and the card drops its last 48 px. A title, and Slinky's X,
+	grey, red under the pointer. A click off the card, the X or Escape closes it at once; hints and
+	hover lights go out while it is up, and come back for whatever the pointer rests on after.
+	opts: Name, Title, FitHeight, OnClose(). Returns {Blocker, Card, Header, Title, CloseButton,
+	Close(), Closed}; the caller fills Card, a vertical list, from LayoutOrder 2.
+]]
+function ui.modalCard(opts)
+	if not clickgui then return nil end
+	opts = opts or {}
+	-- Opening it puts out every hint and hover light underneath.
+	ui.hideTips()
+	ui.restHovered()
+	local zoom = layout and layout.Zoom or 1
+	local s = math.max(scale.Scale, 0.05)
+	local width = math.clamp(viewportWidth() / (s * zoom) - 24, 260, 576)
+	-- Under Roblox's top bar on a phone, level with the menu window (resize keeps layout.Top).
+	local top = layout and layout.Top or 12
+	local fit = zoom
+	if opts.FitHeight then
+		local camera = gameCamera or workspace.CurrentCamera
+		local room = camera and camera.ViewportSize.Y / s - top - 8 or 0
+		if room > 0 then
+			fit = math.min(fit, room / opts.FitHeight)
+		end
+	end
+	local modal = {Closed = false}
+	local previous = ui.modal
+	local blocker = ui.new('TextButton', {
+		Name = opts.Name or 'Modal',
+		AutoButtonColor = false,
+		BackgroundColor3 = theme.Backdrop,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		Text = '',
+		ZIndex = 20
+	}, clickgui)
+	-- The rows under the backdrop still get pointer events: nothing outside it lights meanwhile (ui.hover).
+	ui.modal = blocker
+	local card = ui.new('TextButton', {
+		AutoButtonColor = false,
+		AnchorPoint = Vector2.new(0.5, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = theme.Bar,
+		BorderSizePixel = 0,
+		Position = UDim2.new(0.5, 0, 0, top - math.floor(48 * fit + 0.5)),
+		Size = UDim2.fromOffset(width, 0),
+		Text = '',
+		ZIndex = 21
+	}, blocker)
+	ui.corner(card, 20)
+	ui.new('UIScale', {Scale = fit}, card)
+	ui.list(card, 0)
+	ui.padding(card, 12, 12, 11, 12)
+	local header = ui.new('Frame', {BackgroundTransparency = 1, LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 20), ZIndex = 22}, card)
+	local title = ui.text(header, {Text = opts.Title or '', Size = 16, Color = theme.Text, Props = {
+		Size = UDim2.new(1, -40, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 22
+	}})
+	-- Slinky's X, a 16 px image in a 24 px hit box; where it cannot be shown the x character stands in.
+	local close = ui.icon(header, 'slinky-x', 16, {Class = 'TextButton', Color = theme.SubText, NoMirror = true, Box = UDim2.fromOffset(24, 24), Props = {
+		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 2, 0.5, 0), ZIndex = 22
+	}})
+	local closeEntry = fonts.Registry[close]
+	if closeEntry then
+		closeEntry.Size = 21
+		ui.setIcon(close, 'slinky-x')
+	end
+	close.Glyph.ZIndex = 23
+	ui.hover(close, function()
+		ui.paintIcon(close, theme.RedHover)
+	end, function()
+		ui.paintIcon(close, theme.SubText)
+	end)
+	tween:Tween(blocker, theme.ModalInfo, {BackgroundTransparency = 0.25}, 'modal')
+	tween:Tween(card, theme.ModalInfo, {Position = UDim2.new(0.5, 0, 0, top)}, 'modal')
+
+	function modal.Close()
+		if modal.Closed then return end
+		modal.Closed = true
+		ui.popEscape(blocker)
+		if ui.modal == blocker then
+			ui.modal = previous and previous.Parent and previous or nil
+		end
+		if opts.OnClose then
+			pcall(opts.OnClose)
+		end
+		blocker:Destroy()
+		-- Hints and hover come back for whatever the pointer rests on, without waiting for it to move.
+		task.defer(function()
+			if vape.Loaded == nil then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			ui.refreshTooltip()
+			ui.rehover()
+		end)
+	end
+	blocker.MouseButton1Click:Connect(modal.Close)
+	close.MouseButton1Click:Connect(modal.Close)
+	ui.pushEscape(blocker, modal.Close)
+	modal.Blocker, modal.Card, modal.Header, modal.Title, modal.CloseButton = blocker, card, header, title, close
+	return modal
+end
+
+-- HSL, the colour modal's model, where Lightness runs black, the colour, white.
+function ui.hsl(h, s, l)
+	h = math.clamp(tonumber(h) or 0, 0, 1)
+	s = math.clamp(tonumber(s) or 0, 0, 1)
+	l = math.clamp(tonumber(l) or 0, 0, 1)
+	local v = l + s * math.min(l, 1 - l)
+	local sv = v > 0 and 2 * (1 - l / v) or 0
+	return Color3.fromHSV(h, math.clamp(sv, 0, 1), math.clamp(v, 0, 1))
+end
+
+function ui.toHsl(color)
+	local h, sv, v = color:ToHSV()
+	local l = v * (1 - sv / 2)
+	local s = 0
+	if l > 0 and l < 1 then
+		s = (v - l) / math.min(l, 1 - l)
+	end
+	return h, math.clamp(s, 0, 1), math.clamp(l, 0, 1)
+end
+
+-- The eight colours picked most recently, newest first, shared by every colour picker.
+function ui.rememberColor(color)
+	local recent = layout and layout.RecentColors
+	if typeof(color) ~= 'Color3' or not recent then return end
+	local key = color:ToHex()
+	for index = #recent, 1, -1 do
+		if recent[index]:ToHex() == key then
+			table.remove(recent, index)
+		end
+	end
+	table.insert(recent, 1, color)
+	while #recent > 8 do
+		table.remove(recent)
+	end
 end
 
 -- Key names as the badge prints them: RSHIFT, LCTRL, TAB.
@@ -3190,8 +3553,9 @@ end
 function ui.refreshTooltip()
 	if not ui.rowTip then return end
 	local current, entry
+	-- None at all while a menu inside the menu is up (ui.modal): its backdrop covers the rows.
 	if tooltipsEnabled and clickgui and clickgui.Visible
-		and not clickgui:FindFirstChild('Confirm') and not ui.lastInputTouch() then
+		and not clickgui:FindFirstChild('Confirm') and not (ui.modal and ui.modal.Parent) and not ui.lastInputTouch() then
 		--[[ The pointer is measured from the top of the screen, but the positions the rows report
 		are measured from the GUI's own origin, under Roblox's top bar; the menu's own position in
 		that space is the difference. ]]
@@ -3888,6 +4252,9 @@ function vape:Load(skipgui, profile)
 
 	self.Loaded = canSave
 	self.Applying = nil
+	-- When it ended: what it showed or hid in a card open on screen is measured just after this,
+	-- and takes its height at once as well (ui.card's follower).
+	ui.anim.LoadEnded = os.clock()
 	-- Everything registered up to here now holds its saved settings. vape:LoadLate applies the
 	-- profile to whatever appears past this index.
 	self.LoadedCount = #self.ModuleOrder
@@ -4063,6 +4430,7 @@ function vape:LoadLate()
 
 	self.LoadedCount = #order
 	self.Applying = nil
+	ui.anim.LoadEnded = os.clock()
 	return applied
 end
 
@@ -4239,6 +4607,53 @@ function build.root()
 			ui.refreshTooltip()
 		end
 	end))
+	--[[ Escape (ui.escape): the key, and Roblox's menu opening, for a client where the key never
+	arrives here. Each key press is stamped with when it went down, so the reports of one press act
+	once and a press after it acts again. A click or tap is remembered, so Roblox's menu opened by its
+	own button is not taken for Escape, and so is a text box letting go of the keyboard, and which box,
+	so Escape in one only ends the typing unless the box is the newest inner menu's own. Each acts
+	after its event, never inside it. Not every client has every signal: each is looked up under
+	pcall. ]]
+	do
+		vape:Clean(inputService.InputBegan:Connect(function(input)
+			local kind = input.UserInputType
+			if kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.Touch then
+				ui.escapePress = os.clock()
+			elseif input.KeyCode == Enum.KeyCode.Escape and not vape.Binding then
+				-- The key before it is kept: Roblox's menu open as this one goes down may be that press's.
+				ui.escapeKeyPrev = ui.escapeKey
+				ui.escapeKey = os.clock()
+				ui.escapeLater('key', ui.escapeKey)
+			end
+		end))
+		local function watch(find, handler)
+			local ok, connection = pcall(function()
+				return find():Connect(handler)
+			end)
+			if ok and connection then
+				vape:Clean(connection)
+			end
+		end
+		watch(function()
+			return inputService.TextBoxFocusReleased
+		end, function(box)
+			ui.escapeFocus = os.clock()
+			ui.escapeFocusBox = box
+		end)
+		watch(function()
+			return guiService.MenuOpened
+		end, function()
+			ui.escapeMenuAt = os.clock()
+			if not vape.Binding then
+				ui.escapeLater('menu')
+			end
+		end)
+		watch(function()
+			return guiService.MenuClosed
+		end, function()
+			ui.escapeMenuShut = os.clock()
+		end)
+	end
 	scale = Instance.new('UIScale')
 	scale.Scale = autoScaleValue()
 	scale.Parent = scaledgui
@@ -6320,11 +6735,13 @@ function build.settings()
 									end
 								end))
 	
-								table.insert(settingConnections, component.Object.MouseEnter:Connect(function()
+								--[[ Its badge shows while the pointer is on the row, through ui.hover: never on a touch
+								screen, where a tap enters and never leaves, nor under an open modal's backdrop, and put
+								away when the menu shows or hides under the pointer. Turning this off disconnects it with
+								the rest (the entry's Disconnect). ]]
+								table.insert(settingConnections, ui.hover(component.Object, function()
 									bind:SetVisible(true)
-								end))
-	
-								table.insert(settingConnections, component.Object.MouseLeave:Connect(function()
+								end, function()
 									bind:SetVisible(false)
 								end))
 							end
@@ -9076,6 +9493,16 @@ function build.loops()
 			local synthetic = shared.PistonwareSyntheticKeys
 			if type(synthetic) == 'table' and (tonumber(synthetic[input.KeyCode]) or 0) > os.clock() then return end
 			if vape.Binding then
+				--[[ The capture ends the holds it would strand: a hold whose key is let go here and,
+				where the held keys are replaced below, every hold still down, whose own release would
+				then find its keys no longer held. Each is let go once the badge is bound. ]]
+				local stranded = {}
+				local replaced = input.KeyCode == Enum.KeyCode.Escape or not vape.MultiKeybind.Enabled
+				for _, bind in vape.ActiveBinds do
+					if bind.Hold and #bind.Keys > 0 and checkKeybinds(vape.HeldKeybinds, bind.Keys, replaced and bind.Keys[1] or input.KeyCode.Name) then
+						table.insert(stranded, bind)
+					end
+				end
 				if not vape.MultiKeybind.Enabled then
 					vape.HeldKeybinds = {input.KeyCode.Name}
 				end
@@ -9095,15 +9522,32 @@ function build.loops()
 				if input.KeyCode == Enum.KeyCode.Escape then
 					vape.HeldKeybinds = {}
 					binding:SetBind({}, true)
+					for _, held in stranded do
+						held.Triggered:Fire(false)
+					end
 					return
 				end
 				local sameAsCurrent = checkKeybinds(vape.HeldKeybinds, binding.Keys, input.KeyCode.Name)
 				binding:SetBind(sameAsCurrent and {} or vape.HeldKeybinds, true)
+				for _, held in stranded do
+					held.Triggered:Fire(false)
+				end
 			else
 				for _, bind in vape.ActiveBinds do
 					if bind.Hold and checkKeybinds(vape.HeldKeybinds, bind.Keys, input.KeyCode.Name) then
 						bind.Triggered:Fire(false)
 					end
+				end
+			end
+		elseif input.KeyCode ~= Enum.KeyCode.Unknown then
+			--[[ A hold's key let go while a text box has the keyboard (the chat opened mid-hold) still
+			ends that hold, or it would stay on with its key up. A key pressed while typing was never
+			held, so it ends nothing; nor does a key pistonware pressed itself. ]]
+			local synthetic = shared.PistonwareSyntheticKeys
+			if type(synthetic) == 'table' and (tonumber(synthetic[input.KeyCode]) or 0) > os.clock() then return end
+			for _, bind in vape.ActiveBinds do
+				if bind.Hold and checkKeybinds(vape.HeldKeybinds, bind.Keys, input.KeyCode.Name) then
+					bind.Triggered:Fire(false)
 				end
 			end
 		end
@@ -9113,6 +9557,25 @@ function build.loops()
 			table.remove(vape.HeldKeybinds, index)
 		end
 	end))
+
+	--[[ The window losing focus (alt-tab) can take the releases of the keys still down with it:
+	every hold that is down ends here, and no key counts as held any more. Not every client has the
+	signal, so it is looked up under pcall. ]]
+	do
+		local ok, connection = pcall(function()
+			return inputService.WindowFocusReleased:Connect(function()
+				for _, bind in vape.ActiveBinds do
+					if bind.Hold and #bind.Keys > 0 and checkKeybinds(vape.HeldKeybinds, bind.Keys, bind.Keys[1]) then
+						bind.Triggered:Fire(false)
+					end
+				end
+				table.clear(vape.HeldKeybinds)
+			end)
+		end)
+		if ok and connection then
+			vape:Clean(connection)
+		end
+	end
 
 	--[[ Once now, not only on the events above. The resize the window runs when it is built comes
 	before vape.Scale exists, so a phone's zoom used to wait on the ScreenGui's first size change. ]]
@@ -9442,6 +9905,15 @@ function vape:Uninject()
 	if self:CanSave() then self:Save() end
 	self:BlockSaving()
 	self.Loaded = nil
+
+	--[[ The on-screen buttons go first: a finger still down on a hold bind's lets go, as lifting it
+	would, and the press's own watcher for that lift goes with it rather than outliving this GUI.
+	The profile was saved above. ]]
+	for _, module in orderedModules(self.ModuleOrder) do
+		if module.Bind and module.Bind.Mobile then
+			pcall(module.Bind.DestroyMobileButton, module.Bind)
+		end
+	end
 
 	for _, module in orderedModules(self.ModuleOrder) do
 		if module.Enabled then
@@ -10046,7 +10518,7 @@ function ui.card(props)
 	as it is next shown after a later one. ]]
 	view.FitGen = fonts.Generation
 	function view:Refit()
-		for _, label in {title, nameRow:FindFirstChild('Bind')} do
+		for _, label in {title, nameRow:FindFirstChild('Bind'), nameRow:FindFirstChild('Hold')} do
 			local text = label.Text
 			label.Text = text..' '
 			label.Text = text
@@ -10056,10 +10528,11 @@ function ui.card(props)
 	layout.ViewOf[card] = view
 
 	--[[ The card's height, as Slinky's (ANIM_SPEC 2): the header, the 8 px foot, and the settings while
-	open, followed at 21.9 a second on the shared driver and drawn in whole units. Opening shows the
-	settings at once and the card grows over them; closing hides them at once and the empty card
-	shrinks. Anything that changes the settings' height -- a dropdown opening, rows a mode shows or
-	hides -- moves it the same way, and only its own column moves with it. ]]
+	open, followed at theme.FollowCard (23.1 a second: Exponential Out over 0.3 s) on the shared
+	driver and drawn in whole units. Opening shows the settings at once and the card grows over them;
+	closing hides them at once and the empty card shrinks. Anything that changes the settings' height
+	-- a dropdown opening, rows a toggle or a mode shows or hides -- moves it the same way, and only
+	its own column moves with it. ]]
 	function view.TargetHeight()
 		local head = header.Size.Y.Offset
 		local height = head + 8
@@ -10088,8 +10561,15 @@ function ui.card(props)
 	-- The driver's entry (ui.anim): the target is read every step, so content still changing retargets it.
 	view.Motion = {Owner = card}
 	function view.Motion.Step(dt)
+		--[[ A profile load shows and hides settings in cards that can be open on screen (the menu up
+		on a module tab): they take their heights at once, as a build does, and so do the ones
+		measured a frame or two after it ends (ui.anim.LoadEnded, stamped by vape:Load). ]]
+		if vape.Applying or os.clock() - (ui.anim.LoadEnded or -math.huge) < 0.25 then
+			view.Motion.Finish()
+			return true
+		end
 		local target = view.TargetHeight()
-		view.Height = ui.anim.follow(view.Height, target, theme.FollowFast, dt)
+		view.Height = ui.anim.follow(view.Height, target, theme.FollowCard, dt)
 		if math.abs(target - view.Height) < 0.01 then
 			view.Height = target
 		end
@@ -10126,7 +10606,8 @@ function ui.card(props)
 		glyph:Set(open)
 		-- With the card off screen (the menu shut, another tab) nothing is watching: its height at once.
 		view:Retarget(not ui.anim.onScreen(card))
-		if open and view.HasOptions then
+		-- A profile load restoring a list's open state does not scroll the page to it.
+		if open and view.HasOptions and not vape.Applying then
 			ui.revealCard(card, view.TargetPixels)
 		end
 	end
@@ -10221,50 +10702,111 @@ components.Bind = function(props, children, api)
 		return 'Click to bind, click again to clear\nShift-click to switch toggle/hold\n'..holdText
 	end)
 
+	--[[ A module or overlay card's HOLD badge, after its key badge (props.HoldBadge): Slinky's switch
+	between toggle and hold (video 10-11-25). While hold is on it shows, #999999 on #323232; while it
+	is off it is drawn only with the pointer on its spot, on the key badge's #282828. Under the
+	pointer its text goes #DDDDDD either way. It is there, drawn or not, whenever the bind has a key
+	and is not waiting for one, so its spot takes the pointer and the click. On a touch screen, where
+	nothing lights under a finger, it is drawn at rest as well and says the mode by itself: hold on,
+	#DDDDDD on the #323232 pill; hold off, #999999 in a plain outline with no fill. A tap switches it
+	there as a click does. A bind with an on-screen button has it with no key too: there the button is
+	the bind's key. ]]
+	local holdBadge, holdOutline
+	local holdHovered = false
+	if props.Module and props.HoldBadge then
+		holdBadge = ui.text(nil, {Class = 'TextButton', Text = 'HOLD', Size = 12, Weight = 'Bold', Color = theme.SubText, AlignX = Enum.TextXAlignment.Center, Props = {
+			Name = 'Hold',
+			AutomaticSize = Enum.AutomaticSize.X,
+			BackgroundColor3 = theme.Badge,
+			BackgroundTransparency = 1,
+			LayoutOrder = 3,
+			Size = UDim2.fromOffset(0, 20),
+			TextTransparency = 1,
+			Visible = false
+		}})
+		ui.corner(holdBadge, 5)
+		ui.padding(holdBadge, 6, 6, 0, 0)
+	end
+
 	--[[ Under the pointer the badge's text lights up at once, as Slinky's does: NONE, PRESS A KEY...
 	and a bound key's accent all go white, on the badge's unchanged background. ]]
 	local hovered = false
+	local holdState
 	local function paint()
 		local text
+		-- A card with a HOLD badge leaves the mode to it; anywhere else the key badge says it.
+		local suffix = component.Hold and not holdBadge
 		if component.Binding then
 			bind.Text = 'PRESS A KEY...'
 			text = hovered and theme.Lit or theme.Text
 			bind.BackgroundColor3 = theme.Badge
 		elseif #component.Keys > 0 then
-			bind.Text = ui.keyText(component.Keys)..(component.Hold and '  HOLD' or '')
+			bind.Text = ui.keyText(component.Keys)..(suffix and '  HOLD' or '')
 			local accent = theme.Accent()
 			text = hovered and theme.Lit or accent
 			bind.BackgroundColor3 = theme.Tint(accent, 0.15)
 		else
-			bind.Text = component.Hold and 'NONE  HOLD' or 'NONE'
+			bind.Text = suffix and 'NONE  HOLD' or 'NONE'
 			text = hovered and theme.Lit or theme.SubText
 			bind.BackgroundColor3 = theme.Badge
 		end
 		tween:Cancel(bind)
 		bind.TextColor3 = text
-	end
-	local function restBadge()
-		if hovered then
-			hovered = false
-			paint()
+
+		if holdBadge then
+			-- Written only when it changes: the accent's repaint can come every frame (rainbow).
+			local touch = isMobile()
+			local shown = (#component.Keys > 0 or (touch and component.Mobile ~= nil)) and not component.Binding
+			local state = (shown and 1 or 0) + (component.Hold and 2 or 0) + (holdHovered and 4 or 0) + (touch and 8 or 0)
+			if state ~= holdState then
+				holdState = state
+				holdBadge.Visible = shown
+				holdBadge.BackgroundColor3 = component.Hold and theme.HoldOn or theme.Badge
+				if touch then
+					-- The outline is made the first time a touch screen draws the badge.
+					if not holdOutline then
+						holdOutline = ui.stroke(holdBadge, theme.Outline, 1, 0)
+					end
+					holdOutline.Enabled = not component.Hold
+					holdBadge.BackgroundTransparency = component.Hold and 0 or 1
+					holdBadge.TextTransparency = 0
+					holdBadge.TextColor3 = (component.Hold or holdHovered) and theme.Text or theme.SubText
+				else
+					if holdOutline then
+						holdOutline.Enabled = false
+					end
+					local drawn = component.Hold or holdHovered
+					holdBadge.BackgroundTransparency = drawn and 0 or 1
+					holdBadge.TextTransparency = drawn and 0 or 1
+					holdBadge.TextColor3 = holdHovered and theme.Text or theme.SubText
+				end
+			end
 		end
 	end
-	-- A tap enters the badge and never leaves it, so a phone gets no hover light; nor does a badge
-	-- under an open modal's backdrop.
-	bind.MouseEnter:Connect(function()
-		if ui.lastInputTouch() or (ui.modal and ui.modal.Parent) then return end
+	--[[ Both through ui.hover: instant; never on a touch screen, where a tap enters and never leaves,
+	nor under an open modal's backdrop; put out when the menu shows or hides under the pointer, and
+	lit again when a modal closes over it (ui.rehover). ]]
+	local bindHover = ui.hover(bind, function()
 		hovered = true
-		ui.hovered[bind] = restBadge
+		paint()
+	end, function()
+		hovered = false
 		paint()
 	end)
-	bind.MouseLeave:Connect(function()
-		ui.hovered[bind] = nil
-		restBadge()
+	local holdHover = holdBadge and ui.hover(holdBadge, function()
+		holdHovered = true
+		paint()
+	end, function()
+		holdHovered = false
+		paint()
 	end)
 
 	if props.Module then
 		local parent = api.BindParent or api.Object
 		bind.Parent = parent
+		if holdBadge then
+			holdBadge.Parent = parent
+		end
 		component.Object = bind
 	else
 		local holder = ui.row(children, props)
@@ -10284,6 +10826,8 @@ components.Bind = function(props, children, api)
 		component.Object = holder
 	end
 
+	-- Lets go of a press still down on this bind's on-screen button (set while it exists).
+	local mobileRelease
 	function component:CreateMobileButton(position)
 		self:DestroyMobileButton()
 
@@ -10306,7 +10850,42 @@ components.Bind = function(props, children, api)
 		constraint.Parent = button
 		addCorner(button, UDim.new(1, 0))
 
+		--[[ A hold bind's button holds as its key does: on from the press, off as that press ends --
+		let go on the button or off it -- or as the button goes (DestroyMobileButton, an Uninject).
+		The long press below that takes a toggle bind's button away leaves a hold bind's alone. ]]
+		local press, pressEnd
+		local function release()
+			if pressEnd then
+				pressEnd:Disconnect()
+				pressEnd = nil
+			end
+			if press then
+				press = nil
+				-- Past an Uninject the bind's fields are gone: the press only lets go.
+				local triggered = self.Triggered
+				if triggered then
+					triggered:Fire(false)
+				end
+				button.BackgroundColor3 = api.Enabled and theme.Accent() or theme.Bar
+			end
+		end
+		mobileRelease = release
+		button.InputBegan:Connect(function(input)
+			local kind = input.UserInputType
+			if press or not self.Hold or (kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1) then return end
+			press = input
+			pressEnd = inputService.InputEnded:Connect(function(ended)
+				if ended == input or (kind == Enum.UserInputType.MouseButton1 and ended.UserInputType == kind) then
+					release()
+				end
+			end)
+			self.Triggered:Fire(true)
+			button.BackgroundColor3 = api.Enabled and theme.Accent() or theme.Bar
+		end)
+
 		button.MouseButton1Down:Connect(function()
+			-- A hold bind's long press is the hold itself.
+			if self.Hold then return end
 			isHeld = true
 
 			local holdtime, holdPos = os.clock(), inputService:GetMouseLocation()
@@ -10324,30 +10903,35 @@ components.Bind = function(props, children, api)
 
 		button.MouseButton1Up:Connect(function()
 			isHeld = false
+			release()
 		end)
 
 		button.MouseButton1Click:Connect(function()
+			-- A hold bind's press and release did it, above.
+			if self.Hold then return end
 			self.Triggered:Fire(true)
 			button.BackgroundColor3 = api.Enabled and theme.Accent() or theme.Bar
 		end)
 
 		self.Mobile = button
+		-- On a touch screen the HOLD badge follows the button (paint).
+		paint()
 	end
 
 	function component:Destroy()
 		layout.Binds[component] = nil
 		bind:Destroy()
 		bind:ClearAllChildren()
+		if holdBadge then
+			holdBadge:Destroy()
+		end
 
 		if self.Object then
 			self.Object:Destroy()
 			self.Object:ClearAllChildren()
 		end
 
-		if self.Mobile then
-			self.Mobile:Destroy()
-			self.Mobile = nil
-		end
+		self:DestroyMobileButton()
 
 		local index = table.find(vape.ActiveBinds, self)
 		if index then
@@ -10356,9 +10940,16 @@ components.Bind = function(props, children, api)
 	end
 
 	function component:DestroyMobileButton()
+		-- A press still down on the button ends with it.
+		local letGo = mobileRelease
+		mobileRelease = nil
+		if letGo then
+			letGo()
+		end
 		if self.Mobile then
 			self.Mobile:Destroy()
 			self.Mobile = nil
+			paint()
 		end
 	end
 
@@ -10374,7 +10965,7 @@ components.Bind = function(props, children, api)
 			return
 		end
 
-		self.Hold = data.Hold
+		self.Hold = data.Hold == true
 		self:SetBind(type(data.Keys) == 'table' and data.Keys or {})
 
 		if type(data.Mobile) == 'table' and tonumber(data.Mobile.X) and tonumber(data.Mobile.Y) then
@@ -10431,10 +11022,14 @@ components.Bind = function(props, children, api)
 
 	function component:SetParent(parent)
 		-- Moved out from under a still pointer (a profile card rebuilt): no leave comes.
-		ui.hovered[bind] = nil
-		restBadge()
+		bindHover.Rest()
 		bind.Parent = parent
 		bind.LayoutOrder = 2
+		if holdBadge then
+			holdHover.Rest()
+			holdBadge.Parent = parent
+			holdBadge.LayoutOrder = 3
+		end
 	end
 
 	function component:SetVisible(visible)
@@ -10487,6 +11082,23 @@ components.Bind = function(props, children, api)
 		vape.Binding = component
 		paint()
 	end)
+
+	if holdBadge then
+		holdBadge.MouseButton1Click:Connect(function()
+			-- A badge left waiting for a key is let go first, as a click on a key badge does.
+			if vape.Binding then
+				local stale = vape.Binding
+				vape.Binding = nil
+				pcall(function() stale:SetBind(stale.Keys, true) end)
+			end
+			component.Hold = not component.Hold
+			paint()
+			vape:RequestSave()
+			if vape.CurrentTooltip then
+				vape.CurrentTooltip()
+			end
+		end)
+	end
 
 	if props.Module then
 		api.Bind = component
@@ -10796,9 +11408,15 @@ components.CategoryList = function(props, children, api)
 			Position = UDim2.fromOffset(12, 0),
 			Size = UDim2.new(1, -44, 1, 0)
 		}})
-		addbutton = ui.icon(addbkg, 'plus', 14, {Class = 'TextButton', Color = theme.SubText, Props = {
+		addbutton = ui.icon(addbkg, 'plus', 14, {Class = 'TextButton', Color = theme.SubText, NoMirror = true, Props = {
 			AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0)
 		}})
+		-- The + goes #999999 to #BBBBBB under the pointer.
+		ui.hover(addbutton, function()
+			ui.paintIcon(addbutton, theme.SubTextLit)
+		end, function()
+			ui.paintIcon(addbutton, theme.SubText)
+		end)
 	end
 	props.Function = props.Function or function() end
 
@@ -11191,9 +11809,15 @@ components.CategoryList = function(props, children, api)
 		ui.text(obj, {Text = name, Size = 15, Color = theme.Label, Props = {
 			Position = UDim2.fromOffset(theme.Inset + 22, 0), Size = UDim2.new(1, -(theme.Inset * 2 + 50), 1, 0), TextTruncate = Enum.TextTruncate.AtEnd
 		}})
-		local close = ui.icon(obj, 'x', 14, {Class = 'TextButton', Color = theme.SubText, Props = {
+		-- The x: #424242, red under its own glyph box, as a click-to-add row's (the owner's video 2).
+		local close = ui.icon(obj, 'x', 14, {Class = 'TextButton', Color = theme.CloseRest, NoMirror = true, Props = {
 			AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -theme.Inset + 4, 0.5, 0)
 		}})
+		ui.hover(close, function()
+			ui.paintIcon(close, theme.Red)
+		end, function()
+			ui.paintIcon(close, theme.CloseRest)
+		end)
 		close.MouseButton1Click:Connect(function()
 			component:ChangeValue(name)
 		end)
@@ -11300,6 +11924,10 @@ components.CategoryList = function(props, children, api)
 
 		if not skipGUI then
 			vape:UpdateGUI(vape.GUIColor.Hue, vape.GUIColor.Sat, vape.GUIColor.Value)
+		end
+		-- A name added or taken away moves the rows under a still pointer.
+		if value ~= nil and not swapStyle then
+			ui.rehoverSoon()
 		end
 	end
 
@@ -11750,17 +12378,23 @@ components.ColorSlider = function(props, children, api)
 	used most recently. Options that carry an opacity get an Opacity track too. ]]
 	local function openPicker()
 		if not clickgui or open then return end
+		-- Opening it puts out every hint and hover light underneath, as the confirmation does.
+		ui.hideTips()
+		ui.restHovered()
 		local scaleNow = math.max(scale.Scale, 0.05) * (layout.Zoom or 1)
 		local blocker = ui.new('TextButton', {
 			Name = 'ColorPicker',
 			AutoButtonColor = false,
-			BackgroundColor3 = Color3.fromRGB(48, 48, 48),
+			BackgroundColor3 = theme.Backdrop,
 			BackgroundTransparency = 0.25,
 			BorderSizePixel = 0,
 			Size = UDim2.fromScale(1, 1),
 			Text = '',
 			ZIndex = 20
 		}, clickgui)
+		-- Nothing outside it lights while it is up (ui.hover); what it opened over gets its own back.
+		local previousModal = ui.modal
+		ui.modal = blocker
 		local width = math.clamp(viewportWidth() / scaleNow - 24, 260, 576)
 		local card = ui.new('TextButton', {
 			AutoButtonColor = false,
@@ -11794,10 +12428,22 @@ components.ColorSlider = function(props, children, api)
 		end
 		local header = ui.new('Frame', {BackgroundTransparency = 1, LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 20), ZIndex = 22}, card)
 		zText(header, props.DisplayName or props.Name, 16, {Size = UDim2.new(1, -40, 1, 0)})
-		local close = ui.icon(header, 'x', 21, {Class = 'TextButton', Color = theme.SubText, Box = UDim2.fromOffset(24, 24), Props = {
+		-- Slinky's X, as on the confirmation: a 16 px image in a 24 px hit box, red under the pointer;
+		-- where it cannot be shown the x character stands in, at the size it always had.
+		local close = ui.icon(header, 'slinky-x', 16, {Class = 'TextButton', Color = theme.SubText, NoMirror = true, Box = UDim2.fromOffset(24, 24), Props = {
 			AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 2, 0.5, 0), ZIndex = 22
 		}})
+		local closeEntry = fonts.Registry[close]
+		if closeEntry then
+			closeEntry.Size = 21
+			ui.setIcon(close, 'slinky-x')
+		end
 		close.Glyph.ZIndex = 23
+		ui.hover(close, function()
+			ui.paintIcon(close, theme.RedHover)
+		end, function()
+			ui.paintIcon(close, theme.SubText)
+		end)
 
 		local valueRow = ui.new('Frame', {BackgroundTransparency = 1, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 34), ZIndex = 22}, card)
 		local square = ui.new('Frame', {
@@ -11898,7 +12544,13 @@ components.ColorSlider = function(props, children, api)
 				ZIndex = 22
 			}, boxes)
 			ui.corner(box, 4)
-			ui.stroke(box, theme.Outline, 2, 0)
+			local ring = ui.stroke(box, theme.Outline, 2, 0)
+			-- Under the pointer its ring lifts to #505050, Slinky's grey-control hover.
+			ui.hover(box, function()
+				ring.Color = theme.PillHover
+			end, function()
+				ring.Color = theme.Outline
+			end)
 			if color then
 				box.MouseButton1Click:Connect(function()
 					local h, s, v = color:ToHSV()
@@ -11912,16 +12564,34 @@ components.ColorSlider = function(props, children, api)
 		paintPicker()
 
 		local before = Color3.fromHSV(component.Hue, component.Sat, component.Value):ToHex()
+		local closed = false
 		local function dismiss()
+			if closed then return end
+			closed = true
 			-- A cycling rainbow is on whatever hue it reached; that is no colour anyone picked.
 			if not component.Rainbow and Color3.fromHSV(component.Hue, component.Sat, component.Value):ToHex() ~= before then
 				remember()
 			end
 			open = nil
+			ui.popEscape(blocker)
+			if ui.modal == blocker then
+				ui.modal = previousModal and previousModal.Parent and previousModal or nil
+			end
 			blocker:Destroy()
+			-- Hints and hover come back for whatever the pointer rests on, without waiting for it to move.
+			task.defer(function()
+				if vape.Loaded == nil then return end
+				if vape.ThreadFix then
+					setthreadidentity(8)
+				end
+				ui.refreshTooltip()
+				ui.rehover()
+			end)
 		end
 		blocker.MouseButton1Click:Connect(dismiss)
 		close.MouseButton1Click:Connect(dismiss)
+		-- Escape closes it and leaves the menu up (ui.escape).
+		ui.pushEscape(blocker, dismiss)
 
 		local function drag(entry, apply)
 			entry.Hit.InputBegan:Connect(function(input)
@@ -11942,11 +12612,28 @@ components.ColorSlider = function(props, children, api)
 			adjust(nil, nil, nil, value)
 		end)
 
-		hex.FocusLost:Connect(function(enter)
+		hex.FocusLost:Connect(function(enter, input)
+			-- Escape in the box takes the keyboard from it and closes the picker, leaving the menu up.
+			local key
+			pcall(function()
+				key = input.KeyCode
+			end)
+			if key == Enum.KeyCode.Escape then
+				ui.escapeLater('focus')
+				return
+			end
 			if enter then
 				local success, parsed = pcall(function()
 					local commas = hex.Text:split(',')
-					return tonumber(commas[1]) and Color3.fromRGB(tonumber(commas[1]), tonumber(commas[2]), tonumber(commas[3])) or Color3.fromHex(hex.Text)
+					local r, g, b = tonumber(commas[1]), tonumber(commas[2]), tonumber(commas[3])
+					if not r then
+						return Color3.fromHex(hex.Text)
+					end
+					-- 'nan' and 'inf' read as numbers, and are no part of a colour: the box goes back.
+					if math.abs(r) < math.huge and math.abs(g or 0) < math.huge and math.abs(b or 0) < math.huge then
+						return Color3.fromRGB(r, g, b)
+					end
+					return nil
 				end)
 				if success and parsed then
 					pick(parsed:ToHSV())
@@ -12152,6 +12839,10 @@ components.Dropdown = function(props, children, api)
 		options.Visible = true
 		title.Visible = false
 		layout.OpenLists[closeList] = true
+		-- An inner menu like any other, the newest on top: Escape closes it first (ui.escape).
+		ui.pushEscape(closeList, closeList, function()
+			return box.Open == true
+		end)
 		box.Watch = inputService.InputBegan:Connect(function(input)
 			if not (isPress(input) or input.UserInputType == Enum.UserInputType.MouseButton2) then return end
 			--[[ An InputObject's position and a GuiObject's AbsolutePosition are both measured under
@@ -12172,6 +12863,7 @@ components.Dropdown = function(props, children, api)
 			box.Watch = nil
 		end
 		layout.OpenLists[closeList] = nil
+		ui.popEscape(closeList)
 		if not box.Open then return end
 		box.Open = false
 		options.Visible = false
@@ -12913,6 +13605,8 @@ components.GUI = function(props, children, api)
 		-- Until when (os.clock) the open's focus run takes back a focus the box lost on its own.
 		local focusUntil = 0
 		local function closeSearch()
+			-- Off the Escape stack however it closes (ui.escape).
+			ui.popEscape(searchField)
 			layout.FinishTabMotion()
 			focusToken += 1
 			focusUntil = 0
@@ -12948,6 +13642,10 @@ components.GUI = function(props, children, api)
 			showPages()
 			tabsFrame.Visible = false
 			magnifier.Visible, cross.Visible = false, true
+			-- An inner menu like any other: Escape closes it and leaves the menu up (ui.escape).
+			ui.pushEscape(searchField, closeSearch, function()
+				return searchField.Visible
+			end)
 			focusToken += 1
 			local token = focusToken
 			focusUntil = os.clock() + 2
@@ -12987,12 +13685,14 @@ components.GUI = function(props, children, api)
 			setSearch(searchBox.Text)
 		end)
 
-		--[[ Escape closes the search, as the cross does. Typing in the box, Escape takes the box's focus
-		away first, so it is caught as the reason the focus went; with the box not focused, as the key
-		press itself. Not while a bind is waiting for a key: there Escape clears the bind. ]]
+		--[[ Escape closes the search, as the cross does, through the menu's Escape stack (ui.escape),
+		where it is the newest inner menu. Typing in the box, Escape takes the box's focus away first,
+		so it is caught here as the reason the focus went; with the box not focused, the menu's own
+		Escape watcher (build.root) takes the key press. Not while a bind is waiting for a key: there
+		Escape clears the bind. ]]
 		local function escapeSearch()
 			if searchField.Visible and clickgui.Visible and not vape.Binding then
-				closeSearch()
+				ui.escapeLater('focus')
 			end
 		end
 		searchBox.FocusLost:Connect(function(enterPressed, input)
@@ -13012,11 +13712,6 @@ components.GUI = function(props, children, api)
 				focusUntil = 0
 			end
 		end)
-		vape:Clean(inputService.InputBegan:Connect(function(input)
-			if input.KeyCode == Enum.KeyCode.Escape then
-				escapeSearch()
-			end
-		end))
 	end
 	-- The search button and field exist now: into their slots.
 	layoutTabs()
@@ -13288,6 +13983,12 @@ components.GUISlider = function(props, children, api)
 	local reset = ui.text(presets, {Class = 'TextButton', Text = 'RESET', Size = 12, Weight = 'Bold', Color = theme.SubText, AlignX = Enum.TextXAlignment.Center, Props = {
 		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -theme.Inset, 0.5, 0), Size = UDim2.fromOffset(52, 24)
 	}})
+	-- RESET and COPY go white under the pointer, as a key badge's text does.
+	ui.hover(reset, function()
+		reset.TextColor3 = theme.Lit
+	end, function()
+		reset.TextColor3 = theme.SubText
+	end)
 	reset.MouseButton1Click:Connect(function()
 		component:SetValue(nil, nil, nil, 2)
 	end)
@@ -13296,6 +13997,11 @@ components.GUISlider = function(props, children, api)
 	local copy = ui.text(presets, {Class = 'TextButton', Text = 'COPY', Size = 12, Weight = 'Bold', Color = theme.SubText, AlignX = Enum.TextXAlignment.Center, Props = {
 		AnchorPoint = Vector2.new(1, 0.5), AutomaticSize = Enum.AutomaticSize.X, Position = UDim2.new(1, -theme.Inset - 56, 0.5, 0), Size = UDim2.fromOffset(52, 24)
 	}})
+	ui.hover(copy, function()
+		copy.TextColor3 = theme.Lit
+	end, function()
+		copy.TextColor3 = theme.SubText
+	end)
 	local copyStamp = 0
 	copy.MouseButton1Click:Connect(function()
 		local setter = setclipboard or toclipboard or set_clipboard
@@ -13502,10 +14208,18 @@ components.GUISlider = function(props, children, api)
 		if enter then
 			local success, parsed = pcall(function()
 				local commas = hexbox.Text:split(',')
-				return tonumber(commas[1]) and Color3.fromRGB(tonumber(commas[1]), tonumber(commas[2]), tonumber(commas[3])) or Color3.fromHex(hexbox.Text)
+				local r, g, b = tonumber(commas[1]), tonumber(commas[2]), tonumber(commas[3])
+				if not r then
+					return Color3.fromHex(hexbox.Text)
+				end
+				-- 'nan' and 'inf' read as numbers, and are no part of a colour: the colour stays.
+				if math.abs(r) < math.huge and math.abs(g or 0) < math.huge and math.abs(b or 0) < math.huge then
+					return Color3.fromRGB(r, g, b)
+				end
+				return nil
 			end)
 
-			if success then
+			if success and parsed then
 				if component.Rainbow then
 					component:Toggle()
 				end
@@ -13550,6 +14264,771 @@ components.ImageToggle = function(props, children, api)
 	if props.Default then
 		component:Toggle()
 	end
+
+	api.Options[props.Name] = component
+
+	return component
+end
+
+--[[
+	Slinky's colour modal for one entry of a list (the owner's video at 33 s), on the shared modal
+	card: the entry's name, its colour in a flat square with the hex beside it -- typed over as
+	#rrggbb or r, g, b -- then Hue, Saturation and Lightness, in HSL: Lightness runs black, the
+	colour, white. Each knob shows its own track's value. Then the eight colours used most recently.
+	No Rainbow, no Opacity. The HSL triple is kept while it is open, so a grey keeps the hue its knob
+	was on. opts: Title, Color, OnChange(color), OnClose(color). Returns the modal (ui.modalCard).
+]]
+function ui.colorModal(opts)
+	opts = opts or {}
+	local start = typeof(opts.Color) == 'Color3' and opts.Color or Color3.fromRGB(255, 0, 0)
+	local state = {Color = start, Before = start:ToHex()}
+	state.H, state.S, state.L = ui.toHsl(start)
+	local modal = ui.modalCard({Name = 'ColorModal', Title = opts.Title or 'Color', FitHeight = 290, OnClose = function()
+		-- Remembered when it closes on a colour other than the one it opened on.
+		if state.Color:ToHex() ~= state.Before then
+			ui.rememberColor(state.Color)
+		end
+		if opts.OnClose then
+			opts.OnClose(state.Color)
+		end
+	end})
+	if not modal then return nil end
+	local card = modal.Card
+
+	local valueRow = ui.new('Frame', {BackgroundTransparency = 1, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 34), ZIndex = 22}, card)
+	local square = ui.new('Frame', {
+		Name = 'Swatch',
+		AnchorPoint = Vector2.new(0, 0.5),
+		BorderSizePixel = 0,
+		Position = UDim2.new(0, 2, 0.5, 2),
+		Size = UDim2.fromOffset(22, 22),
+		ZIndex = 22
+	}, valueRow)
+	ui.corner(square, 4)
+	ui.stroke(square, theme.Outline, 2, 0)
+	local hex = ui.text(valueRow, {Class = 'TextBox', Size = 16, Color = theme.SubText, Props = {
+		Name = 'Hex',
+		ClearTextOnFocus = false,
+		Position = UDim2.fromOffset(34, 2),
+		Size = UDim2.new(1, -34, 1, 0),
+		ZIndex = 22
+	}})
+
+	-- A track: its grey caption, a 2 px ring round the gradient, and the knob in its white ring.
+	local function track(name, order)
+		local section = ui.new('Frame', {Name = name, BackgroundTransparency = 1, LayoutOrder = order, Size = UDim2.new(1, 0, 0, 50), ZIndex = 22}, card)
+		ui.text(section, {Text = name, Size = 15, Color = theme.SubText, Props = {Position = UDim2.fromOffset(0, 6), Size = UDim2.new(1, 0, 0, 20), ZIndex = 22}})
+		local ring = ui.new('Frame', {
+			Name = 'Track',
+			AnchorPoint = Vector2.new(0, 0.5),
+			BackgroundTransparency = 1,
+			Position = UDim2.new(0, 2, 0, 37),
+			Size = UDim2.new(1, -4, 0, 12),
+			ZIndex = 22
+		}, section)
+		ui.corner(ring, UDim.new(1, 0))
+		ui.stroke(ring, theme.Outline, 2, 0)
+		local fill = ui.new('Frame', {Name = 'Fill', BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), ZIndex = 22}, ring)
+		ui.corner(fill, UDim.new(1, 0))
+		local knob = ui.new('Frame', {
+			Name = 'Knob',
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			BorderSizePixel = 0,
+			Position = UDim2.fromScale(0, 0.5),
+			Size = UDim2.fromOffset(18, 18),
+			ZIndex = 23
+		}, ring)
+		ui.corner(knob, UDim.new(1, 0))
+		ui.stroke(knob, Color3.new(1, 1, 1), 2, 0)
+		local hit = ui.new('TextButton', {
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(0, 24),
+			Size = UDim2.new(1, 0, 0, 26),
+			Text = '',
+			ZIndex = 24
+		}, section)
+		return {Ring = ring, Gradient = ui.new('UIGradient', {}, fill), Knob = knob, Hit = hit}
+	end
+	local hue = track('Hue', 3)
+	local sat = track('Saturation', 4)
+	local light = track('Lightness', 5)
+	local rainbow = {}
+	for i = 0, 10 do
+		table.insert(rainbow, ColorSequenceKeypoint.new(i / 10, Color3.fromHSV(i / 10, 1, 1)))
+	end
+	hue.Gradient.Color = ColorSequence.new(rainbow)
+
+	local function paint()
+		local h, s, l = state.H, state.S, state.L
+		state.Color = ui.hsl(h, s, l)
+		square.BackgroundColor3 = state.Color
+		local typing = false
+		pcall(function()
+			typing = hex:IsFocused()
+		end)
+		if not typing then
+			hex.Text = '#'..state.Color:ToHex():lower()
+		end
+		sat.Gradient.Color = ColorSequence.new(ui.hsl(h, 0, l), ui.hsl(h, 1, l))
+		light.Gradient.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.new(0, 0, 0)),
+			ColorSequenceKeypoint.new(0.5, ui.hsl(h, s, 0.5)),
+			ColorSequenceKeypoint.new(1, Color3.new(1, 1, 1))
+		})
+		hue.Knob.Position = UDim2.fromScale(h, 0.5)
+		sat.Knob.Position = UDim2.fromScale(s, 0.5)
+		light.Knob.Position = UDim2.fromScale(l, 0.5)
+		-- The hue knob is the pure hue, the saturation knob that hue at its saturation, the
+		-- lightness knob the grey of its lightness (the video: grey 127 at 0.5).
+		hue.Knob.BackgroundColor3 = ui.hsl(h, 1, 0.5)
+		sat.Knob.BackgroundColor3 = ui.hsl(h, s, 0.5)
+		light.Knob.BackgroundColor3 = Color3.new(l, l, l)
+	end
+	local function set(h, s, l)
+		state.H, state.S, state.L = h or state.H, s or state.S, l or state.L
+		paint()
+		if opts.OnChange then
+			opts.OnChange(state.Color)
+		end
+	end
+	for index, entry in {hue, sat, light} do
+		entry.Hit.InputBegan:Connect(function(input)
+			if not isPress(input) then return end
+			trackDrag(input, entry.Ring, function(value)
+				if modal.Closed then return end
+				if index == 1 then
+					set(value)
+				elseif index == 2 then
+					set(nil, value)
+				else
+					set(nil, nil, value)
+				end
+			end)
+		end)
+	end
+
+	-- Recently used: the eight boxes every picker shares; an empty one is black.
+	local recentSection = ui.new('Frame', {AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 6, Size = UDim2.new(1, 0, 0, 0), ZIndex = 22}, card)
+	ui.list(recentSection, 4)
+	ui.text(recentSection, {Text = 'Recently used', Size = 15, Color = theme.SubText, Props = {LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 26), ZIndex = 22}})
+	local boxes = ui.new('Frame', {Name = 'Recent', BackgroundTransparency = 1, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 26), ZIndex = 22}, recentSection)
+	ui.padding(boxes, 2, 2, 2, 2)
+	local grid = Instance.new('UIGridLayout')
+	grid.CellPadding = UDim2.fromOffset(10, 0)
+	grid.CellSize = UDim2.new(1 / 8, -9, 0, 22)
+	grid.SortOrder = Enum.SortOrder.LayoutOrder
+	grid.Parent = boxes
+	for index = 1, 8 do
+		local color = layout.RecentColors[index]
+		local box = ui.new('TextButton', {
+			AutoButtonColor = false,
+			BackgroundColor3 = color or Color3.new(0, 0, 0),
+			BorderSizePixel = 0,
+			LayoutOrder = index,
+			Text = '',
+			ZIndex = 22
+		}, boxes)
+		ui.corner(box, 4)
+		local ring = ui.stroke(box, theme.Outline, 2, 0)
+		-- Its ring lifts to #505050 under the pointer, filled or not (the video at 33 s).
+		ui.hover(box, function()
+			ring.Color = theme.PillHover
+		end, function()
+			ring.Color = theme.Outline
+		end)
+		if color then
+			box.MouseButton1Click:Connect(function()
+				if modal.Closed then return end
+				set(ui.toHsl(color))
+			end)
+		end
+	end
+
+	hex.FocusLost:Connect(function(_, input)
+		local key
+		pcall(function()
+			key = input.KeyCode
+		end)
+		-- Escape takes the keyboard from the box and closes the modal, leaving the menu up.
+		if key == Enum.KeyCode.Escape then
+			ui.escapeLater('focus')
+			return
+		end
+		if modal.Closed then return end
+		-- Enter, or a phone's keyboard put away by a tap elsewhere: what was typed is taken either way.
+		local text = hex.Text
+		if text ~= '#'..state.Color:ToHex():lower() then
+			local ok, parsed = pcall(function()
+				local parts = text:split(',')
+				if #parts >= 3 then
+					local r, g, b = tonumber(parts[1]), tonumber(parts[2]), tonumber(parts[3])
+					-- 'nan' and 'inf' read as numbers, and are no part of a colour: the box goes back.
+					if r and g and b and math.abs(r) < math.huge and math.abs(g) < math.huge and math.abs(b) < math.huge then
+						return Color3.fromRGB(math.clamp(r, 0, 255), math.clamp(g, 0, 255), math.clamp(b, 0, 255))
+					end
+					return nil
+				end
+				return Color3.fromHex((text:gsub('%s', '')))
+			end)
+			if ok and typeof(parsed) == 'Color3' then
+				set(ui.toHsl(parsed))
+				return
+			end
+		end
+		paint()
+	end)
+
+	paint()
+	return modal
+end
+
+--[[ A catalog as the search lists it: {Id, Name, Key, IdKey} from props.Items -- a function that
+returns {Id, Name} pairs, or the pairs themselves -- read under pcall and sorted by name. Bare ids
+and an {[id] = name} map are taken too; anything else is skipped. ]]
+function ui.itemCatalog(source)
+	local list, seen = {}, {}
+	local ok, items = pcall(function()
+		if type(source) == 'function' then
+			return source()
+		end
+		return source
+	end)
+	if not ok or type(items) ~= 'table' then return list end
+	local function add(id, name)
+		if type(id) ~= 'string' or id == '' or seen[id] then return end
+		seen[id] = true
+		name = type(name) == 'string' and name ~= '' and name or id
+		table.insert(list, {Id = id, Name = name, Key = name:lower(), IdKey = id:lower()})
+	end
+	for key, entry in items do
+		if type(entry) == 'table' then
+			add(entry.Id, entry.Name)
+		elseif type(key) == 'number' then
+			add(entry, entry)
+		else
+			add(key, entry)
+		end
+	end
+	table.sort(list, function(a, b)
+		if a.Key ~= b.Key then
+			return a.Key < b.Key
+		end
+		return a.Id < b.Id
+	end)
+	return list
+end
+
+--[[ Slinky's Search item modal (the owner's video at 29 s), on the shared modal card: a box to type
+in, its text centred and the keyboard taken into it, then the catalog's names in two columns, filled
+row by row 33 px apart, each one its whole half of the row and white under the pointer. What is typed
+matches part of a name or an id, in any case; entries opts.Skip(id) turns down are left out. At most
+opts.Max (30), then '+N more...'. A pick closes it and goes to opts.Pick(id). The list is rebuilt
+after the text changes, never inside the change, and whatever is under the still pointer lights
+straight away after. opts: Title, Catalog (ui.itemCatalog), Max, Skip(id), Pick(id). ]]
+function ui.itemSearch(opts)
+	local max = math.max(math.floor(tonumber(opts.Max) or 30), 1)
+	local modal = ui.modalCard({Name = 'ItemSearch', Title = opts.Title or 'Search item', FitHeight = 85 + math.ceil((max + 1) / 2) * 33})
+	if not modal then return nil end
+	local card = modal.Card
+	local boxRow = ui.new('Frame', {BackgroundTransparency = 1, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 42), ZIndex = 22}, card)
+	-- 15 px in from the card's sides and 32 tall over its 2 px border, as measured.
+	local field = ui.pill(boxRow, {
+		Class = 'Frame',
+		Name = 'Field',
+		AnchorPoint = Vector2.new(0.5, 0),
+		Background = theme.Bar,
+		Position = UDim2.new(0.5, 0, 0, 10),
+		Radius = UDim.new(0, 8),
+		Size = UDim2.new(1, -10, 0, 28)
+	})
+	field.ZIndex = 22
+	local input = ui.text(field, {Class = 'TextBox', Size = 15, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
+		ClearTextOnFocus = false,
+		PlaceholderText = '',
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -24, 1, 0),
+		ZIndex = 23
+	}})
+	modal.Input = input
+	local results = ui.new('Frame', {Name = 'Results', AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 3, Size = UDim2.new(1, 0, 0, 0), ZIndex = 22}, card)
+	modal.Results = results
+	local grid = Instance.new('UIGridLayout')
+	grid.CellPadding = UDim2.fromOffset(0, 0)
+	grid.CellSize = UDim2.new(0.5, 0, 0, 33)
+	grid.FillDirection = Enum.FillDirection.Horizontal
+	grid.SortOrder = Enum.SortOrder.LayoutOrder
+	grid.Parent = results
+
+	local cells = {}
+	local function rebuild()
+		for _, cell in cells do
+			cell:Destroy()
+		end
+		table.clear(cells)
+		local query = tostring(input.Text or ''):lower():gsub('^%s+', ''):gsub('%s+$', '')
+		local shown, total = 0, 0
+		for _, item in opts.Catalog or {} do
+			if not (opts.Skip and opts.Skip(item.Id))
+				and (query == '' or item.Key:find(query, 1, true) or item.IdKey:find(query, 1, true)) then
+				total += 1
+				if shown < max then
+					shown += 1
+					local cell = ui.text(results, {Class = 'TextButton', Text = item.Name, Size = 15, Color = theme.Text, Props = {
+						Name = 'Result', LayoutOrder = shown, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 22
+					}})
+					ui.padding(cell, 0, 10, 0, 0)
+					ui.hover(cell, function()
+						cell.TextColor3 = theme.Lit
+					end, function()
+						cell.TextColor3 = theme.Text
+					end)
+					local id = item.Id
+					cell.MouseButton1Click:Connect(function()
+						if modal.Closed then return end
+						modal.Close()
+						if opts.Pick then
+							opts.Pick(id)
+						end
+					end)
+					table.insert(cells, cell)
+				end
+			end
+		end
+		if total > shown then
+			table.insert(cells, ui.text(results, {Text = '+'..(total - shown)..' more...', Size = 15, Color = theme.SubText, Props = {
+				Name = 'More', LayoutOrder = shown + 1, ZIndex = 22
+			}}))
+		end
+	end
+	-- The text only marks the list stale; the rebuild runs after the change, then the re-hover.
+	local queued = false
+	local function settle()
+		queued = false
+		if vape.Loaded == nil or modal.Closed then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		rebuild()
+		task.defer(function()
+			if vape.Loaded == nil or modal.Closed then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			ui.rehover()
+		end)
+	end
+	input:GetPropertyChangedSignal('Text'):Connect(function()
+		if queued then return end
+		queued = true
+		task.defer(settle)
+	end)
+
+	--[[ The keyboard goes into the box once the box will hold it, as the module search's does: for two
+	seconds a focus lost with no Enter, Tab, click or tap behind it is taken back, up to eight times.
+	Escape in the box closes the modal (ui.escape). ]]
+	local focusUntil = os.clock() + 2
+	input.FocusLost:Connect(function(enterPressed, cause)
+		local key, kind
+		pcall(function()
+			key, kind = cause.KeyCode, cause.UserInputType
+		end)
+		if key == Enum.KeyCode.Escape then
+			focusUntil = 0
+			ui.escapeLater('focus')
+			return
+		end
+		if enterPressed or key == Enum.KeyCode.Return or key == Enum.KeyCode.KeypadEnter or key == Enum.KeyCode.Tab
+			or kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.MouseButton2
+			or kind == Enum.UserInputType.Touch then
+			focusUntil = 0
+		end
+	end)
+	task.spawn(function()
+		local passes, retakes, lastTry = 0, 0, -1
+		while not modal.Closed and os.clock() <= focusUntil do
+			local focused = false
+			pcall(function()
+				focused = input:IsFocused()
+			end)
+			if focused then
+				passes += 1
+			else
+				if passes > 0 then
+					retakes += 1
+					if retakes > 8 then return end
+				end
+				passes = 0
+				if os.clock() - lastTry >= 0.015 then
+					lastTry = os.clock()
+					pcall(function()
+						input:CaptureFocus()
+					end)
+				end
+			end
+			task.wait()
+		end
+	end)
+	settle()
+	return modal
+end
+
+--[[
+	A list of entries picked from a catalog, each with its colour: Item ESP's item types, drawn as
+	the owner's Slinky video shows them. Beside the label, a box from the card's centre to 10 px off
+	its right edge, a 2 px #404040 border and 2 px rules between its 28 px rows: each entry's colour
+	in a rounded square (a click opens its colour), its name, centred, and an x, red under the
+	pointer, that takes it away; at the foot 'Click to add', which opens the search of the catalog.
+	The GUI knows no game: props.Items hands it {Id, Name} pairs, read each time the search opens.
+	Adding or taking away an entry only resizes this option inside the card's body, so the card's
+	height follows it as it follows any row shown or hidden. Saved as {Items = {{Id, Color =
+	'rrggbb'}}}; a TextList's {List, ListEnabled} loads too. vape:Load calls Load with no pcall, so
+	Load never throws.
+]]
+components.ItemList = function(props, children, api)
+	local defaultColor = typeof(props.DefaultColor) == 'Color3' and props.DefaultColor or Color3.fromRGB(255, 0, 0)
+	local showColors = props.Colors ~= false
+	local component = {
+		Type = 'ItemList',
+		Index = getTableSize(api.Options),
+		List = {},
+		Colors = {}
+	}
+	-- The same array: readers written for a TextList read ListEnabled.
+	component.ListEnabled = component.List
+	props.Function = props.Function or function() end
+
+	local itemlist = ui.new('Frame', {
+		Name = 'ItemList',
+		BackgroundTransparency = 1,
+		LayoutOrder = props.LayoutOrder or 0,
+		Size = UDim2.new(1, 0, 0, 37),
+		Visible = props.Visible == nil or props.Visible
+	}, children)
+	component.Object = itemlist
+	ui.rowLabel(itemlist, {DisplayName = props.DisplayName or ui.prettify(props.Name)})
+	addTooltip(itemlist, props.Tooltip)
+	--[[ Its border outside, as the dropdown's open box: 4 px under the row's top, (entries + 1) * 28 + 2
+	tall over the border, and the next row 3 px under it. ]]
+	local box = ui.pill(itemlist, {
+		Class = 'Frame',
+		Name = 'Box',
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -12, 0, 6),
+		Radius = UDim.new(0, 9),
+		Thickness = 2,
+		Size = UDim2.new(0.5, -14, 0, 26)
+	})
+	component.Window = box
+	local add = ui.text(box, {Class = 'TextButton', Text = 'Click to add', Size = 15, Color = theme.SubText, AlignX = Enum.TextXAlignment.Center, Props = {
+		Name = 'Add',
+		Size = UDim2.new(1, 0, 0, 26)
+	}})
+	ui.hover(add, function()
+		add.TextColor3 = theme.SubTextLit
+	end, function()
+		add.TextColor3 = theme.SubText
+	end)
+
+	-- Each entry's shown name, from the catalog; one it never named shows as its id.
+	local names = {}
+	local namesTried = -math.huge
+	local rows, squares = {}, {}
+	-- The colour modal while one is open: {Id, Modal}.
+	local colorOpen
+
+	local function learnNames()
+		local catalog = ui.itemCatalog(props.Items)
+		local renamed = false
+		for _, item in catalog do
+			if names[item.Id] ~= item.Name then
+				renamed = renamed or component.Colors[item.Id] ~= nil
+				names[item.Id] = item.Name
+			end
+		end
+		return catalog, renamed
+	end
+
+	local function closeColor(id)
+		if colorOpen and (id == nil or colorOpen.Id == id) then
+			local opened = colorOpen
+			colorOpen = nil
+			opened.Modal.Close()
+		end
+	end
+
+	local function openColor(id)
+		if not showColors or component.Colors[id] == nil then return end
+		closeColor()
+		local opened = ui.colorModal({
+			Title = names[id] or id,
+			Color = component.Colors[id],
+			OnChange = function(color)
+				component:SetColor(id, color)
+			end,
+			OnClose = function()
+				if colorOpen and colorOpen.Id == id then
+					colorOpen = nil
+				end
+			end
+		})
+		if opened then
+			colorOpen = {Id = id, Modal = opened}
+		end
+	end
+
+	local function render()
+		for _, row in rows do
+			row:Destroy()
+		end
+		table.clear(rows)
+		table.clear(squares)
+		-- Names for entries loaded before any search: the catalog once, then not again for 2 s.
+		local unnamed = false
+		for _, id in component.List do
+			if names[id] == nil then
+				unnamed = true
+				break
+			end
+		end
+		if unnamed and os.clock() - namesTried > 2 then
+			namesTried = os.clock()
+			learnNames()
+		end
+		for index, id in component.List do
+			local row = ui.new('Frame', {
+				Name = 'Entry',
+				BackgroundTransparency = 1,
+				LayoutOrder = index,
+				Position = UDim2.fromOffset(0, (index - 1) * 28),
+				Size = UDim2.new(1, 0, 0, 26)
+			}, box)
+			-- The rule under it, the border's colour at half strength, edge to edge.
+			ui.new('Frame', {
+				Name = 'Rule',
+				BackgroundColor3 = theme.Outline,
+				BackgroundTransparency = 0.5,
+				BorderSizePixel = 0,
+				Position = UDim2.fromOffset(0, 26),
+				Size = UDim2.new(1, 0, 0, 2)
+			}, row)
+			if showColors then
+				-- Its colour; it never lights, and a click opens the colour modal.
+				local square = ui.new('TextButton', {
+					Name = 'Color',
+					AnchorPoint = Vector2.new(0, 0.5),
+					AutoButtonColor = false,
+					BackgroundColor3 = component.Colors[id] or defaultColor,
+					BorderSizePixel = 0,
+					Position = UDim2.new(0, 4, 0.5, 0),
+					Size = UDim2.fromOffset(20, 18),
+					Text = ''
+				}, row)
+				ui.corner(square, 5)
+				squares[id] = square
+				square.MouseButton1Click:Connect(function()
+					openColor(id)
+				end)
+			end
+			ui.text(row, {Text = names[id] or id, Size = 15, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
+				Name = 'Title',
+				Position = UDim2.fromOffset(28, 0),
+				Size = UDim2.new(1, -56, 1, 0),
+				TextTruncate = Enum.TextTruncate.AtEnd
+			}})
+			-- The x: #424242, red only over its own glyph box.
+			local remove = ui.icon(row, 'slinky-x', 12, {Class = 'TextButton', Color = theme.CloseRest, NoMirror = true, Box = UDim2.fromOffset(20, 20), Props = {
+				Name = 'Remove',
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -2, 0.5, 0)
+			}})
+			local removeEntry = fonts.Registry[remove]
+			if removeEntry then
+				removeEntry.Size = 16
+				ui.setIcon(remove, 'slinky-x')
+			end
+			ui.hover(remove, function()
+				ui.paintIcon(remove, theme.Red)
+			end, function()
+				ui.paintIcon(remove, theme.CloseRest)
+			end)
+			remove.MouseButton1Click:Connect(function()
+				component:Remove(id)
+			end)
+			table.insert(rows, row)
+		end
+		local count = #component.List
+		add.Position = UDim2.fromOffset(0, count * 28)
+		local height = (count + 1) * 28 + 2
+		box.Size = UDim2.new(0.5, -14, 0, height - 4)
+		itemlist.Size = UDim2.new(1, 0, 0, height + 7)
+	end
+
+	--[[ The rows moved under a still pointer: what it rests on now lights, and what moved away from
+	it goes out, after the click that moved them. ]]
+	local function rehoverSoon()
+		task.defer(function()
+			if vape.Loaded == nil or not (clickgui and clickgui.Visible) then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			ui.restHovered()
+			ui.rehover()
+		end)
+	end
+
+	local function changed()
+		props.Function(component)
+		vape:RequestSave()
+	end
+
+	function component:Color() end
+
+	function component:Has(id)
+		return self.Colors[id] ~= nil
+	end
+
+	function component:ColorOf(id)
+		return self.Colors[id]
+	end
+
+	function component:Add(id, color)
+		if type(id) ~= 'string' or id == '' or self.Colors[id] ~= nil then return false end
+		table.insert(self.List, id)
+		self.Colors[id] = typeof(color) == 'Color3' and color or defaultColor
+		render()
+		rehoverSoon()
+		changed()
+		return true
+	end
+
+	function component:Remove(id)
+		local index = table.find(self.List, id)
+		if not index then return false end
+		table.remove(self.List, index)
+		self.Colors[id] = nil
+		closeColor(id)
+		render()
+		rehoverSoon()
+		changed()
+		return true
+	end
+
+	function component:SetColor(id, color)
+		if self.Colors[id] == nil or typeof(color) ~= 'Color3' then return false end
+		self.Colors[id] = color
+		if squares[id] then
+			squares[id].BackgroundColor3 = color
+		end
+		changed()
+		return true
+	end
+
+	function component:Clear()
+		if #self.List == 0 then return end
+		table.clear(self.List)
+		table.clear(self.Colors)
+		closeColor()
+		render()
+		rehoverSoon()
+		changed()
+	end
+
+	function component:Save(data)
+		local items = {}
+		for _, id in self.List do
+			table.insert(items, {Id = id, Color = (self.Colors[id] or defaultColor):ToHex():lower()})
+		end
+		data[props.Name] = {Items = items}
+	end
+
+	-- Its own {Items}, or a TextList's {List, ListEnabled} in DefaultColor; what does not read as an
+	-- entry is skipped.
+	local function parse(data)
+		local entries = {}
+		if type(data) ~= 'table' then return entries end
+		if type(data.Items) == 'table' then
+			for _, entry in data.Items do
+				if type(entry) == 'table' and type(entry.Id) == 'string' and entry.Id ~= '' then
+					local color = defaultColor
+					if type(entry.Color) == 'string' then
+						local ok, parsed = pcall(Color3.fromHex, entry.Color)
+						if ok and typeof(parsed) == 'Color3' then
+							color = parsed
+						end
+					end
+					table.insert(entries, {Id = entry.Id, Color = color})
+				end
+			end
+			return entries
+		end
+		local legacy = type(data.ListEnabled) == 'table' and data.ListEnabled or data.List
+		if type(legacy) == 'table' then
+			for _, id in legacy do
+				if type(id) == 'string' and id ~= '' then
+					table.insert(entries, {Id = id, Color = defaultColor})
+				end
+			end
+		end
+		return entries
+	end
+
+	function component:Load(data)
+		local ok, entries = pcall(parse, data)
+		table.clear(self.List)
+		table.clear(self.Colors)
+		if ok then
+			for _, entry in entries do
+				if self.Colors[entry.Id] == nil then
+					table.insert(self.List, entry.Id)
+					self.Colors[entry.Id] = entry.Color
+				end
+			end
+		end
+		closeColor()
+		render()
+		-- On its own thread: a game callback that errors does not stop the profile's load.
+		task.spawn(props.Function, self)
+	end
+
+	function component:OpenSearch()
+		local catalog, renamed = learnNames()
+		namesTried = os.clock()
+		-- Names that came in only now show on the entries too.
+		if renamed then
+			render()
+		end
+		return ui.itemSearch({
+			Title = props.Title or 'Search item',
+			Catalog = catalog,
+			Max = props.Max,
+			Skip = function(id)
+				return component.Colors[id] ~= nil
+			end,
+			Pick = function(id)
+				component:Add(id)
+			end
+		})
+	end
+
+	function component:OpenColor(id)
+		openColor(id)
+	end
+
+	add.MouseButton1Click:Connect(function()
+		component:OpenSearch()
+	end)
+
+	if type(props.Default) == 'table' then
+		for _, entry in props.Default do
+			local id = type(entry) == 'table' and entry.Id or entry
+			if type(id) == 'string' and id ~= '' and component.Colors[id] == nil then
+				table.insert(component.List, id)
+				component.Colors[id] = type(entry) == 'table' and typeof(entry.Color) == 'Color3' and entry.Color or defaultColor
+			end
+		end
+	end
+	render()
 
 	api.Options[props.Name] = component
 
@@ -13793,10 +15272,17 @@ components.Module = function(props, children, api)
 	component.Children = modulechildren
 	local expanded = false
 
-	-- Shown while hidden modules are being edited: the eye that hides or shows this card.
-	local edit = ui.icon(view.NameRow, 'eye', 15, {Class = 'TextButton', Color = theme.SubText, Props = {
-		Name = 'Edit', LayoutOrder = 3, Size = UDim2.fromOffset(22, 20), Visible = false
+	-- Shown while hidden modules are being edited: the eye that hides or shows this card, after the
+	-- key and HOLD badges.
+	local edit = ui.icon(view.NameRow, 'eye', 15, {Class = 'TextButton', Color = theme.SubText, NoMirror = true, Props = {
+		Name = 'Edit', LayoutOrder = 4, Size = UDim2.fromOffset(22, 20), Visible = false
 	}})
+	-- #999999 to #BBBBBB under the pointer.
+	ui.hover(edit, function()
+		ui.paintIcon(edit, theme.SubTextLit)
+	end, function()
+		ui.paintIcon(edit, theme.SubText)
+	end)
 	component.Edit = edit
 	props.Function = props.Function or function() end
 	addMaid(component)
@@ -13933,9 +15419,11 @@ components.Module = function(props, children, api)
 		component:SetVisible(not component.Visible)
 	end)
 
+	-- The key badge and, after it, the HOLD badge (components.Bind).
 	local bind = component:CreateBind({
 		Module = true,
-		Cover = true
+		Cover = true,
+		HoldBadge = true
 	})
 
 	-- The module's own key (or its on-screen button): the one toggle that reports itself.
@@ -14140,10 +15628,22 @@ components.Overlay = function(props, children, api)
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Visible = not fixed
 	}})
-	local pin = ui.icon(window, 'pin', 14, {Class = 'TextButton', Color = PIN_OFF, Props = {
+	local pin = ui.icon(window, 'pin', 14, {Class = 'TextButton', Color = PIN_OFF, NoMirror = true, Props = {
 		AnchorPoint = Vector2.new(1, 0.5), Name = 'Pin', Position = UDim2.new(1, -8, 0, 16), Visible = not fixed
 	}})
 	addTooltip(pin, 'Pin: keep it on screen with the menu closed')
+	-- Grey until pinned, #BBBBBB under the pointer; pinned, the orange, which does not light.
+	local pinHovered = false
+	local function paintPin()
+		ui.paintIcon(pin, component.Pinned and PIN_ON or (pinHovered and theme.SubTextLit or PIN_OFF))
+	end
+	ui.hover(pin, function()
+		pinHovered = true
+		paintPin()
+	end, function()
+		pinHovered = false
+		paintPin()
+	end)
 	local customchildren = ui.new('Frame', {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromScale(0, 1),
@@ -14179,7 +15679,9 @@ components.Overlay = function(props, children, api)
 	function component:Load(data)
 		vape:LoadOptions(self, data.Options)
 
-		if self.Button.Enabled ~= (data.Enabled and true or false) then
+		-- A hold-mode overlay is on only while its key is down, so it loads off, as a hold module does.
+		local heldOnly = self.Bind ~= nil and type(data.Bind) == 'table' and data.Bind.Hold == true
+		if self.Button.Enabled ~= ((data.Enabled and not heldOnly) and true or false) then
 			self.Button:Toggle()
 		end
 
@@ -14201,7 +15703,7 @@ components.Overlay = function(props, children, api)
 	function component:Pin()
 		if fixed then return end
 		self.Pinned = not self.Pinned
-		pin.TextColor3 = self.Pinned and PIN_ON or PIN_OFF
+		paintPin()
 		vape:RequestSave()
 	end
 
@@ -14250,7 +15752,8 @@ components.Overlay = function(props, children, api)
 	component.BindParent = view.NameRow
 	local bind = component:CreateBind({
 		Module = true,
-		Cover = true
+		Cover = true,
+		HoldBadge = true
 	})
 	bind.Triggered:Connect(function(isDown)
 		if bind.Hold then
@@ -14816,6 +16319,8 @@ components.TargetsButton = function(props, children, api)
 	addTooltip(targetsbutton, props.Tooltip)
 	props.Function = props.Function or function() end
 
+	-- An off chip's text goes #999999 to #BBBBBB under the pointer; an on chip's, on the accent, stays.
+	local hovered = false
 	function component:Paint(accent)
 		if self.Enabled then
 			targetsbutton.BackgroundColor3 = accent or theme.Accent()
@@ -14823,10 +16328,21 @@ components.TargetsButton = function(props, children, api)
 			stroke.Enabled = false
 		else
 			targetsbutton.BackgroundColor3 = theme.Card
-			targetsbutton.TextColor3 = theme.SubText
+			targetsbutton.TextColor3 = hovered and theme.SubTextLit or theme.SubText
 			stroke.Enabled = true
 		end
 	end
+	ui.hover(targetsbutton, function()
+		hovered = true
+		if not component.Enabled then
+			targetsbutton.TextColor3 = theme.SubTextLit
+		end
+	end, function()
+		hovered = false
+		if not component.Enabled then
+			targetsbutton.TextColor3 = theme.SubText
+		end
+	end)
 
 	function component:Toggle()
 		self.Enabled = not self.Enabled
@@ -14871,6 +16387,12 @@ components.TextBox = function(props, children, api)
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		TextWrapped = false
 	}})
+	-- Under the pointer the pill's text goes white, at once.
+	ui.hover(holder, function()
+		inputbox.TextColor3 = theme.Lit
+	end, function()
+		inputbox.TextColor3 = theme.Text
+	end)
 	props.Function = props.Function or function() end
 
 	--[[ What the box owes since its text last settled: one Function call and one save, however the
@@ -14974,9 +16496,17 @@ components.TextList = function(props, children, api)
 	local amount = ui.text(button, {Text = '0 entries', Size = 14, Color = theme.Text, AlignX = Enum.TextXAlignment.Center, Props = {
 		Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -36, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd
 	}})
-	local chevron = ui.icon(button, 'chevron-right', 13, {Color = theme.SubText, Props = {
+	local chevron = ui.icon(button, 'chevron-right', 13, {Color = theme.SubText, NoMirror = true, Props = {
 		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0)
 	}})
+	-- Under the pointer the pill's count goes white and its chevron #BBBBBB.
+	ui.hover(button, function()
+		amount.TextColor3 = theme.Lit
+		ui.paintIcon(chevron, theme.SubTextLit)
+	end, function()
+		amount.TextColor3 = theme.Text
+		ui.paintIcon(chevron, theme.SubText)
+	end)
 
 	local textlistwindow = ui.new('Frame', {
 		Name = 'Editor',
@@ -14998,9 +16528,15 @@ components.TextList = function(props, children, api)
 		Position = UDim2.fromOffset(12, 0),
 		Size = UDim2.new(1, -44, 1, 0)
 	}})
-	local add = ui.icon(boxholder, 'plus', 14, {Class = 'TextButton', Color = theme.SubText, Props = {
+	local add = ui.icon(boxholder, 'plus', 14, {Class = 'TextButton', Color = theme.SubText, NoMirror = true, Props = {
 		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0)
 	}})
+	-- The + goes #999999 to #BBBBBB under the pointer.
+	ui.hover(add, function()
+		ui.paintIcon(add, theme.SubTextLit)
+	end, function()
+		ui.paintIcon(add, theme.SubText)
+	end)
 	props.Function = props.Function or function() end
 
 	function component:Color(hue, sat, val, isRainbow) end
@@ -15024,6 +16560,8 @@ components.TextList = function(props, children, api)
 		props.Function(self.List)
 		if value ~= nil then
 			vape:RequestSave()
+			-- The rows move under a still pointer: what it rests on lights after this click.
+			ui.rehoverSoon()
 		end
 		for _, v in self.Objects do
 			v:Destroy()
@@ -15057,9 +16595,15 @@ components.TextList = function(props, children, api)
 			ui.text(obj, {Text = value, Size = 14, Color = theme.Label, Props = {
 				Position = UDim2.fromOffset(theme.Inset + 34, 0), Size = UDim2.new(1, -(theme.Inset * 2 + 60), 1, 0), TextTruncate = Enum.TextTruncate.AtEnd
 			}})
-			local close = ui.icon(obj, 'x', 13, {Class = 'TextButton', Color = theme.SubText, Props = {
+			-- The x: #424242, red under its own glyph box, as a click-to-add row's (the owner's video 2).
+			local close = ui.icon(obj, 'x', 13, {Class = 'TextButton', Color = theme.CloseRest, NoMirror = true, Props = {
 				AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -theme.Inset + 4, 0.5, 0)
 			}})
+			ui.hover(close, function()
+				ui.paintIcon(close, theme.Red)
+			end, function()
+				ui.paintIcon(close, theme.CloseRest)
+			end)
 
 			close.MouseButton1Click:Connect(function()
 				self:ChangeValue(value)

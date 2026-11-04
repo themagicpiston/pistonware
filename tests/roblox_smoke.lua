@@ -385,7 +385,8 @@ expectSourceContains('games/universal.lua', 'if shared.PistonwareDeveloper == tr
 expectSourceContains('games/universal.lua', "Name = 'Killaura Info'")
 expectSourceContains('games/universal.lua', "<b>Developer Diagnostics</b>")
 expectSourceContains('games/universal.lua', 'performance:StartDiagnostics()')
-expect(not sources['games/universal.lua']:find("Name = 'MotionBlur'", 1, true), 'universal.lua still registers MotionBlur')
+-- the old MotionBlur (removed 2026-08-28) blurred by walking speed alone; the current one blurs on fast turns
+expect(not sources['games/universal.lua']:find('PistonwareMotionBlur', 1, true), 'universal.lua still has the old speed-only MotionBlur')
 expectSourceContains('games/6872274481.lua', 'Max = 23')
 expect(not sources['games/6872274481.lua']:find("instance:IsA('MeshPart') or instance:IsA('UnionOperation')", 1, true), '6872274481.lua still attempts RenderFidelity on solid geometry')
 expectSourceContains('main.lua', "failBoot('game.compile', trace)")
