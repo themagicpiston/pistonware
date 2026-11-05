@@ -2388,6 +2388,11 @@ local function installDelta()
     shared.PistonwareNamecallHook = namecallHook
     shared.PistonwareNamecallTop = deltaTop
     shared.PistonwareNamecallRest = nil
+    -- Whether the executor left the same closure in the slot (hooked it in place) is what decides
+    -- if namecalls already waiting inside it come back wrong. knitReadyAt is set by the bootstrap.
+    bufferCall('print', 'bedwars.namecall', string.format('hook in (%s, %s) %.2fs after Knit started',
+        deltaMode, rawequal(deltaTop, current) and 'hooked in place' or 'slot replaced',
+        os.clock() - (namecallGuard.knitReadyAt or os.clock())))
     return true
 end
 
@@ -11041,6 +11046,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 	local InventoryUtil = require(replicatedStorage.TS.inventory['inventory-util']).InventoryUtil
 	local Client = require(replicatedStorage.TS.remotes).default.Client
+	namecallGuard.knitReadyAt = namecallGuard.knitReadyAt or os.clock()
 	local EffectUtil = require(replicatedStorage.TS.util.effect['effect-util']).EffectUtil
 	local OldGet, OldBreak = Client.Get
 
@@ -12321,6 +12327,57 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		end
 	end))
 
+	--[[ The game's own settings, asked for again where its request came back broken. SettingsController
+	asks the server for them once, from KnitStart (GetSettings), and AudioVolumeController leaves every
+	audio bus where the client starts it until they arrive -- the master bus at 0 -- and nothing else
+	sets the master bus. A request still waiting on the server when the deferred __namecall hook went in
+	came back as the RemoteFunction itself (Roblox log 2026-11-05: settings-controller:42, "attempt to
+	get length of a Instance value"). The store's reducer errors on it before SettingsController keeps
+	it, and that match then plays no game sound at all and leaves every other setting at its default.
+	So settings that have still not arrived once the hook is in (or 15 s on) are fetched again and
+	handed over as KnitStart does it. An answer that came in meanwhile is left alone. ]]
+	task.spawn(function()
+		local controller = not knitless.active and Knit.Controllers.SettingsController
+		if type(controller) ~= 'table' or type(controller.getSettingsEvent) ~= 'table' then return end
+		local started, nextTry = os.clock(), 0
+		while vape.Loaded ~= nil and controller.settings == nil and os.clock() - started < 45 do
+			-- installDelta sets PistonwareNamecallTop: a call sent after that comes back right
+			if (shared.PistonwareNamecallTop ~= nil or os.clock() - started > 15) and os.clock() >= nextTry then
+				local ok, settings = pcall(function()
+					return Client:Get('GetSettings'):CallServer()
+				end)
+				nextTry = os.clock() + 3
+				if vape.Loaded == nil or controller.settings ~= nil then return end
+				if ok and type(settings) == 'table' then
+					local stored, storeError = pcall(function()
+						bedwars.Store:dispatch({type = 'SettingsUpdateAll', settings = settings})
+					end)
+					controller.settings = settings
+					-- resumes every waitForSettings / waitForSettingsAsync, AudioVolumeController's included
+					pcall(function()
+						controller.getSettingsEvent:Fire(settings)
+					end)
+					task.wait(0.5)
+					local audio = Knit.Controllers.AudioVolumeController
+					local how = 'waiters resumed'
+					if type(audio) == 'table' and audio.hydrated ~= true and type(audio.applyAllSettings) == 'function' then
+						how = pcall(function()
+							audio:applyAllSettings(settings)
+							audio.hydrated = true
+						end) and 'audio buses set directly' or 'audio buses could not be set'
+					end
+					bufferCall('print', 'bedwars.settings', 'game settings fetched again ('..how..')'
+						..(stored and '' or '; store: '..tostring(storeError)))
+					return
+				end
+			end
+			task.wait(0.5)
+		end
+		if vape.Loaded ~= nil and controller.settings == nil then
+			bufferCall('warn', 'bedwars.settings', 'game settings still missing after 45s; game audio stays muted')
+		end
+	end)
+
 	task.spawn(function()
 		--[[ Delta: required at the identity this thread already has, with no get/set identity pair.
 		bedwars-shop is in the module cache by now: builder-util, required above at this same
@@ -12387,6 +12444,51 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		bufferCall('error', 'bedwars.shop.initialize', lastError)
 		notif('AutoBuy', 'Shop initialization failed. Open the item shop and reinject; see the error log.', 10, 'alert')
 	end)
+
+	--[[ BedwarsShopController.randomlySelectedItems is the reply to the one
+	BedwarsShopRequestRandomlySelectedItems call the controller makes in KnitStart, and the item shop's
+	getShop iterates it on every open. When that reply comes back as something other than a list (the
+	RemoteFunction itself, from a start-up call still waiting when the namecall hook went in, or nil from a swallowed call) every shop
+	open errors at bedwars-shop:424. Watched for the first minute: anything but a table is logged, set to
+	an empty list so the shop opens, and asked for again. ]]
+	if not knitless.active then
+		task.spawn(function()
+			local deadline = os.clock() + 60
+			while vape.Loaded ~= nil and os.clock() < deadline do
+				local controller = Knit.Controllers.BedwarsShopController
+				local items = controller and controller.randomlySelectedItems
+				if controller and type(items) ~= 'table' then
+					local described = typeof(items)
+					if described == 'Instance' then
+						pcall(function()
+							described = described..' '..items.ClassName..' '..items:GetFullName()
+						end)
+					else
+						described = described..' '..tostring(items)
+					end
+					controller.randomlySelectedItems = {}
+					bufferCall('warn', 'bedwars.shop.randomItems', 'BedwarsShopController.randomlySelectedItems was '
+						..described..'; set to {} and requested again')
+					local sent, err = pcall(function()
+						Client:Get('BedwarsShopRequestRandomlySelectedItems'):CallServerAsync():andThen(function(fresh)
+							if type(fresh) == 'table' then
+								controller.randomlySelectedItems = fresh
+							end
+							bufferCall('print', 'bedwars.shop.randomItems', 'asked again: got '..typeof(fresh)
+								..(type(fresh) == 'table' and (' of '..#fresh) or ''))
+						end):catch(function(e)
+							bufferCall('error', 'bedwars.shop.randomItems', 'asked again: '..tostring(e))
+						end)
+					end)
+					if not sent then
+						bufferCall('error', 'bedwars.shop.randomItems', tostring(err))
+					end
+					return
+				end
+				task.wait(0.5)
+			end
+		end)
+	end
 
 	vape:Clean(function()
 		Client.Get = OldGet

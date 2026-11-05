@@ -10786,7 +10786,11 @@ overlay, so on a phone, where the list is drawn smaller, it still fits the gap.
 
 Once synced it stays synced, through a rescale, a rotation or a profile loaded on another device:
 the state is a hidden option saved with the profile, and the module's step puts the reading back
-whenever the overlay moves. Dragging the reading with the menu open ends it. ]]
+whenever the overlay moves. Dragging the reading with the menu open ends it.
+
+The watermark need not be on. While a reading is synced (and its module on) it asks the overlay to
+keep the gap (vape.OverlayHolds): with the watermark off the overlay lays it out but draws it clear,
+so the list stays where it was under it and the reading where it was over the list. ]]
 loaderStyle.OverlayGap = {Units = 8.9, Reference = 1.2}
 
 function loaderStyle.overlaySync(module, label, across)
@@ -10799,13 +10803,26 @@ function loaderStyle.overlaySync(module, label, across)
 	fit.Parent = label
 	-- The Position this last wrote: anything else there is a drag, or a clamp after a rescale.
 	local placed
-	local Synced = module:CreateToggle({
+	local Synced
+	-- The overlay keeps the watermark's gap while this reading is on and synced (see above).
+	local function hold()
+		local wanted = module.Enabled and Synced ~= nil and Synced.Enabled or nil
+		vape.OverlayHolds = vape.OverlayHolds or {}
+		if vape.OverlayHolds[module.Name] ~= wanted then
+			vape.OverlayHolds[module.Name] = wanted
+			if vape.UpdateTextGUI then
+				vape:UpdateTextGUI()
+			end
+		end
+	end
+	Synced = module:CreateToggle({
 		Name = 'Synced to Mod Overlay',
 		Function = function(callback)
 			if not callback then
 				fit.Scale = 1
 				placed = nil
 			end
+			hold()
 		end,
 		Visible = false
 	})
@@ -10832,7 +10849,7 @@ function loaderStyle.overlaySync(module, label, across)
 		end
 		local holder = children:FindFirstChild('Holder')
 		if not (name and holder) or name.AbsoluteSize.X <= 0 or name.Size.Y.Offset <= 0 then
-			return nil, 'Turn on the Mod Overlay watermark first.'
+			return nil, 'The Mod Overlay has not made room for it yet. Try again.'
 		end
 		return name, holder
 	end
@@ -10864,22 +10881,43 @@ function loaderStyle.overlaySync(module, label, across)
 	module:CreateButton({
 		Name = 'Sync to Mod Overlay Position',
 		Function = function()
+			-- With the watermark off the gap is only made once asked for: ask, then give the
+			-- overlay a moment to redraw before giving up.
+			local asked = vape.OverlayHolds == nil or vape.OverlayHolds[module.Name] == nil
+			if asked then
+				vape.OverlayHolds = vape.OverlayHolds or {}
+				vape.OverlayHolds[module.Name] = true
+				if vape.UpdateTextGUI then
+					vape:UpdateTextGUI()
+				end
+			end
 			local ok, why = place()
+			for _ = 1, 20 do
+				if ok then break end
+				task.wait(0.05)
+				ok, why = place()
+			end
 			if not ok then
+				if asked then
+					hold()
+				end
 				notif(module.Name, why, 5, 'warning')
 				return
 			end
 			if not Synced.Enabled then
 				Synced:Toggle()
 			end
+			-- kept only while the reading is on (hold), so a press with it off gives the gap back
+			hold()
 		end,
-		Tooltip = 'Puts the reading in the gap under the Mod Overlay watermark, on any screen.\nIt stays there until you drag it.'
+		Tooltip = 'Puts the reading in the gap under the Mod Overlay watermark, on any screen, and keeps that gap with the watermark off.\nIt stays there until you drag it.'
 	})
 
 	-- The module's step while it is on: keeps a synced reading in its gap.
 	return function()
 		task.spawn(function()
 			placed = nil
+			hold()
 			while module.Enabled do
 				if Synced.Enabled then
 					raise()
@@ -10893,6 +10931,8 @@ function loaderStyle.overlaySync(module, label, across)
 				end
 				task.wait(0.25)
 			end
+			-- Off: the overlay closes the gap it kept for this reading.
+			hold()
 		end)
 	end
 end

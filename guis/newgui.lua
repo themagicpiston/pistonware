@@ -8231,9 +8231,23 @@ function build.modOverlay()
 			local generation = textGUIGeneration
 			local isRight = TextGUI.Children.AbsolutePosition.X > (gui.AbsoluteSize.X / 2)
 
-			local asciiMark = Watermark.Enabled and WatermarkStyle.Value == 'Logo'
-			Logo.Visible = Watermark.Enabled and not asciiMark
+			--[[ A reading synced into the gap under the watermark (vape.OverlayHolds: FPS and Ping's
+			Sync to Mod Overlay Position) keeps that gap with the watermark off: the watermark is laid
+			out as before but drawn clear, so the list stays under it and the reading keeps its spot. ]]
+			local held = not Watermark.Enabled and type(vape.OverlayHolds) == 'table' and next(vape.OverlayHolds) ~= nil
+			local asciiMark = (Watermark.Enabled or held) and WatermarkStyle.Value == 'Logo'
+			Logo.Visible = (Watermark.Enabled or held) and not asciiMark
 			ascii.Frame.Visible = asciiMark
+			local clear = held and 1 or 0
+			Logo.TextTransparency = clear
+			ascii.Text.TextTransparency = clear
+			ascii.Image.ImageTransparency = clear
+			for _, label in {Logo, ascii.Text} do
+				local outline = label:FindFirstChildOfClass('UIStroke')
+				if outline then
+					outline.Transparency = clear
+				end
+			end
 			--[[ The watermark hangs from its outer top corner, in from the list's edge by the list's own
 			Padding X. A self-sizing box keeps its anchor as it resizes, so a face that arrives after this
 			redraw (fonts.settle lays the Bold name out again), its outline or a Text size change grows it
@@ -8253,7 +8267,7 @@ function build.modOverlay()
 			-- The list starts below the mark and a gap: the name's line, or the whole piston.
 			local markHeight = Logo.Visible and MARK_TOP + Logo.Size.Y.Offset + MARK_GAP
 				or asciiMark and MARK_TOP + ascii.Height + ascii.Padding * 2 + PISTON_GAP or 0
-			LogoShadow.Visible = Logo.Visible and Shadow.Enabled
+			LogoShadow.Visible = Logo.Visible and Shadow.Enabled and not held
 			LabelCustom.Text = CustomTextBox.Value
 			LabelCustom.FontFace = CustomTextFont.Value
 			LabelCustom.Visible = LabelCustom.Text ~= '' and CustomText.Enabled
