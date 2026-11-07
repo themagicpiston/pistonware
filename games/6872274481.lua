@@ -3634,7 +3634,7 @@ function knitless.registryZap(ctx)
 	for _, name in {
 		'EntityDamageEventZap', 'PickupItemEventZap', 'ProjectileLaunchZap', 'ProjectileImpactZap',
 		'UpdateMapDataZap', 'PlaceBlockEventZap', 'BreakBlockEventZap', 'EntityHealEventZap',
-		'AddMatchEventCountdownZap', 'KitsUpdateEventZap'
+		'AddMatchEventCountdownZap', 'KitsUpdateEventZap', 'EntityDeathEventZap'
 	} do
 		zap[name] = knitless.registryZapEvent()
 	end
@@ -3794,6 +3794,31 @@ function knitless.registryZapDecoder(ctx, zap)
 		value.permanentDisplay = maybe(bool)
 		return value
 	end
+	--[[ Where a death happened: a position, then an axis whose length is the angle turned about it. ]]
+	local function cframe()
+		local position = vector32()
+		local axis = vector32()
+		local angle = axis.Magnitude
+		if angle == 0 then return CFrame.new(position) end
+		return CFrame.fromAxisAngle(axis, angle) + position
+	end
+	--[[ What a death paid out: per id (an f64), resources by name, each an amount and maybe visualOnly. ]]
+	local function payout()
+		local value = {}
+		for _ = 1, u16() do
+			local id = f64()
+			local items = {}
+			for _ = 1, u16() do
+				local name = text16()
+				local item = {}
+				item.amount = f64()
+				item.visualOnly = maybe(bool)
+				items[name] = item
+			end
+			value[id] = items
+		end
+		return value
+	end
 
 	--[[ By id, in lib.network's order. read returns the arguments as table.pack does; an entry
 	with no name is walked and not fired. ]]
@@ -3878,8 +3903,26 @@ function knitless.registryZapDecoder(ctx, zap)
 			local number = f64()
 			return table.pack(number, text16())
 		end},
+		-- One table, as lib.network passes it on: entityInstance, fromEntity, finalKill, respawnDuration
+		-- and the rest, the fields the EntityDeathEvent remote had before deaths moved here.
+		[10] = {name = 'EntityDeathEventZap', read = function()
+			local death = {}
+			death.teamIdBefore = maybe(text16)
+			death.entityInstance = maybeInstance('Model')
+			death.itemUsed = maybe(text16)
+			death.damageType = u8()
+			death.fromEntity = maybeInstance('Model')
+			death.cframe = cframe()
+			death.respawnDuration = f64()
+			death.multiKillCount = maybe(u16)
+			death.deathPayout = maybe(payout)
+			death.finalKill = maybe(bool)
+			death.noKillSound = maybe(bool)
+			death.customUI = maybe(bool)
+			return table.pack(death)
+		end},
 		-- The reply to a FetchMapDataFuncZap call, which this layer never makes: a call id and regions.
-		[10] = {read = function()
+		[11] = {read = function()
 			u8()
 			regions()
 		end}
@@ -12081,6 +12124,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 	updateStore(bedwars.Store:getState(), {})
 	
+	--[[ Deaths come over Zap now: EntityDeathEventZap hands its listeners one table with the fields
+	the EntityDeathEvent remote had (entityInstance, fromEntity, finalKill, respawnDuration and the
+	rest). A game build without that event still has the remote, which is then waited for as before. ]]
+	local deathZap = bedwars.ZapNetworking.EntityDeathEventZap
 	for _, event in {'MatchEndEvent', 'EntityDeathEvent', 'BedwarsBedBreak', 'BalloonPopped', 'AngelProgress', 'GrapplingHookFunctions'} do
 		if not vape.Connections then return end
 		-- Deferred dispatch: re-broadcast from the dispatch pump, not inside the remote's own dispatch.
@@ -12088,9 +12135,23 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		local forward = store.dispatchSafe(function(...)
 			vapeEvents[event]:Fire(...)
 		end)
-		bedwars.Client:WaitFor(event):andThen(function(connection)
-			vape:Clean(connection:Connect(forward))
-		end)
+		if event == 'EntityDeathEvent' and deathZap then
+			vape:Clean(deathZap.On(forward))
+		else
+			--[[ WaitFor rejects a name the game's remotes no longer define (without Knit, after a
+			minute's wait). That event then stays silent with a line in the log instead of an
+			unhandled rejection, and the others still connect. ]]
+			local ok, err = pcall(function()
+				bedwars.Client:WaitFor(event):andThen(function(connection)
+					vape:Clean(connection:Connect(forward))
+				end):catch(function(e)
+					bufferCall('warn', 'bedwars.events', event..' not connected: '..tostring(e))
+				end)
+			end)
+			if not ok then
+				bufferCall('warn', 'bedwars.events', event..' not connected: '..tostring(err))
+			end
+		end
 	end
 	
 	-- Named rather than picked out with select, which walks the arguments again for every field.
