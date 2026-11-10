@@ -411,16 +411,84 @@ end
 local cloneref = cloneref or function(obj)
 	return obj
 end
-local vapeEvents = setmetatable({}, {
-	__index = function(self, index)
-		local result = rawget(self, index)
-		if result == nil then
-			result = Instance.new('BindableEvent')
-			rawset(self, index, result)
+--[[ On Xeno, an Instance inside a table fired through a BindableEvent comes out broken on every
+other Fire: until the next one it no longer converts back to an Instance ("Instance expected, got
+table"), however it is reached. Damage, death, projectile, bed and block events all carry characters
+or players in a table. So on Xeno each event keeps what it fires in a ring and sends only the slot
+number through its BindableEvent, and its listeners read the arguments back from the ring. The
+BindableEvent still delivers, so listeners run when and in the order they did, and they get the
+values that were fired rather than copies (no listener writes to them). Other executors keep plain
+BindableEvents; in developer mode shared.PistonwareForceEventRing puts the ring on them too, for
+testing. 256 slots hold far more than one frame's worth of any event. ]]
+local vapeEvents
+do
+	local RING_SIZE = 256
+	local function ringEvent()
+		local bindable = Instance.new('BindableEvent')
+		local ring, fired = {}, 0
+		-- A listener for slot numbers that calls the real one with what was fired.
+		local function deliver(callback)
+			return function(id)
+				local entry = ring[id % RING_SIZE]
+				if entry and entry.id == id then
+					return callback(table.unpack(entry, 1, entry.n))
+				end
+			end
 		end
-		return result
+		local signal = {}
+		function signal:Connect(callback)
+			return bindable.Event:Connect(deliver(callback))
+		end
+		function signal:Once(callback)
+			return bindable.Event:Once(deliver(callback))
+		end
+		function signal:Wait()
+			while true do
+				local id = bindable.Event:Wait()
+				local entry = ring[id % RING_SIZE]
+				if entry and entry.id == id then
+					return table.unpack(entry, 1, entry.n)
+				end
+			end
+		end
+		local event = {Event = signal}
+		function event:Fire(...)
+			fired += 1
+			local entry = table.pack(...)
+			entry.id = fired
+			ring[fired % RING_SIZE] = entry
+			bindable:Fire(fired)
+		end
+		function event:Destroy()
+			bindable:Destroy()
+			table.clear(ring)
+		end
+		return event
 	end
-})
+
+	local useRing = shared.PistonwareDeveloper == true and shared.PistonwareForceEventRing == true
+	if not useRing then
+		local name = type(exec.Name) == 'string' and exec.Name or ''
+		if name == '' then
+			local ok, result = pcall(function()
+				return identifyexecutor and ({identifyexecutor()})[1] or nil
+			end)
+			name = (ok and type(result) == 'string') and result or ''
+		end
+		useRing = name:lower():sub(1, 4) == 'xeno'
+	end
+
+	vapeEvents = setmetatable({}, {
+		__index = function(self, index)
+			local result = rawget(self, index)
+			if result == nil then
+				result = useRing and ringEvent() or Instance.new('BindableEvent')
+				rawset(self, index, result)
+			end
+			return result
+		end
+	})
+end
 
 local playersService = cloneref(game:GetService('Players'))
 local replicatedStorage = cloneref(game:GetService('ReplicatedStorage'))
