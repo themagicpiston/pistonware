@@ -1479,8 +1479,204 @@ function ui.text(parent, props)
 		label[key] = value
 	end
 	fonts.Registry[label] = {Role = props.Weight or 'Medium'}
+	if className == 'TextBox' then
+		ui.caret(label)
+	end
 	if parent then label.Parent = parent end
 	return label
+end
+
+--[[ A text box's caret, as Slinky's (the owner's recording, 2026-11-10): a 2 px bar at half the text's
+strength that fades out and back in on a cosine once every 0.785 s, and is solid again whenever the text,
+the cursor or the selection moves. Roblox draws its own caret, faster, and has no setting for its rate, so
+a box made here draws none: its own text is fully transparent, which hides Roblox's caret, placeholder and
+selection with it (checked live), and a label over it, Shown, shows the text, or the placeholder, in the
+box's font, size, colours and alignment. Line, under Shown, is that text measured and laid where the box
+lays its text. In it, Prefix is the part before the cursor, with the caret on its right edge, and Lead and
+Span the parts before and inside the selection, Span drawn in Roblox's own selection blue (measured off
+the live box), a line tall, with the text over it as Roblox draws it. The measures read spaces as no-break
+spaces, which a layout never drops at the end of a line. Every write comes from a deferred sync or the
+blink's frame step (ui.anim), never from inside a property signal. A transparency someone else gives the
+box later is taken as Shown's, and the box goes back to fully transparent. ]]
+local CARET_PERIOD, CARET_PEAK, CARET_WIDTH = 0.785, 0.5, 2
+--[[ Clear of the letters (the owner's screenshot, 2026-11-10: on the line's start it cut through the
+placeholder's S, whose curve starts a pixel left of the line). At the start of the line the caret's right
+edge stands CARET_LEAD before it, a 2 px gap; after a letter, its left edge CARET_TRAIL past that letter. ]]
+local CARET_LEAD, CARET_TRAIL = 3, 1
+local CARET_SPACE = '\u{A0}'
+local CARET_SELECTION = Color3.fromRGB(108, 162, 250)
+-- What Shown takes from the box, and what the measures take (they stay left-aligned, unwrapped, untruncated).
+local CARET_SHOWN = {'FontFace', 'TextSize', 'TextXAlignment', 'TextYAlignment', 'TextWrapped', 'TextTruncate', 'LineHeight', 'RichText'}
+local CARET_MEASURE = {'FontFace', 'TextSize', 'LineHeight'}
+local CARET_WATCH = {'PlaceholderText', 'PlaceholderColor3', 'TextColor3', 'TextTransparency', 'FontFace', 'TextSize',
+	'TextXAlignment', 'TextYAlignment', 'TextWrapped', 'TextTruncate', 'LineHeight', 'RichText'}
+function ui.caret(box)
+	local textRest = box.TextTransparency or 0
+	local shownRest
+	local function part(className, name, parent)
+		local obj = Instance.new(className)
+		obj.Name = name
+		obj.Active = false
+		obj.BackgroundTransparency = 1
+		obj.BorderSizePixel = 0
+		obj.Parent = parent
+		return obj
+	end
+	-- Siblings in the box: Line (selection and caret) under Shown (the text).
+	local line = part('Frame', 'Line', box)
+	line.AutomaticSize = Enum.AutomaticSize.X
+	line.Size = UDim2.fromScale(0, 1)
+	line.ZIndex = 1
+	local shown = part('TextLabel', 'Shown', box)
+	shown.Size = UDim2.fromScale(1, 1)
+	shown.ZIndex = 2
+	local function measure(name, parent)
+		local label = part('TextLabel', name, parent)
+		label.AutomaticSize = Enum.AutomaticSize.X
+		label.RichText = false
+		label.Size = UDim2.fromScale(0, 1)
+		label.Text = ''
+		label.TextTransparency = 1
+		label.TextWrapped = false
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		return label
+	end
+	local full, prefix = measure('Full', line), measure('Prefix', line)
+	local selection = part('Frame', 'Selection', line)
+	selection.AutomaticSize = Enum.AutomaticSize.X
+	selection.Size = UDim2.fromScale(0, 1)
+	local flow = Instance.new('UIListLayout')
+	flow.FillDirection = Enum.FillDirection.Horizontal
+	flow.SortOrder = Enum.SortOrder.LayoutOrder
+	flow.VerticalAlignment = Enum.VerticalAlignment.Center
+	flow.Parent = selection
+	local lead, span = measure('Lead', selection), measure('Span', selection)
+	lead.LayoutOrder, span.LayoutOrder = 1, 2
+	span.BackgroundColor3 = CARET_SELECTION
+	local caret = part('Frame', 'Caret', prefix)
+	caret.AnchorPoint = Vector2.new(0, 0.5)
+	caret.Visible = false
+	box.TextTransparency = 1
+
+	local function sync()
+		local own = box.TextTransparency
+		if type(own) == 'number' and own < 1 then
+			textRest = own
+			box.TextTransparency = 1
+		end
+		if textRest ~= shownRest then
+			shownRest = textRest
+			shown.TextTransparency = textRest
+		end
+		for _, prop in CARET_SHOWN do
+			pcall(function()
+				shown[prop] = box[prop]
+			end)
+		end
+		for _, prop in CARET_MEASURE do
+			pcall(function()
+				local value = box[prop]
+				full[prop] = value
+				prefix[prop] = value
+				lead[prop] = value
+				span[prop] = value
+			end)
+		end
+		local text = box.Text or ''
+		local placeholder = text == ''
+		shown.Text = placeholder and (box.PlaceholderText or '') or text
+		shown.TextColor3 = placeholder and box.PlaceholderColor3 or box.TextColor3
+		-- With nothing typed the placeholder is measured, so a centred box's caret stands before it.
+		full.Text = (shown.Text:gsub(' ', CARET_SPACE))
+		local cursor = box.CursorPosition
+		local before = text
+		if type(cursor) == 'number' and cursor >= 1 then
+			before = text:sub(1, cursor - 1)
+		end
+		prefix.Text = (before:gsub(' ', CARET_SPACE))
+		-- The selection, from either end: the bytes from SelectionStart to the cursor.
+		local anchor = box.SelectionStart
+		local from, to
+		if type(anchor) == 'number' and anchor >= 1 and type(cursor) == 'number' and cursor >= 1 and anchor ~= cursor then
+			from, to = math.min(anchor, cursor), math.max(anchor, cursor)
+		end
+		lead.Text = from and (text:sub(1, from - 1):gsub(' ', CARET_SPACE)) or ''
+		span.Text = from and (text:sub(from, to - 1):gsub(' ', CARET_SPACE)) or ''
+		span.BackgroundTransparency = from and 0 or 1
+		span.Size = UDim2.fromOffset(0, box.TextSize or 14)
+		local alignX = box.TextXAlignment
+		if alignX == Enum.TextXAlignment.Center then
+			line.AnchorPoint, line.Position = Vector2.new(0.5, 0), UDim2.fromScale(0.5, 0)
+		elseif alignX == Enum.TextXAlignment.Right then
+			line.AnchorPoint, line.Position = Vector2.new(1, 0), UDim2.fromScale(1, 0)
+		else
+			line.AnchorPoint, line.Position = Vector2.new(0, 0), UDim2.new()
+		end
+		local size = box.TextSize or 14
+		caret.Size = UDim2.fromOffset(CARET_WIDTH, math.floor(size * 1.15 + 0.5))
+		local alignY = box.TextYAlignment
+		local scaleY, offsetY = 0.5, 0
+		if alignY == Enum.TextYAlignment.Top then
+			scaleY, offsetY = 0, math.floor(size / 2 + 0.5)
+		elseif alignY == Enum.TextYAlignment.Bottom then
+			scaleY, offsetY = 1, -math.floor(size / 2 + 0.5)
+		end
+		if before == '' then
+			caret.AnchorPoint = Vector2.new(1, 0.5)
+			caret.Position = UDim2.new(1, -CARET_LEAD, scaleY, offsetY)
+		else
+			caret.AnchorPoint = Vector2.new(0, 0.5)
+			caret.Position = UDim2.new(1, CARET_TRAIL, scaleY, offsetY)
+		end
+		caret.BackgroundColor3 = box.TextColor3
+	end
+	local queued = false
+	local function queue()
+		if queued then return end
+		queued = true
+		task.defer(function()
+			queued = false
+			sync()
+		end)
+	end
+
+	local blink = {Owner = box, T = 0}
+	function blink.Step(dt)
+		blink.T += dt
+		if not caret.Visible then
+			caret.Visible = true
+		end
+		caret.BackgroundTransparency = 1 - CARET_PEAK * (0.5 + 0.5 * math.cos(2 * math.pi * blink.T / CARET_PERIOD))
+	end
+	function blink.Finish()
+		caret.Visible = false
+		caret.BackgroundTransparency = 1
+	end
+	-- Typing, moving the cursor or selecting shows the caret solid again.
+	local function moved()
+		blink.T = 0
+		queue()
+	end
+	box:GetPropertyChangedSignal('Text'):Connect(moved)
+	for _, prop in {'CursorPosition', 'SelectionStart'} do
+		pcall(function()
+			box:GetPropertyChangedSignal(prop):Connect(moved)
+		end)
+	end
+	for _, prop in CARET_WATCH do
+		pcall(function()
+			box:GetPropertyChangedSignal(prop):Connect(queue)
+		end)
+	end
+	box.Focused:Connect(function()
+		blink.T = 0
+		queue()
+		ui.anim.play(caret, blink)
+	end)
+	box.FocusLost:Connect(function()
+		ui.anim.stop(caret, true)
+	end)
+	sync()
 end
 
 --[[ What is lit under the pointer, each with how to set it back. Showing or hiding the menu under a
@@ -10225,8 +10421,8 @@ function layout.place(tab)
 	page.Mid.Visible = n == 3
 	page.Right.Visible = n >= 2
 	if page.Empty then
-		-- 'No modules match.' only once something has been typed.
-		page.Empty.Visible = #list == 0 and (tab ~= 'Search' or searching)
+		-- The search page has no such line: a search that finds nothing leaves it blank.
+		page.Empty.Visible = #list == 0
 	end
 	-- A switch or an open fading this page takes what has just been placed in it (ui.fade).
 	ui.fade.placed(page.Frame, moved)
@@ -13151,10 +13347,11 @@ components.GUI = function(props, children, api)
 		end
 		local left, mid, right = column('Left'), column('Mid'), column('Right')
 		right.Position = UDim2.new(0.5, theme.Gap / 2, 0, 0)
-		local empty = ui.text(page, {Text = name == 'Search' and 'No modules match.' or 'Nothing in this tab here.', Size = 15, Color = theme.Muted, AlignX = Enum.TextXAlignment.Center, Props = {
+		-- The search page has none: a search that finds nothing shows a blank page.
+		local empty = name ~= 'Search' and ui.text(page, {Text = 'Nothing in this tab here.', Size = 15, Color = theme.Muted, AlignX = Enum.TextXAlignment.Center, Props = {
 			Size = UDim2.new(1, 0, 0, 60),
 			Visible = false
-		}})
+		}}) or nil
 		layout.Pages[name] = {Frame = page, Left = left, Mid = mid, Right = right, Empty = empty}
 	end
 	for _, name in TABS do
@@ -13605,11 +13802,6 @@ components.GUI = function(props, children, api)
 
 		local function setSearch(text)
 			layout.Search = text:lower():gsub('^%s+', ''):gsub('%s+$', '')
-			-- Cleared: the search page goes blank, without the no-match line the last query may have left.
-			local page = layout.Pages.Search
-			if layout.Search == '' and page and page.Empty then
-				page.Empty.Visible = false
-			end
 			showPages()
 			-- The tabs' own pages are not placed while a search is showing: all of them again afterwards.
 			layout.request('*')
@@ -13618,19 +13810,84 @@ components.GUI = function(props, children, api)
 		local focusToken = 0
 		-- Until when (os.clock) the open's focus run takes back a focus the box lost on its own.
 		local focusUntil = 0
+		--[[ Closing fades rather than snapping shut (the owner, 2026-11-10), on the menu's own open curve, 0.3 s
+		Quint Out (theme.ModalInfo): the field and the cross go out as the tabs, the magnifier and the tab's page
+		come back in, the page card by card (ui.fade), as when the menu opens. The search page and its results go
+		at once, as a tab switch drops the page it leaves. The field keeps what was typed while it fades, out of
+		the keyboard's reach, and is emptied at the end. On a phone (no FadePages) it closes at once. ]]
+		local closeMotion = {Owner = window, T = 0}
+		function closeMotion.Draw(p)
+			if closeMotion.Out then
+				ui.fade.draw(closeMotion.Out, p)
+			end
+			if closeMotion.In then
+				ui.fade.draw(closeMotion.In, 1 - p)
+			end
+		end
+		function closeMotion.Step(dt)
+			closeMotion.T += dt
+			local duration = theme.ModalInfo.Time
+			if closeMotion.T >= duration then
+				closeMotion.Finish()
+				return true
+			end
+			closeMotion.Draw(ui.anim.quintOut(closeMotion.T / duration))
+		end
+		-- The end, or a close cut short (the menu shut, the search opened again): the field hidden and
+		-- emptied, and every part the fade took back at its rest.
+		function closeMotion.Finish()
+			local out, back = closeMotion.Out, closeMotion.In
+			closeMotion.Out, closeMotion.In = nil, nil
+			if back then
+				ui.fade.finish(back)
+			end
+			if out then
+				searchField.Visible = false
+				cross.Visible = false
+				ui.fade.finish(out)
+				searchBox.TextEditable = true
+				searchBox.Text = ''
+			end
+		end
 		local function closeSearch()
 			-- Off the Escape stack however it closes (ui.escape).
 			ui.popEscape(searchField)
 			layout.FinishTabMotion()
+			ui.anim.stop(searchField, true)
 			focusToken += 1
 			focusUntil = 0
-			searchBox.Text = ''
+			local fading = layout.FadePages and ui.anim.onScreen(searchField)
+			if fading then
+				pcall(function()
+					searchBox:ReleaseFocus()
+				end)
+				searchBox.TextEditable = false
+				closeMotion.Out = ui.fade.new()
+				ui.fade.add(closeMotion.Out, searchField)
+				ui.fade.add(closeMotion.Out, cross)
+			else
+				searchBox.Text = ''
+				searchField.Visible = false
+				cross.Visible = false
+			end
 			setSearch('')
-			searchField.Visible = false
 			layout.SearchOpen = false
 			showPages()
 			tabsFrame.Visible = true
-			magnifier.Visible, cross.Visible = true, false
+			magnifier.Visible = true
+			if fading then
+				local back = ui.fade.new()
+				ui.fade.add(back, tabsFrame)
+				ui.fade.add(back, magnifier)
+				local info = layout.Pages[currentTab]
+				if info and info.Frame.Visible then
+					ui.fade.page(back, info.Frame)
+				end
+				closeMotion.In = back
+				closeMotion.T = 0
+				closeMotion.Draw(0)
+				ui.anim.play(searchField, closeMotion)
+			end
 		end
 		local function boxFocused()
 			local ok, focused = pcall(function()
@@ -13649,6 +13906,8 @@ components.GUI = function(props, children, api)
 		it is taken back the next frame, up to eight times; one the user took away ends the run
 		(FocusLost below). A newer open or a close ends an older run. ]]
 		local function openSearch()
+			-- A close still fading ends first, its field hidden and emptied (closeMotion.Finish).
+			ui.anim.stop(searchField, true)
 			-- A tab switch still moving ends before its page gives way to the search's.
 			layout.FinishTabMotion()
 			searchField.Visible = true
@@ -13689,7 +13948,8 @@ components.GUI = function(props, children, api)
 			end)
 		end
 		searchButton.MouseButton1Click:Connect(function()
-			if searchField.Visible then
+			-- Not by the field's Visible: it stays up while a close fades out.
+			if layout.SearchOpen then
 				closeSearch()
 			else
 				openSearch()
@@ -13705,7 +13965,7 @@ components.GUI = function(props, children, api)
 		Escape watcher (build.root) takes the key press. Not while a bind is waiting for a key: there
 		Escape clears the bind. ]]
 		local function escapeSearch()
-			if searchField.Visible and clickgui.Visible and not vape.Binding then
+			if layout.SearchOpen and clickgui.Visible and not vape.Binding then
 				ui.escapeLater('focus')
 			end
 		end

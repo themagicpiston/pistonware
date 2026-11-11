@@ -5741,8 +5741,17 @@ run(function()
 	local DROP_OFFSET = Vector2.new(1, 1)
 	local BACKGROUND_PADDING = Vector2.new(8, 4)
 
+	--[[ WorldToViewportPoint called as a plain function rather than with `:`, which would go through the
+	game's __namecall and the hook Pistonware keeps there: on Potassium about a microsecond and 48 bytes of
+	garbage a call (measured live, 2026-11-10), and the frame loop makes three a player every frame. ]]
+	local worldToViewport
+	local function screenPoint(pos)
+		worldToViewport = worldToViewport or gameCamera.WorldToViewportPoint
+		return worldToViewport(gameCamera, pos)
+	end
+
 	local function ESPWorldToViewport(pos)
-		local newpos = gameCamera:WorldToViewportPoint(pos)
+		local newpos = screenPoint(pos)
 		return Vector2.new(newpos.X, newpos.Y)
 	end
 
@@ -5808,11 +5817,30 @@ run(function()
 		return color
 	end
 
+	--[[ Garbage. The frame loop runs every frame, and a new Color3, Vector2 or CFrame is a new object
+	each time: about 20 a box a frame, which at 500 fps was some 4.6 MB a second of garbage (measured
+	live, 2026-11-10) and part of what makes the collector stall the game. So a colour slider's colour
+	is made once and reused until the slider moves, and each box keeps the pixel values it last drew
+	with and makes new Vector2s only once one of them changes. ]]
+	local OptionColors = setmetatable({}, {__mode = 'k'})
+	local function optionColor(option)
+		local h, s, v = option.Hue, option.Sat, option.Value
+		local cached = OptionColors[option]
+		if not (cached and cached[1] == h and cached[2] == s and cached[3] == v) then
+			cached = {h, s, v, Color3.fromHSV(h, s, v)}
+			OptionColors[option] = cached
+		end
+		return cached[4]
+	end
+	-- Per player's drawings: the box (X, Y, W, H, Pos, Size) and health bar values last drawn.
+	local Boxes = setmetatable({}, {__mode = 'k'})
+	local Bars = setmetatable({}, {__mode = 'k'})
+
 	--[[ The fill: with Override target color on, every box is filled in its fill colour and opacity,
 	and it stays that colour when they are hit; otherwise in the box's own colour at `alpha`. ]]
 	local function fillFor(ent, now, color, alpha)
 		if OverrideTarget.Enabled then
-			return Color3.fromHSV(TargetFill.Hue, TargetFill.Sat, TargetFill.Value), TargetFill.Opacity
+			return optionColor(TargetFill), TargetFill.Opacity
 		end
 		return color, alpha
 	end
@@ -5822,14 +5850,13 @@ run(function()
 	one for friendlies. ]]
 	local function baseColor(ent)
 		if OverrideTarget.Enabled then
-			return Color3.fromHSV(TargetColor.Hue, TargetColor.Sat, TargetColor.Value)
+			return optionColor(TargetColor)
 		end
 		if ColorMode.Value == 'Manual' then
 			local friendly = ent.Friend or not ent.Targetable
-			local option = friendly and FriendColor or Color
-			return Color3.fromHSV(option.Hue, option.Sat, option.Value)
+			return optionColor(friendly and FriendColor or Color)
 		end
-		return entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+		return entitylib.getEntityColor(ent) or optionColor(Color)
 	end
 
 	-- Override target color is one fixed colour: the hurt flash is for the team and manual colours.
@@ -5869,17 +5896,35 @@ run(function()
 		EntityESP.HealthLine = newDrawing('Line', {Thickness = 2, ZIndex = 2})
 	end
 
+	-- In whole pixels, as before; new Vector2s and a new colour only once one of them changes (OptionColors).
 	local function drawHealthBar(EntityESP, ent, left, top, bottom)
 		local fraction = healthFraction(ent)
-		local x = left - 5
+		local x = math.floor(left - 5)
+		local trackTop, trackBottom = math.floor(top - 1), math.floor(bottom + 1)
+		local barBottom, barTop = math.floor(bottom), math.floor(bottom - (bottom - top) * fraction)
+		local cache = Bars[EntityESP]
+		if not cache then
+			cache = {}
+			Bars[EntityESP] = cache
+		end
+		if cache.X ~= x or cache.TrackTop ~= trackTop or cache.TrackBottom ~= trackBottom
+			or cache.BarBottom ~= barBottom or cache.BarTop ~= barTop then
+			cache.X, cache.TrackTop, cache.TrackBottom, cache.BarBottom, cache.BarTop = x, trackTop, trackBottom, barBottom, barTop
+			cache.TrackFrom, cache.TrackTo = Vector2.new(x, trackTop), Vector2.new(x, trackBottom)
+			cache.BarFrom, cache.BarTo = Vector2.new(x, barBottom), Vector2.new(x, barTop)
+		end
+		if cache.Fraction ~= fraction then
+			cache.Fraction = fraction
+			cache.Color = Color3.fromHSV(fraction / 2.5, 0.89, 0.75)
+		end
 		local track, bar = EntityESP.HealthBorder, EntityESP.HealthLine
 		if track then
-			setLine(track, Vector2.new(x, top - 1) // 1, Vector2.new(x, bottom + 1) // 1)
+			setLine(track, cache.TrackFrom, cache.TrackTo)
 		end
 		if bar then
 			set(bar, 'Visible', fraction > 0)
-			setLine(bar, Vector2.new(x, bottom) // 1, Vector2.new(x, bottom - (bottom - top) * fraction) // 1)
-			set(bar, 'Color', Color3.fromHSV(fraction / 2.5, 0.89, 0.75))
+			setLine(bar, cache.BarFrom, cache.BarTo)
+			set(bar, 'Color', cache.Color)
 		end
 	end
 
@@ -6100,7 +6145,7 @@ run(function()
 			setAll(EntityESP, false)
 			return nil
 		end
-		local rootPos, rootVis = gameCamera:WorldToViewportPoint(position)
+		local rootPos, rootVis = screenPoint(position)
 		setAll(EntityESP, rootVis)
 		return rootVis and rootPos or nil, position
 	end
@@ -6109,15 +6154,42 @@ run(function()
 		local rootPos, position = screenRoot(ent, EntityESP, origin, menuOpen)
 		if not rootPos then return end
 
-		local look = CFrame.lookAlong(position, camera.LookVector)
-		local topPos = gameCamera:WorldToViewportPoint((look * CFrame.new(2, ent.HipHeight, 0)).p)
-		local bottomPos = gameCamera:WorldToViewportPoint((look * CFrame.new(-2, -ent.HipHeight - 1, 0)).p)
+		--[[ Two corners of a box facing the camera: CFrame.lookAlong(position, camera.LookVector) times
+		CFrame.new(+-2, ...), worked out on the axes that CFrame would have, in vector maths, which makes
+		no objects (the CFrames did, five a box a frame). Looking straight up or down there are no such
+		axes, and the CFrames are used. ]]
+		local lookDir = camera.LookVector
+		local right = lookDir:Cross(Vector3.yAxis)
+		local topWorld, bottomWorld
+		if right.Magnitude > 1e-4 then
+			right = right.Unit
+			local up = right:Cross(lookDir).Unit
+			topWorld = position + right * 2 + up * ent.HipHeight
+			bottomWorld = position - right * 2 - up * (ent.HipHeight + 1)
+		else
+			local look = CFrame.lookAlong(position, lookDir)
+			topWorld = (look * CFrame.new(2, ent.HipHeight, 0)).Position
+			bottomWorld = (look * CFrame.new(-2, -ent.HipHeight - 1, 0)).Position
+		end
+		local topPos = screenPoint(topWorld)
+		local bottomPos = screenPoint(bottomWorld)
 		--[[ Placed by its top-left corner with a positive size. Taken straight from the two corners the
 		height came out negative, the top corner being higher on screen: a native Drawing library
 		draws that anyway, but one built out of GUI frames, as on phone executors, may draw nothing. ]]
 		local width, height = math.abs(topPos.X - bottomPos.X), math.abs(topPos.Y - bottomPos.Y)
 		local left, top = rootPos.X - width / 2, rootPos.Y - height / 2
-		local boxPos, boxSize = Vector2.new(left, top) // 1, Vector2.new(width, height) // 1
+		-- In whole pixels; new Vector2s only once the box has moved or changed size by one.
+		local box = Boxes[EntityESP]
+		if not box then
+			box = {}
+			Boxes[EntityESP] = box
+		end
+		local x, y, w, h = math.floor(left), math.floor(top), math.floor(width), math.floor(height)
+		if box.X ~= x or box.Y ~= y or box.W ~= w or box.H ~= h then
+			box.X, box.Y, box.W, box.H = x, y, w, h
+			box.Pos, box.Size = Vector2.new(x, y), Vector2.new(w, h)
+		end
+		local boxPos, boxSize = box.Pos, box.Size
 		local color = entityColor(ent, now)
 		local main, border, fill = EntityESP.Main, EntityESP.Border, EntityESP.Fill
 		if main then

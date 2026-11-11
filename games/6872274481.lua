@@ -17897,6 +17897,13 @@ run(function()
 
 	A pcall per tag per frame is a handful of nanoseconds against sixteen tags. Losing one
 	tag for a frame is a flicker; losing the rest of the list is the bug being reported. ]]
+	--[[ Per frame, for every tag. WorldToViewportPoint is called as a plain function rather than
+	with `:`, which would go through the game's __namecall and the hook Pistonware keeps there (on
+	Potassium about a microsecond and 48 bytes of garbage a call, measured live 2026-11-10). Where
+	each tag was last put, so one that has not moved is not written again. ]]
+	local worldToViewport
+	local PlacedX, PlacedY = setmetatable({}, {__mode = 'k'}), setmetatable({}, {__mode = 'k'})
+
 	local function paintTag(ent, nametag, selfPos)
 		--[[ THIS is why tags froze on screen.
 
@@ -17938,7 +17945,8 @@ run(function()
 			end
 		end
 
-		local headPos, headVis = gameCamera:WorldToViewportPoint(rootPos + Vector3.new(0, ent.HipHeight + 1, 0))
+		worldToViewport = worldToViewport or gameCamera.WorldToViewportPoint
+		local headPos, headVis = worldToViewport(gameCamera, rootPos + Vector3.new(0, ent.HipHeight + 1, 0))
 		nametag.Visible = headVis
 		if not headVis then
 			return
@@ -17952,7 +17960,14 @@ run(function()
 				task.spawn(pcall, measureTag, nametag)
 			end
 		end
-		nametag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
+		-- Moved only once it is half a pixel or more from where it was last put: below that nothing on
+		-- screen changes, and a still tag no longer makes a UDim2 and a GUI update every frame.
+		local x, y = headPos.X, headPos.Y
+		local lastX, lastY = PlacedX[nametag], PlacedY[nametag]
+		if not lastX or math.abs(x - lastX) >= 0.5 or math.abs(y - lastY) >= 0.5 then
+			PlacedX[nametag], PlacedY[nametag] = x, y
+			nametag.Position = UDim2.fromOffset(x, y)
+		end
 	end
 
 	-- The per-tag pcall takes its arguments rather than wrapping a fresh closure: this runs
@@ -17961,28 +17976,31 @@ run(function()
 		pcall(paintTag, ent, nametag, selfPos)
 	end
 
+	-- One function for the whole frame, made once: the frame loop used to wrap a new closure every frame.
+	local function drawAll()
+		--[[ Local player's position is identical for every nametag this frame;
+		resolve the property chain once instead of per-entity. ]]
+		local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
+		-- Hidden while the menu is open; paintTag shows them again the frame after it closes.
+		local hidden = clickGuiOpen()
+		for ent, nametag in Reference do
+			if not nametag or not nametag.Parent then
+				Reference[ent] = nil
+				continue
+			end
+			if hidden then
+				if nametag.Visible then
+					nametag.Visible = false
+				end
+				continue
+			end
+			drawTag(ent, nametag, selfPos)
+		end
+	end
+
 	local Loop = {
 		Normal = function()
-			pcall(function()
-				--[[ Local player's position is identical for every nametag this frame;
-				resolve the property chain once instead of per-entity. ]]
-				local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
-				-- Hidden while the menu is open; paintTag shows them again the frame after it closes.
-				local hidden = clickGuiOpen()
-				for ent, nametag in Reference do
-					if not nametag or not nametag.Parent then
-						Reference[ent] = nil
-						continue
-					end
-					if hidden then
-						if nametag.Visible then
-							nametag.Visible = false
-						end
-						continue
-					end
-					drawTag(ent, nametag, selfPos)
-				end
-			end)
+			pcall(drawAll)
 		end
 	}
 	
@@ -18919,34 +18937,275 @@ end)
 	
 run(function()
 	local AutoToxic
+	local Mode
 	local GG
+	local GGMessage
 	local Kill
 	local KillMessage
-	local Presets, PresetNames = {}, {}
+	local KillMessages
+	-- Quick Words: each phrase's presetId under its normalised text, the phrases the dropdown lists, and
+	-- each presetId's phrase.
+	local Presets, PresetNames, PhraseOf = {}, {}, {}
+	--[[ Said when a game ends in Quick Words mode, and the kill phrase until one is picked. Known by
+	presetId as well as by text: Roblox translates Quick Words into each player's chat language, and
+	the presetIds were the same in every server seen. ]]
+	local GG_PHRASE, GG_ID = 'Good game', '2f641f8a-9bde-5242-a695-880059871184'
+	local KILL_PHRASE, KILL_ID = 'Well played', '1cebf811-b597-5be3-9100-172a049ae298'
+	local SUCCESS, SENDING = Enum.TextChatMessageStatus.Success, Enum.TextChatMessageStatus.Sending
+	-- What the server answers when it is the account, not the message, that may not chat.
+	local REFUSED = {
+		[Enum.TextChatMessageStatus.InvalidPrivacySettings] = true,
+		[Enum.TextChatMessageStatus.ModerationTimeout] = true
+	}
+	local CHAT_OFF = 'This account cannot chat (no age check, or chat is off for it). AutoToxic sends Quick Words instead, as set in Quick Words mode.'
+	--[[ One message every 5 s at most. Quick Words have a cooldown of about 4.5 s (Roblox's own chat
+	bar waits 5), and chat a flood check besides. A kill message inside the gap is dropped; the
+	end-of-game one waits it out. ]]
+	local GAP = 5
+	local lastSent = -math.huge
+	local told = {}
+	local savedKillMessage
+	local chatAllowed, chatAsked = false, -math.huge
 
 	local function normalise(str)
 		return (tostring(str):lower():gsub('^%s*(.-)%s*$', '%1'))
 	end
 
-	local function sendChat(message)
-		if not message then return end
+	-- Each notice once a session.
+	local function tell(key, text)
+		if told[key] then return end
+		told[key] = true
+		notif('AutoToxic', text, 10, 'warning')
+	end
 
-		if textChatService.ChatVersion ~= Enum.ChatVersion.TextChatService then
-			replicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, 'All')
+	-- Only the chosen mode's inputs, each under the toggle it belongs to.
+	local function refresh()
+		if not (Mode and GG and Kill and GGMessage and KillMessage and KillMessages) then return end
+		local chat = Mode.Value == 'Chat'
+		GGMessage.Object.Visible = chat and GG.Enabled
+		KillMessage.Object.Visible = not chat and Kill.Enabled
+		KillMessages.Object.Visible = chat and Kill.Enabled
+	end
+
+	-- The phrase a saved kill message stands for: itself when Roblox has it, else Well played, else the
+	-- first phrase. Profiles saved while the list was still empty hold 'None'.
+	local function presetFor(value)
+		if value ~= nil and table.find(PresetNames, value) then return value end
+		return PhraseOf[KILL_ID] or table.find(PresetNames, KILL_PHRASE) and KILL_PHRASE or PresetNames[1]
+	end
+
+	--[[ Roblox's Quick Words, from GetPresetsAsync: categoryGroups[].categories[].contents[], each
+	{kind = 'Preset', text, presetId}. This read messages[] of {value, presetId}, which is still
+	accepted; under the names in use now the list came out empty and nothing was ever sent. A
+	RobloxScript call, so only the worker below makes it. Returns whether there are phrases, and why
+	not when there are none. ]]
+	local function fetchPresets()
+		if PresetNames[1] then return true end
+		local ok, byText, phrases = pcall(function()
+			local presets = textChatService:GetPresetsAsync()
+			local found, order = {}, {}
+			for _, group in presets.categoryGroups or {} do
+				for _, category in group.categories or {} do
+					for _, entry in category.contents or category.messages or {} do
+						local text = entry.text or entry.value
+						if type(text) == 'string' and type(entry.presetId) == 'string' and (entry.kind or 'Preset') == 'Preset' and not found[normalise(text)] then
+							found[normalise(text)] = entry.presetId
+							table.insert(order, text)
+						end
+					end
+				end
+			end
+			return found, order
+		end)
+		if not ok then return false, tostring(byText) end
+		if not phrases[1] then return false, 'Roblox gave no phrases' end
+		table.sort(phrases)
+		for key, presetId in byText do
+			Presets[key] = presetId
+		end
+		for _, text in phrases do
+			PhraseOf[byText[normalise(text)]] = text
+		end
+		-- Filled in place: the dropdown holds this very table as its list.
+		table.move(phrases, 1, #phrases, 1, PresetNames)
+		local value = presetFor(savedKillMessage or KillMessage.Value)
+		if KillMessage.Value ~= value then
+			KillMessage:SetValue(value)
+		end
+		return true
+	end
+
+	-- The server's general channel. The chat bar sends to the tab the player has open, which can be
+	-- their team's.
+	local function generalChannel()
+		local channels = textChatService:FindFirstChild('TextChannels')
+		local general = channels and channels:FindFirstChild('RBXGeneral')
+		if general then return general end
+		local bar = textChatService:FindFirstChildOfClass('ChatInputBarConfiguration')
+		return bar and bar.TargetTextChannel
+	end
+
+	--[[ Sends one message and gives its final status; nil and the error when the call threw, nil alone
+	when no verdict came within 5 s. SendAsync and SendPresetAsync can hand back a message that is still
+	Sending, and the server's verdict reaches the sender through MessageReceived under the same
+	MessageId. ]]
+	local function attempt(channel, send)
+		lastSent = os.clock()
+		local verdicts = {}
+		local watch = channel.MessageReceived:Connect(function(message)
+			if message.Status ~= SENDING then
+				verdicts[message.MessageId] = message.Status
+			end
+		end)
+		local ok, status = pcall(function()
+			local message = send()
+			local deadline = os.clock() + 5
+			local verdict = verdicts[message.MessageId] or message.Status
+			while verdict == SENDING and os.clock() < deadline do
+				task.wait(0.1)
+				verdict = verdicts[message.MessageId] or message.Status
+			end
+			return verdict
+		end)
+		watch:Disconnect()
+		if not ok then return nil, tostring(status) end
+		return status ~= SENDING and status or nil
+	end
+
+	-- Quick Words: the Kill Message phrase after a kill, Good game when a game ends.
+	local function sendQuickWords(kill)
+		local ready, why = fetchPresets()
+		if not ready then
+			tell('quick', 'Quick Words are not available: '..why)
 			return
 		end
-
-		local presetId = Presets[normalise(message)]
-		if not presetId then return end
-
-		local channel = textChatService.ChatInputBarConfiguration.TargetTextChannel
-		if not channel then return end
-
-		task.spawn(function()
-			pcall(function()
-				channel:SendPresetAsync(presetId)
-			end)
+		local presetId
+		if kill then
+			presetId = Presets[normalise(KillMessage.Value)]
+		else
+			presetId = PhraseOf[GG_ID] and GG_ID or Presets[normalise(GG_PHRASE)]
+		end
+		local channel = generalChannel()
+		if not (presetId and channel) then return end
+		local status, err = attempt(channel, function()
+			return channel:SendPresetAsync(presetId)
 		end)
+		if err or (status and status ~= SUCCESS) then
+			local reason = err or status.Name
+			bufferCall('warn', 'bedwars.autotoxic', 'Quick Words not sent: '..reason)
+			tell('quick', 'A Quick Words message was not sent: '..reason)
+		end
+	end
+
+	--[[ Whether this account may chat: CanUserChatAsync for the local player, the question Roblox's own
+	chat UI asks (of Chat, the fallback here). It is false without an age check, and also when chat
+	settings, parental controls or a moderation timeout keep the account out of chat, which
+	Player.AgeChecked alone does not show. The answer is kept for a minute. ]]
+	local function canChat()
+		if os.clock() - chatAsked > 60 then
+			local ok, allowed = pcall(function()
+				return textChatService:CanUserChatAsync(lplr.UserId)
+			end)
+			if not ok then
+				ok, allowed = pcall(function()
+					return cloneref(game:GetService('Chat')):CanUserChatAsync(lplr.UserId)
+				end)
+			end
+			chatAllowed, chatAsked = ok and allowed == true, os.clock()
+		end
+		return chatAllowed
+	end
+
+	--[[ Your own text, when this account may chat. Quick Words go in its place when it may not, or
+	when the server turns the message down. ]]
+	local function sendText(text, kill)
+		local channel = generalChannel()
+		if not channel then return end
+		if canChat() then
+			local status, err = attempt(channel, function()
+				return channel:SendAsync(text)
+			end)
+			if status == SUCCESS or not (status or err) then return end
+			bufferCall('warn', 'bedwars.autotoxic', 'chat message not sent: '..(err or status.Name))
+			if not REFUSED[status] then
+				sendQuickWords(kill)
+				return
+			end
+			-- Turned down for the account: Quick Words for the next minute, then CanUserChatAsync again.
+			chatAllowed, chatAsked = false, os.clock()
+		end
+		tell('chat', CHAT_OFF)
+		sendQuickWords(kill)
+	end
+
+	-- One message, on the worker: after you kill a player (killed), or when a game ends (nil).
+	local function deliver(killed)
+		local left = lastSent + GAP - os.clock()
+		if left > 0 then
+			if killed then return end
+			task.wait(left)
+			if not AutoToxic.Enabled then return end
+		end
+		local text
+		if Mode.Value == 'Chat' then
+			if killed then
+				local list = KillMessages.ListEnabled
+				if not list[1] then return end
+				text = list[math.random(#list)]:gsub('{name}', function()
+					return killed.DisplayName
+				end)
+			else
+				text = GGMessage.Value
+			end
+			text = tostring(text):match('^%s*(.-)%s*$')
+			if text == '' then return end
+		end
+		if textChatService.ChatVersion ~= Enum.ChatVersion.TextChatService then
+			-- Legacy chat has no presets: it all goes as plain text, a phrase as it always has.
+			text = text or (killed and KillMessage.Value or GG_PHRASE)
+			local events = replicatedStorage:FindFirstChild('DefaultChatSystemChatEvents')
+			local say = events and events:FindFirstChild('SayMessageRequest')
+			if say and text ~= 'None' then
+				lastSent = os.clock()
+				say:FireServer(text, 'All')
+			end
+		elseif text then
+			sendText(text, killed ~= nil)
+		else
+			sendQuickWords(killed ~= nil)
+		end
+	end
+
+	--[[ Every send runs on this one thread, made here at load. GetPresetsAsync and SendPresetAsync are
+	RobloxScript calls. A thread keeps the identity it was made with, but an event handler runs at the
+	identity of whatever connected it, which on some executors is too low for them, and so does any
+	thread spawned from one. One job at a time, in order. ]]
+	local jobs, parked = {}, false
+	local worker = coroutine.create(function()
+		if vape.ThreadFix and not pcall(setthreadidentity, 8) then
+			pcall(setthreadidentity, 7)
+		end
+		while true do
+			local job = table.remove(jobs, 1)
+			if job then
+				local ok, err = pcall(job)
+				if not ok then
+					bufferCall('warn', 'bedwars.autotoxic', tostring(err))
+				end
+			else
+				parked = true
+				coroutine.yield()
+				parked = false
+			end
+		end
+	end)
+	task.spawn(worker)
+
+	local function queue(job)
+		table.insert(jobs, job)
+		if parked then
+			task.spawn(worker)
+		end
 	end
 
 	AutoToxic = vape.Categories.Utility:CreateModule({
@@ -18955,7 +19214,7 @@ run(function()
 			if callback then
 				AutoToxic:Clean(vapeEvents.MatchEndEvent.Event:Connect(function()
 					if GG.Enabled then
-						sendChat('Good game')
+						queue(deliver)
 					end
 				end))
 				AutoToxic:Clean(vapeEvents.EntityDeathEvent.Event:Connect(function(deathTable)
@@ -18966,25 +19225,51 @@ run(function()
 					if not killer or not killed then return end
 					if killer ~= lplr or killed == lplr then return end
 
-					if KillMessage.Value ~= 'None' then
-						sendChat(KillMessage.Value)
-					end
+					-- Dropped once it is a second old: a kill that waited behind a slow send, or one from
+					-- before AutoToxic or Kill was switched off, would only go out late.
+					local at = os.clock()
+					queue(function()
+						if os.clock() - at <= 1 and AutoToxic.Enabled and Kill.Enabled then
+							deliver(killed)
+						end
+					end)
 				end))
 			end
 		end,
-		Tooltip = 'Sends chat messages after kills and when a game ends.'
+		Tooltip = 'Sends chat messages after kills and when a game ends.\nQuick Words needs no age check; Chat needs an account that can chat.'
+	})
+	Mode = AutoToxic:CreateDropdown({
+		Name = 'Mode',
+		List = {'Quick Words', 'Chat'},
+		Function = function(val, isClick)
+			refresh()
+			-- Picked by hand: an account that cannot chat hears so now rather than at its first kill.
+			if val == 'Chat' and isClick then
+				queue(function()
+					if not canChat() then
+						tell('chat', CHAT_OFF)
+					end
+				end)
+			end
+		end,
+		Tooltip = 'Quick Words, with no age check needed, or your own text if this account can chat'
 	})
 	GG = AutoToxic:CreateToggle({
 		Name = 'AutoGG',
-		Default = true
+		Default = true,
+		Function = refresh
+	})
+	GGMessage = AutoToxic:CreateTextBox({
+		Name = 'GG Message',
+		Default = 'gg',
+		Darker = true,
+		Visible = false,
+		Tooltip = 'What to say when a game ends'
 	})
 	Kill = AutoToxic:CreateToggle({
 		Name = 'Kill',
-		Function = function(callback)
-			if KillMessage then
-				KillMessage.Object.Visible = callback
-			end
-		end
+		Function = refresh,
+		Tooltip = 'Sends a message when you kill a player.\nIn Chat mode, {name} in a message becomes their name.'
 	})
 	KillMessage = AutoToxic:CreateDropdown({
 		Name = 'Kill Message',
@@ -18993,38 +19278,36 @@ run(function()
 		Visible = false,
 		Tooltip = 'What to say after you kill someone'
 	})
+	KillMessages = AutoToxic:CreateTextList({
+		Name = 'Kill Messages',
+		Default = {'gg {name}', 'ez'},
+		Placeholder = 'e.g. gg {name}',
+		Darker = true,
+		Visible = false,
+		Tooltip = 'One is picked at random after each kill'
+	})
 
-	local savedKillMessage
 	local loadDropdown = KillMessage.Load
 	function KillMessage:Load(tab)
+		--[[ A profile can load before the presets are in, while the list is empty and cannot hold its
+		value, so the value is kept for when they arrive. Once they are in, a saved value that is no
+		phrase becomes Well played. ]]
 		savedKillMessage = tab.Value
-		loadDropdown(self, tab)
+		loadDropdown(self, PresetNames[1] and {Value = presetFor(tab.Value)} or tab)
 	end
-	task.spawn(function()
-		if textChatService.ChatVersion ~= Enum.ChatVersion.TextChatService then return end
 
-		local success, presets = pcall(function()
-			return textChatService:GetPresetsAsync()
+	-- At load, and while that finds none, every 10 s for a minute after.
+	local function loadPresets(tries)
+		if vape.Loaded == nil or fetchPresets() or tries <= 1 then return end
+		task.delay(10, queue, function()
+			loadPresets(tries - 1)
 		end)
-		if not success or type(presets) ~= 'table' then return end
-
-		for _, group in presets.categoryGroups or {} do
-			for _, category in group.categories or {} do
-				for _, message in category.messages or {} do
-					Presets[normalise(message.value)] = message.presetId
-					table.insert(PresetNames, message.value)
-				end
-			end
-		end
-
-		table.sort(PresetNames)
-
-		if savedKillMessage and table.find(PresetNames, savedKillMessage) then
-			KillMessage:SetValue(savedKillMessage)
-		elseif KillMessage.Value == 'None' and PresetNames[1] then
-			KillMessage:SetValue(PresetNames[1])
-		end
-	end)
+	end
+	if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+		queue(function()
+			loadPresets(6)
+		end)
+	end
 end)
 	
 run(function()
