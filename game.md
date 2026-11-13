@@ -168,8 +168,8 @@ passed to `CreateModule`:
 | Blatant | `AntiFall`, `FastBreak`, `Fly`, `HitBoxes`, `KeepSprint`, `NoSlowdown`, `Speed` |
 | World | `SafeWalk`, `Anti-AFK`, `AutoSuffocate`, `AutoTool`, `BedProtector`, `ChestSteal`, `Schematica` |
 | Render | `BedESP`, `Health`, `KitESP`, `NameTags`, `StorageESP` |
-| Utility | `AutoBalloon`, `AutoKit`, `AutoPlay`, `AutoToxic`, `MissileTP`, `PickupRange`, `RavenTP`, `StaffDetector`, `TrapDisabler`, `DeviceSpoofer`, `HideNametag` |
-| Inventory | `AutoVoidDrop`, `ArmorSwitch`, `AutoBuy`, `AutoConsume`, `AutoHotbar`, `FastConsume`, `FastDrop` |
+| Utility | `AutoBalloon`, `AutoCobalt`, `AutoPlay`, `AutoToxic`, `MissileTP`, `PickupRange`, `RavenTP`, `StaffDetector`, `TrapDisabler`, `DeviceSpoofer`, `HideNametag` |
+| Inventory | `AutoVoidDrop`, `ArmorSwitch`, `AutoBuy`, `AutoConsume`, `AutoHotbar`, `FastDrop` |
 | Legit | `Bed Break Effect`, `Clean Kit`, `Crosshair`, `Damage Indicator`, `FOV`, `FPS Boost`, `Hit Color`, `HitFix`, `Interface`, `Kill Effect`, `Reach Display`, `Song Beats`, `SoundChanger`, `UI Cleanup`, `Viewmodel`, `WinEffect` |
 
 Profile entries that do not have a corresponding checked-in implementation belong in the

@@ -288,7 +288,7 @@ do
 		KeepSprint = "changes the game's own sprint code, which Solara and Xeno cannot reach (being rebuilt)",
 		SafeWalk = "needs the game's movement controls, which Solara and Xeno cannot reach (being rebuilt)",
 		NoSlowdown = "changes the game's own movement modifiers, which Solara and Xeno cannot reach (being rebuilt)",
-		AutoKit = "needs the game's own kit controllers, which Solara and Xeno cannot reach (being rebuilt)",
+		AutoCobalt = "needs the game's own battery controller, which Solara and Xeno cannot reach (being rebuilt)",
 		TrapDisabler = "needs the game's own remotes client, which Solara and Xeno cannot reach (being rebuilt)",
 		AutoTool = "needs the game's own block breaker, which Solara and Xeno cannot reach (being rebuilt)",
 		ArmorSwitch = "cannot equip armor through the server inventory on this executor yet (being rebuilt)",
@@ -18779,116 +18779,142 @@ run(function()
 end)
 	
 run(function()
-	if exec.skip('AutoKit') then return end
-	local AutoKit
-	local Legit
-	local Toggles = {}
-	
-	local function kitCollection(id, func, range, specific)
-		local objs = type(id) == 'table' and id or collection(id, AutoKit)
-		repeat
-			if entitylib.isAlive then
-				local localPosition = entitylib.character.RootPart.Position
-				for _, v in objs do
-					if not AutoKit.Enabled then break end
-					local part = not v:IsA('Model') and v or v.PrimaryPart
-					if part and (part.Position - localPosition).Magnitude <= (not Legit.Enabled and specific and math.huge or range) then
-						func(v)
-					end
-				end
-			end
-			task.wait(0.1)
-		until not AutoKit.Enabled
+	if exec.skip('AutoCobalt') then return end
+	local AutoCobalt
+	local Range
+	-- BatteryController takes a battery once any part of it is within this of your character's pivot.
+	local GAME_REACH = 6
+	-- The server takes a battery from up to this far: 14.4 studs was accepted in a match, 18.3
+	-- refused, and it is RAYCAST_SWORD_CHARACTER_DISTANCE (combat-constant, 4.8 blocks).
+	local SERVER_REACH = 14.4
+	-- Battery id -> the hitbox part this module registered for it.
+	local boxes = {}
+	-- Bumped on every switch-on, so a loop still in its last wait after a quick off and on stops
+	-- rather than running beside the new one.
+	local loopId = 0
+
+	local function dropBox(id, effects)
+		local box = boxes[id]
+		if not box then return end
+		boxes[id] = nil
+		if effects and type(effects.batteryIds) == 'table' and effects.batteryIds[box] == id then
+			effects.batteryIds[box] = nil
+		end
+		box:Destroy()
 	end
-	
-	local AutoKitFunctions = {
-		battery = function()
-			repeat
-				if entitylib.isAlive then
-					local localPosition = entitylib.character.RootPart.Position
-					for i, v in bedwars.BatteryEffectsController.liveBatteries do
-						if (v.position - localPosition).Magnitude <= 10 then
-							local BatteryInfo = bedwars.BatteryEffectsController:getBatteryInfo(i)
-							if not BatteryInfo or BatteryInfo.activateTime >= workspace:GetServerTimeNow() or BatteryInfo.consumeTime + 0.1 >= workspace:GetServerTimeNow() then continue end
-							BatteryInfo.consumeTime = workspace:GetServerTimeNow()
-							bedwars.Client:Get(remotes.ConsumeBattery):SendToServer({batteryId = i})
-						end
-					end
-				end
-				task.wait(0.1)
-			until not AutoKit.Enabled
-		end,
-		cat = function()
-			local old = bedwars.CatController.leap
-			bedwars.CatController.leap = function(...)
-				vapeEvents.CatPounce:Fire()
-				return old(...)
-			end
-	
-			AutoKit:Clean(function()
-				bedwars.CatController.leap = old
-			end)
-		end,
-	}
-	
-	AutoKit = vape.Categories.Utility:CreateModule({
-		Name = 'AutoKit',
+
+	local function clearBoxes()
+		local effects = bedwars.BatteryEffectsController
+		for id in boxes do
+			dropBox(id, effects)
+		end
+	end
+
+	--[[ AutoCobalt picks nothing up itself. It makes batteries bigger to the game's own pickup
+	(BatteryController.onKitLocalActivated), which then takes them exactly as it always does:
+	every frame while your Cobalt logic is on, any opened battery with a part within 6 studs of
+	your character's pivot, once it has activated, again after 0.5 s if no answer came, one per
+	frame, sending ConsumeBattery itself. The game finds those parts with GetPartBoundsInRadius
+	and maps them to batteries through BatteryEffectsController.batteryIds, where registerBattery
+	puts a battery's parts when it opens. A battery within Range of you gets one more part there:
+	an invisible box around it, half as wide as Range less 6. A box that size holds a sphere of
+	that radius, so while the battery is within Range its edge is never more than 6 studs from
+	you, from any direction.
+
+	The box is made only while it is needed (within Range, not yet taken), so it is normally gone
+	a server round trip later. It sits under the camera, which Pistonware's own raycasts mostly
+	leave out, and carries game-core's query-ignore attribute, which the game's GameQueryUtil
+	raycasts skip. GetPartBoundsInRadius, which the pickup uses, still finds it (checked in game). ]]
+	AutoCobalt = vape.Categories.Utility:CreateModule({
+		Name = 'AutoCobalt',
 		Tab = 'Kits',
 		Function = function(callback)
 			if callback then
-				--[[ Every kit loop below touches Instances and fires remotes, and this
-				thread is whatever enabled the module -- a profile apply on load, or a
-				GUI click -- neither of which carries the elevated identity. Without it
-				a remote that needs the raised identity throws on the first call and
-				takes the whole kit loop with it, since nothing here is pcall'd. Set
-				once for the thread rather than inside the loops: it persists across
-				task.wait, and every kit function runs on this same thread. ]]
-				-- Guarded: on an executor whose ceiling is below 8 a bare setthreadidentity(8)
-				-- throws, and AutoKit never started at all.
-				if vape.ThreadFix and not pcall(setthreadidentity, 8) then
-					pcall(setthreadidentity, 7)
-				end
-				repeat task.wait(0.1) until store.equippedKit ~= '' and store.matchState ~= 0 or (not AutoKit.Enabled)
-				if not AutoKit.Enabled then return end
-				--[[ Every kit you are playing (Kit Fusion has two; see store.activeKits),
-				not only the first. A kit function can be a loop that runs until AutoKit goes
-				off, so all but the last get a thread of their own, raised like this one. ]]
-				local kits = {}
-				for _, kit in store.activeKits() do
-					if AutoKitFunctions[kit] and Toggles[kit] and Toggles[kit].Enabled then
-						table.insert(kits, kit)
-					end
-				end
-				for index, kit in kits do
-					if index < #kits then
-						task.spawn(function()
-							if vape.ThreadFix and not pcall(setthreadidentity, 8) then
-								pcall(setthreadidentity, 7)
+				AutoCobalt:Clean(clearBoxes)
+				loopId += 1
+				local thisLoop = loopId
+				repeat
+					local controller = bedwars.BatteryController
+					local effects = bedwars.BatteryEffectsController
+					local character = lplr.Character
+					-- Never past the server's reach, whatever an older profile saved.
+					local reach = math.min(Range.Value, SERVER_REACH)
+					-- The game runs its pickup while BaseKitController.localLogicActivate is set, which
+					-- covers a running match, Kit Fusion and the PvP arena's Cobalt augment alike.
+					if controller and controller.localLogicActivate == true and effects
+						and type(effects.liveBatteries) == 'table' and type(effects.batteryIds) == 'table'
+						and character and character.PrimaryPart and reach > GAME_REACH then
+						local point = character:GetPivot().Position
+						local now = workspace:GetServerTimeNow()
+						local size = Vector3.one * ((reach - GAME_REACH) * 2)
+						for id, info in effects.liveBatteries do
+							local box = boxes[id]
+							local position = info.position
+							if typeof(position) == 'Vector3' and info.activateTime < now
+								and (position - point).Magnitude <= reach then
+								-- Out of the world (its camera gone or moved), or the Range changed:
+								-- made again below. Sizes are compared loosely: a part stores them in single
+								-- precision, so a size of 16.8 does not read back as exactly 16.8.
+								if box and (not box:IsDescendantOf(workspace) or (box.Size - size).Magnitude > 0.01) then
+									dropBox(id, effects)
+									box = nil
+								end
+								if not box then
+									box = Instance.new('Part')
+									box.Name = 'Hitbox'
+									box.Anchored = true
+									box.CanCollide = false
+									box.CanTouch = false
+									box.CanQuery = true
+									box.CastShadow = false
+									box.Transparency = 1
+									box.Size = size
+									box.CFrame = CFrame.new(position)
+									box:SetAttribute('gamecore_GameQueryIgnore', true)
+									box.Parent = gameCamera.Parent and gameCamera or workspace.CurrentCamera
+									boxes[id] = box
+									effects.batteryIds[box] = id
+								end
+							elseif box then
+								dropBox(id, effects)
 							end
-							AutoKitFunctions[kit]()
-						end)
+						end
+						-- Taken by anyone, or despawned: the game dropped it from its list.
+						for id in boxes do
+							if effects.liveBatteries[id] == nil then
+								dropBox(id, effects)
+							end
+						end
+						runService.Heartbeat:Wait()
 					else
-						AutoKitFunctions[kit]()
+						if next(boxes) then clearBoxes() end
+						task.wait(0.5)
 					end
-				end
+				until not AutoCobalt.Enabled or loopId ~= thisLoop
 			end
 		end,
-		Tooltip = 'Uses your kit abilities for you.\nPick which kits it plays and whether to use legit range.'
+		Tooltip = 'Picks up Cobalt batteries from further away.'
 	})
-	Legit = AutoKit:CreateToggle({Name = 'Legit Range'})
-	local sortTable = {}
-	for i in AutoKitFunctions do
-		table.insert(sortTable, i)
-	end
-	table.sort(sortTable, function(a, b)
-		return bedwars.BedwarsKitMeta[a].name < bedwars.BedwarsKitMeta[b].name
-	end)
-	for _, v in sortTable do
-		Toggles[v] = AutoKit:CreateToggle({
-			Name = bedwars.BedwarsKitMeta[v].name,
-			Default = true
-		})
-	end
+	Range = AutoCobalt:CreateSlider({
+		Name = 'Range',
+		Min = 7,
+		Max = SERVER_REACH,
+		Default = 10,
+		Decimal = 10,
+		Function = function(val)
+			-- A profile saved while the slider went to 20 loads its old value as it is: brought
+			-- back to the server's reach after the load, so the slider shows what is used.
+			if val > SERVER_REACH then
+				task.defer(function()
+					if Range.Value > SERVER_REACH then Range:SetValue(SERVER_REACH) end
+				end)
+			end
+		end,
+		Suffix = function(val)
+			return val <= 1 and 'stud' or 'studs'
+		end,
+		Tooltip = 'How far away batteries get picked up.'
+	})
 end)
 	
 run(function()
@@ -20320,6 +20346,7 @@ run(function()
 	local Deposit
 	local DepositRange
 	local StolenWithin
+	local SkipOwnCrate
 	local Delays = {}
 	-- Paces the deposit sweep off the same slider the loot passes use. Without it a full
 	-- inventory is thirty-odd remotes every tenth of a second.
@@ -20602,8 +20629,8 @@ run(function()
 		return bestIndex
 	end
 
-	-- `taken` collects what actually left the chest, stamped with the time. Only the Steal
-	-- path passes one -- ordinary looting has nothing to deposit afterwards.
+	-- `taken` collects what actually left the chest, stamped with the time, for Deposit to bank.
+	-- Every loot path passes the stash: the range loop, GUI Check and Steal alike.
 	--[[ Whatever the server currently has us observing, if anything.
 
 	It matters because SetObservedChest(nil) is what the client turns into a ChestClear
@@ -20617,14 +20644,28 @@ run(function()
 
 	--[[ Your own storage is not loot: in GUI Check mode the open chest is whatever you
 	opened, personal chest included, and without this the loot pass pulls straight back out
-	whatever Deposit just put in, re-stashes it, and the two trade the same items forever.
+	whatever was just put in, a deposit puts it back, and the two trade the same items forever
+	(a clip of 12 Nov shows exactly that with iron, twice a second).
 
-	Matched by NAME, not by parentage. Every inventory-backed folder lives under
-	ReplicatedStorage.Inventories -- ordinary chests and team crates as much as your own --
-	so "is it in Inventories" refuses everything and stops the module dead. Only the three
-	folders keyed to your own username are yours. ]]
+	The server now keeps your inventory, personal chest and smelter in a private folder only
+	you can see, PlayerGui.PrivateInventory (inventory-entity: getOrCreatePrivateInventory,
+	findPrivateInventory), and the chest screen opens your personal chest from there
+	(chest-controller: waitForLocalPrivateInventory, then <name>_personal). Everything in it is
+	yours. In the older place, ReplicatedStorage.Inventories, every chest and crate lives too, so
+	there only the three folders keyed to your own username are yours. A personal chest folder
+	that names its owner (the PersonalChest attribute) is yours wherever it is when that is you. ]]
+	local function privateInventory()
+		local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
+		return playerGui and playerGui:FindFirstChild('PrivateInventory') or nil
+	end
+
 	local function isOwnStorage(folder)
 		if not folder then return false end
+		local private = privateInventory()
+		if private and folder:IsDescendantOf(private) then return true end
+		local owner = folder:GetAttribute('PersonalChest')
+		if owner ~= nil and tonumber(owner) == lplr.UserId then return true end
+
 		local inventories = replicatedStorage:FindFirstChild('Inventories')
 		if not inventories or folder.Parent ~= inventories then return false end
 
@@ -20727,6 +20768,12 @@ run(function()
 			end
 		end
 		return false
+	end
+
+	-- Your own team's crate is left alone while Skip Own Crate is on, as it always was before
+	-- the toggle; off, it is looted like any other chest.
+	local function skipsOwnCrate()
+		return SkipOwnCrate == nil or SkipOwnCrate.Enabled
 	end
 
 	local function lootChestUnlocked(chest, taken)
@@ -20876,12 +20923,18 @@ run(function()
 		return bedwars.Client:GetNamespace('Inventory'):Get(name)
 	end
 
+	-- Your personal chest's folder where the chest screen opens it, the private inventory, and
+	-- the older ReplicatedStorage.Inventories after it.
 	local function personalInventory()
+		local private = privateInventory()
+		local folder = private and private:FindFirstChild(lplr.Name .. '_personal')
+		if folder then return folder end
 		local inventories = replicatedStorage:FindFirstChild('Inventories')
 		return inventories and inventories:FindFirstChild(lplr.Name .. '_personal') or nil
 	end
 
-	--[[ Deposit banks only what Steal recently took, inside the Stolen Within window.
+	--[[ Deposit banks only what this module recently looted (any loot path, Steal included),
+	inside the Stolen Within window.
 
 	The window is what makes the toggle safe to leave on: an entry that has aged out is
 	dropped rather than deposited, so walking past your own chest with a sword you have
@@ -21065,7 +21118,7 @@ run(function()
 
 	local function stealPass(crates, localPosition)
 		for _, crate in crates do
-			if isFriendlyCrate(crate) then continue end
+			if skipsOwnCrate() and isFriendlyCrate(crate) then continue end
 			if (localPosition - crate.Position).Magnitude <= LootRange.Value then
 				lootChest(crate:FindFirstChild('ChestFolderValue'), Stash)
 			end
@@ -21115,16 +21168,20 @@ run(function()
 								if guiOpen then
 									local observed = lplr.Character and lplr.Character:FindFirstChild('ObservedChestFolder')
 									-- Opening our own crate by hand must not empty it either.
-									if not folderIsFriendlyCrate(crates, observed and observed.Value) then
+									if not (skipsOwnCrate() and folderIsFriendlyCrate(crates, observed and observed.Value)) then
 										lootChest(observed, Stash)
 									end
 								end
 							else
 								for _, v in chests do
+									-- Your personal chest and smelter open your own storage, never a
+									-- block's folder (chest-controller), so they are left out by name
+									-- before any folder is read.
+									if PERSONAL_CHESTS[v.Name] or v.Name == 'lucky_block_item_smelter' then continue end
 									-- Team crates are in here too, tagged `chest` alongside
 									-- `team-crate`, so our own has to be skipped by name of
 									-- team rather than left to the Steal pass.
-									if isFriendlyCrate(v) then continue end
+									if skipsOwnCrate() and isFriendlyCrate(v) then continue end
 									if (localPosition - v.Position).Magnitude <= Range.Value then
 										lootChest(v:FindFirstChild('ChestFolderValue'), Stash)
 									end
@@ -21256,6 +21313,11 @@ run(function()
 	Open = ChestSteal:CreateToggle({
 		Name = 'GUI Check',
 		Tooltip = 'Only acts on the chest you have open.'
+	})
+	SkipOwnCrate = ChestSteal:CreateToggle({
+		Name = 'Skip Own Crate',
+		Default = true,
+		Tooltip = "Leaves your team's crate alone."
 	})
 	Skywars = ChestSteal:CreateToggle({
 		Name = 'Only Skywars',

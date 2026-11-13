@@ -1985,11 +1985,15 @@ do
 		end
 	end
 
-	-- A page's showing children (the columns, or the cards themselves) and theirs, the cards.
+	--[[ A page's showing children (the columns, or the cards themselves) and theirs, the cards. On the
+	page means across the page's own width, which slides with a tab switch, and down the screen: a
+	page no longer scrolls inside a frame of its own, and the screen's edges are all that cut it. ]]
 	local function scan(set, page, settled)
 		local at, size
 		if settled then
-			at, size = page.AbsolutePosition, page.AbsoluteSize
+			local corner, extent = page.AbsolutePosition, page.AbsoluteSize
+			local screenAt, screen = clickgui.AbsolutePosition, clickgui.AbsoluteSize
+			at, size = Vector2.new(corner.X, screenAt.Y), Vector2.new(extent.X, screen.Y)
 		end
 		for _, column in page:GetChildren() do
 			local kind = KIND[column.ClassName]
@@ -2469,8 +2473,7 @@ is taken by the whole line the square sits on, the description beside it include
 lands next to the square on a phone opens the card instead of switching the module.
 
 opts.Lit(lit) is told whenever the square lights or goes out, so a card's description lights with
-it; opts.Region(point, square) narrows where the pointer lights it (a card's: the square's rows, from
-the square to the end of the description). ]]
+it; opts.Region(point, square) narrows where the pointer lights it (a card's: the square alone). ]]
 function ui.expander(parent, position, opts)
 	opts = opts or {}
 	local button = ui.new('TextButton', {
@@ -2537,12 +2540,13 @@ function ui.expander(parent, position, opts)
 	local region = opts.Region and function(point)
 		return opts.Region(point, square)
 	end or nil
-	ui.hover(button, function()
+	-- The hover's entry too, so a card can put its light out when the square goes (ui.card).
+	local hover = ui.hover(button, function()
 		paint(true)
 	end, function()
 		paint(false)
 	end, region)
-	return button, glyph
+	return button, glyph, hover
 end
 
 -- A row inside a card: transparent, full width, label on the left.
@@ -6855,6 +6859,9 @@ function build.moveHud(pane)
 		if layout.Window then
 			layout.Window.Visible = true
 		end
+		if layout.FooterHolder then
+			layout.FooterHolder.Visible = true
+		end
 		if layout.Dim then
 			layout.Dim.Visible = clickgui.Visible
 		end
@@ -6864,6 +6871,10 @@ function build.moveHud(pane)
 		if layout.MovingHud or not (clickgui.Visible and layout.Window) then return end
 		layout.MovingHud = true
 		layout.Window.Visible = false
+		-- The key footer sits outside the window now (build.keyFooter): it goes too.
+		if layout.FooterHolder then
+			layout.FooterHolder.Visible = false
+		end
 		if layout.Dim then
 			layout.Dim.Visible = false
 		end
@@ -7469,8 +7480,8 @@ end
 	line in the loader's footer grey -- with the version and a [discord] link on the right, where the
 	loader keeps its opt-out. Its text is in the Mod Overlay's Inter; only the >_ badge keeps the
 	console face. The lines are the old ones word for word; a window too narrow for them (a phone in
-	portrait) gets a short form. Built inside the window so the window's phone zoom applies to it.
-	The expiry is read on every refresh: the loader stores it.
+	portrait) gets a short form. Built in its own place at the screen's foot (components.GUI), which
+	takes the window's width and phone zoom. The expiry is read on every refresh: the loader stores it.
 ]]
 function build.keyFooter()
 	local main = vape.Categories.Main
@@ -7488,8 +7499,13 @@ function build.keyFooter()
 	local LINE = Color3.fromRGB(237, 237, 237)
 	local FOOTER_HEIGHT, FOOTER_GAP, TEXT_LEFT = 32, 8, 39
 
+	--[[ At the screen's foot, where the window's foot used to be: the window has no foot now, as
+	Slinky's layout has none, and scrolls past it (layout.Scroll), so the footer sits in a place of its
+	own in the window's width and zoom (components.GUI) and stays put. ]]
 	local bar = ui.new('Frame', {
 		Name = 'KeyFooter',
+		-- Cards scroll under it now: a press on the bar is the bar's, not the card's behind it.
+		Active = true,
 		AnchorPoint = Vector2.new(0.5, 1),
 		BackgroundColor3 = Color3.fromRGB(10, 10, 10),
 		BackgroundTransparency = 0,
@@ -7497,11 +7513,14 @@ function build.keyFooter()
 		Position = UDim2.new(0.5, 0, 1, 0),
 		Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
 		ZIndex = 2
-	}, window)
+	}, layout.FooterHolder or window)
 	ui.corner(bar, 10)
 	ui.stroke(bar, Color3.fromRGB(52, 52, 52), 1, 0)
-	-- The pages end above it, so the last row of cards is never under the footer.
-	pages.Size = UDim2.new(1, 0, 1, -(50 + FOOTER_HEIGHT + FOOTER_GAP))
+	-- The scroll's end leaves room for it, so the last row of cards can always come up clear of it.
+	layout.FooterClear = FOOTER_HEIGHT + FOOTER_GAP
+	if layout.Scroll then
+		layout.Scroll.request()
+	end
 
 	local badge = ui.new('TextLabel', {
 		BackgroundColor3 = Color3.fromRGB(22, 22, 22),
@@ -10306,6 +10325,8 @@ layout = {
 	Binds = setmetatable({}, {__mode = 'k'}),
 	-- The colour pickers' 'Recently used' row, newest first, shared by every picker.
 	RecentColors = {},
+	-- Lists that scroll by themselves (a long dropdown's): the wheel over one is theirs (layout.Scroll).
+	InnerLists = setmetatable({}, {__mode = 'k'}),
 	-- Called when a tab is opened, by tab name (the FFlags tab opens its list).
 	TabShown = {}
 }
@@ -10501,43 +10522,6 @@ local function isPress(input)
 	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
 end
 
---[[ A card opened near the bottom of its page brings its settings into view: the page scrolls just
-far enough to show the card's bottom, never so far that the card's top leaves the page. Waits two
-frames for the opened body to be laid out. The card's height follows its settings for about 0.3 s
-(ui.card), so the scroll is worked out for the height it is growing to -- height(), in screen
-pixels -- rather than the height drawn so far, and runs alongside the growth. ]]
-function ui.revealCard(card, height)
-	task.spawn(function()
-		task.wait()
-		task.wait()
-		local page = card.Parent and card:FindFirstAncestorWhichIsA('ScrollingFrame')
-		if not page then return end
-		local drawn = card.AbsoluteSize.Y
-		local final = drawn
-		if height then
-			local ok, value = pcall(height)
-			if ok and type(value) == 'number' and value > 0 then
-				final = value
-			end
-		end
-		local viewTop = page.AbsolutePosition.Y
-		local viewBottom = viewTop + page.AbsoluteWindowSize.Y
-		local cardTop = card.AbsolutePosition.Y
-		local overflow = cardTop + final - viewBottom
-		if overflow <= 0 then return end
-		-- In screen pixels; the canvas is measured before the menu's scale and the window's zoom.
-		local shift = math.min(overflow + 8, cardTop - viewTop)
-		if shift <= 0 then return end
-		local s = math.max(scale.Scale, 0.05) * (layout.Zoom or 1)
-		-- The canvas grows with the card: as far as it reaches once the card has grown.
-		local furthest = math.max((page.AbsoluteCanvasSize.Y + math.max(final - drawn, 0) - page.AbsoluteWindowSize.Y) / s, 0)
-		local target = math.clamp(page.CanvasPosition.Y + shift / s, 0, furthest)
-		tween:Tween(page, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			CanvasPosition = Vector2.new(page.CanvasPosition.X, target)
-		})
-	end)
-end
-
 --[[ A title with badges after it in its row (ui.card, the profile cards). The row's list puts the
 badge 5 px after the title's drawn text, Slinky's gap whatever the title's length. A title too long
 for the row gives way -- shrunk by the list, cut with an ellipsis -- rather than push its badges on,
@@ -10647,39 +10631,19 @@ function ui.card(props)
 	ui.fitTitle(nameRow, title)
 
 	local switch = props.Switch and ui.switch(header, UDim2.new(1, -theme.Inset, 0, 22)) or nil
-	--[[ The + and the description are one hover region, as Slinky's are: lighting either lights both.
-	It is the square's rows, from the square to the end of the description's words, or the square
-	alone in Compact, which shows no description. The press still takes the whole line. ]]
+	--[[ Only the + square lights, and the description lights with it, as Slinky's (measured off its
+	recording: the pointer on the description's words alone lights nothing). The press still takes
+	the whole line. A card with nothing to open (view:SetHasOptions) has no square and lights nothing
+	in this row; its bind badge keeps its own light (components.Bind). ]]
 	local description
-	local descHover = {}
-	-- Where the description's words end on screen. Measured once a text, on its own thread: the first
-	-- measure of a text yields. Until then the label's own right edge.
-	function descHover.End()
-		local text, face = description.Text, description.FontFace
-		if (descHover.Text ~= text or descHover.Face ~= face) and not descHover.Busy then
-			descHover.Busy = true
-			task.spawn(function()
-				local ok, bounds = pcall(getfontbounds, text, description.TextSize, face)
-				descHover.Busy = false
-				descHover.Text, descHover.Face, descHover.Width = text, face, ok and bounds and bounds.X or nil
-			end)
-		end
-		local right = description.AbsolutePosition.X + description.AbsoluteSize.X
-		if descHover.Text ~= text or not descHover.Width then return right end
-		return math.min(description.AbsolutePosition.X + descHover.Width * description.AbsoluteSize.Y / 20, right)
-	end
-	local expand, glyph = ui.expander(header, UDim2.fromOffset(theme.Inset, 40), {
+	local hasSettings = true
+	local expand, glyph, expandHover = ui.expander(header, UDim2.fromOffset(theme.Inset, 40), {
 		Lit = function(lit)
-			description.TextColor3 = lit and theme.SubTextLit or theme.SubText
+			description.TextColor3 = (lit and hasSettings) and theme.SubTextLit or theme.SubText
 		end,
 		Region = function(point, square)
 			local corner, size = square.AbsolutePosition, square.AbsoluteSize
-			if point.X < corner.X or point.Y < corner.Y or point.Y > corner.Y + size.Y then return false end
-			local right = corner.X + size.X
-			if description.Visible then
-				right = math.max(right, descHover.End())
-			end
-			return point.X <= right
+			return point.X >= corner.X and point.X <= corner.X + size.X and point.Y >= corner.Y and point.Y <= corner.Y + size.Y
 		end
 	})
 	description = ui.text(header, {Text = ui.firstLine(props.Tooltip), Size = 14, Color = theme.SubText, Props = {
@@ -10757,10 +10721,6 @@ function ui.card(props)
 		end
 		return height
 	end
-	-- The same in screen pixels, for ui.revealCard.
-	function view.TargetPixels()
-		return view.TargetHeight() * nameRow.AbsoluteSize.Y / 20
-	end
 	local function draw(height)
 		local rounded, head = math.floor(height + 0.5), header.Size.Y.Offset
 		if rounded == view.Drawn and head == view.DrawnHead then return end
@@ -10811,29 +10771,33 @@ function ui.card(props)
 		end
 	end)
 
+	--[[ Opening never moves the page, as in Slinky: what is under an opening card goes down past the
+	screen's foot with it, and the wheel or a drag brings it up (layout.Scroll). ]]
 	function view:SetExpanded(open)
+		view.Open = open == true
 		body.Visible = open and view.HasOptions
 		glyph:Set(open)
 		-- With the card off screen (the menu shut, another tab) nothing is watching: its height at once.
 		view:Retarget(not ui.anim.onScreen(card))
-		-- A profile load restoring a list's open state does not scroll the page to it.
-		if open and view.HasOptions and not vape.Applying then
-			ui.revealCard(card, view.TargetPixels)
-		end
 	end
 
 	--[[ A module with nothing to configure has no expand square in Slinky, and its description
-	starts where the title does. The square comes back the moment an option is added. ]]
+	starts where the title does: nothing in that row lights under the pointer. The square comes back
+	the moment a setting shows (view:WatchOptions), and a card left open shows its settings again. ]]
 	view.HasOptions = true
 	function view:SetHasOptions(has)
 		view.HasOptions = has
+		hasSettings = has
+		if not has then
+			-- Hidden under the pointer it gets no leave: its light goes out here.
+			expandHover.Rest()
+			description.TextColor3 = theme.SubText
+		end
 		expand.Visible = has
 		local left = has and theme.Inset + 28 or theme.Inset
 		description.Position = UDim2.fromOffset(left, description.Position.Y.Offset)
 		description.Size = UDim2.new(1, -(left + theme.Inset), 0, description.Size.Y.Offset)
-		if not has then
-			body.Visible = false
-		end
+		body.Visible = has and view.Open == true
 		view:ApplyLayout()
 	end
 
@@ -10858,15 +10822,52 @@ function ui.card(props)
 		view:Retarget(true)
 	end
 
-	-- Watches an Options table: the first option registered shows the square.
+	--[[ Watches an Options table, and what it puts in the settings: the card has settings while one of
+	their rows is showing, not while the table merely holds an option. A module whose options are all
+	hidden (a setting shown only with another, a row built hidden) opens onto nothing, so it shows no
+	square and lights nothing either, until one of them shows. Counted a frame later, never inside the
+	change that hid or showed a row. ]]
 	function view:WatchOptions(options)
-		view:SetHasOptions(next(options) ~= nil)
+		local queued, watched = false, setmetatable({}, {__mode = 'k'})
+		local function showing()
+			for _, child in body:GetChildren() do
+				if child:IsA('GuiObject') and child.Visible then return true end
+			end
+			return false
+		end
+		local function recount()
+			queued = false
+			if vape.Loaded == nil or not card.Parent then return end
+			if vape.ThreadFix then
+				setthreadidentity(8)
+			end
+			local has = showing()
+			if has ~= view.HasOptions then
+				view:SetHasOptions(has)
+			end
+		end
+		local function request()
+			if queued then return end
+			queued = true
+			task.defer(recount)
+		end
+		local function watch(child)
+			if child:IsA('GuiObject') and not watched[child] then
+				watched[child] = true
+				child:GetPropertyChangedSignal('Visible'):Connect(request)
+			end
+			request()
+		end
+		body.ChildAdded:Connect(watch)
+		body.ChildRemoved:Connect(request)
+		for _, child in body:GetChildren() do
+			watch(child)
+		end
+		view:SetHasOptions(showing())
 		return setmetatable(options, {
 			__newindex = function(t, key, value)
 				rawset(t, key, value)
-				if value ~= nil and not view.HasOptions then
-					view:SetHasOptions(true)
-				end
+				request()
 			end
 		})
 	end
@@ -11694,21 +11695,8 @@ components.CategoryList = function(props, children, api)
 		if not isDefault or #name.Bind.Keys > 0 then
 			name.Bind:SetParent(nameRow)
 		end
-		-- The profile in use says so beside its name, in the accent like a bound key's badge.
-		if name.Enabled then
-			local accent = theme.Accent()
-			local inUse = ui.text(nameRow, {Text = 'IN USE', Size = 12, Weight = 'Bold', Color = accent, AlignX = Enum.TextXAlignment.Center, Props = {
-				Name = 'InUse',
-				AutomaticSize = Enum.AutomaticSize.X,
-				BackgroundColor3 = theme.Tint(accent, 0.15),
-				BackgroundTransparency = 0,
-				LayoutOrder = 3,
-				Size = UDim2.fromOffset(0, 20)
-			}})
-			ui.corner(inUse, 5)
-			ui.padding(inUse, 6, 6, 0, 0)
-			component.SelectedBadge = inUse
-		end
+		-- No badge on the profile in use: Slinky's cards all look the same, and a load says which in
+		-- its notification.
 		ui.text(obj, {Text = isDefault and 'Contains the default configuration.' or usedText(name.Used), Size = 14, Color = theme.SubText, Props = {
 			Position = UDim2.fromOffset(theme.Inset, 40), Size = UDim2.new(1, -theme.Inset * 2, 0, 20)
 		}})
@@ -11728,8 +11716,8 @@ components.CategoryList = function(props, children, api)
 			--[[ Its hint over it, in the pill every hint uses: centred on the icon and drawn over the card's
 			edge where it is wider, as Slinky's are, kept only to the screen. It shows while the pointer is
 			on the 20x20 round the glyph, Slinky's hit box; the button keeps its 26x24 for clicks. A greyed
-			icon, whose click only refuses, has none. The icon keeps its colour under the pointer, as
-			Slinky's do. ]]
+			icon, whose click only refuses, has none. The icon keeps its colour under the pointer; only
+			the load icon lightens (below), the one Slinky's recording shows doing so. ]]
 			if not greyed then
 				local spot = ui.new('Frame', {
 					Name = 'TipSpot',
@@ -11746,124 +11734,22 @@ components.CategoryList = function(props, children, api)
 			return button
 		end
 
-		--[[ The first icon loads the profile, held, as Slinky's cards do: holding it sweeps a ring round
-		it in the accent, and the profile loads when the ring closes; letting go first winds it back.
-		(Exporting is the Share profiles strip's Export profile.) The ring is two
-		halves, each a clipped window onto a round stroke whose gradient is opaque on one side: turning
-		the gradient sweeps the edge round, the right half for the first half of the hold and the left
-		half for the second.
-
-		Both circles sit RING_STROKE inside the ring's square. A stroke is drawn outside its frame and
-		each half clips to that square, so circles filling it lost the outer edge of their stroke: the
-		accent arc was cut away at the top, bottom and sides and showed only near the diagonals. ]]
-		-- Slinky's export glyph, on our button that loads.
-		local loadButton = action('slinky-export', 'Hold to load', 0, nil, nil)
-		do
-			local HOLD_TIME = 0.6
-			local RING_STROKE = 2
-			local ring = ui.new('Frame', {
-				Name = 'LoadRing',
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				BackgroundTransparency = 1,
-				Position = UDim2.fromScale(0.5, 0.5),
-				Size = UDim2.fromOffset(30, 30),
-				Visible = false
-			}, loadButton)
-			local track = ui.new('Frame', {
-				BackgroundTransparency = 1,
-				Position = UDim2.fromOffset(RING_STROKE, RING_STROKE),
-				Size = UDim2.new(1, -RING_STROKE * 2, 1, -RING_STROKE * 2)
-			}, ring)
-			ui.corner(track, UDim.new(1, 0))
-			ui.stroke(track, theme.Outline, RING_STROKE, 0.3)
-			local function half(isRight)
-				local window = ui.new('Frame', {
-					BackgroundTransparency = 1,
-					ClipsDescendants = true,
-					Position = UDim2.fromScale(isRight and 0.5 or 0, 0),
-					Size = UDim2.fromScale(0.5, 1)
-				}, ring)
-				local circle = ui.new('Frame', {
-					BackgroundTransparency = 1,
-					Position = UDim2.new(isRight and -1 or 0, RING_STROKE, 0, RING_STROKE),
-					Size = UDim2.new(2, -RING_STROKE * 2, 1, -RING_STROKE * 2)
-				}, window)
-				ui.corner(circle, UDim.new(1, 0))
-				local stroke = ui.stroke(circle, theme.Accent(), RING_STROKE, 0)
-				return ui.new('UIGradient', {
-					Transparency = NumberSequence.new({
-						NumberSequenceKeypoint.new(0, 0),
-						NumberSequenceKeypoint.new(0.499, 0),
-						NumberSequenceKeypoint.new(0.5, 1),
-						NumberSequenceKeypoint.new(1, 1)
-					})
-				}, stroke), stroke
-			end
-			local rightGradient, rightStroke = half(true)
-			local leftGradient, leftStroke = half(false)
-			local function paint(progress)
-				rightGradient.Rotation = math.clamp(progress, 0, 0.5) * 360
-				leftGradient.Rotation = math.clamp(progress, 0.5, 1) * 360
-			end
-
-			local holding, progress, stepper = false, 0, nil
-			-- Back to its resting grey after a hold; the icons do not light under the pointer.
-			local function restIcon()
-				tween:Tween(loadButton, theme.HoverTween, {TextColor3 = theme.SubText})
-			end
-			local function stop()
-				if stepper then
-					stepper:Disconnect()
-					stepper = nil
-				end
-			end
-			local function run()
-				stop()
-				ring.Visible = true
-				rightStroke.Color, leftStroke.Color = theme.Accent(), theme.Accent()
-				-- The icon takes the accent while it is held, the ring's colour.
-				tween:Tween(loadButton, theme.HoverTween, {TextColor3 = theme.Accent()})
-				stepper = runService.RenderStepped:Connect(function(dt)
-					-- The list rebuilt its rows mid-hold: this card is gone, and so is its profile's row.
-					if not loadButton.Parent then
-						stop()
-						return
-					end
-					progress = math.clamp(progress + (holding and dt or -dt * 2) / HOLD_TIME, 0, 1)
-					paint(progress)
-					if progress >= 1 then
-						stop()
-						holding = false
-						task.delay(0.12, function()
-							ring.Visible = false
-							progress = 0
-							paint(0)
-							restIcon()
-						end)
-						selectEntry(name.Name)
-						component:ChangeValue()
-					elseif progress <= 0 and not holding then
-						stop()
-						ring.Visible = false
-						restIcon()
-					end
-				end)
-			end
-			loadButton.InputBegan:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-					holding = true
-					run()
-				end
+		--[[ The first icon loads the profile, as Slinky's cards do: under the pointer it lightens at once
+		and its hint says 'Click to load'; a click asks first, in the confirmation every action here goes
+		through ('Load profile ...?'), and Continue loads it. The confirmation goes at once and the load's
+		own notification (vape:Load) says which profile is in. (Exporting is the Share profiles strip's
+		Export profile.) Slinky's export glyph, on our button that loads. ]]
+		local loadButton = action('slinky-export', 'Click to load', 0, nil, function()
+			ui.confirm("Load profile '"..(isDefault and 'Default' or name.Name).."'?", function()
+				selectEntry(name.Name)
+				component:ChangeValue()
 			end)
-			loadButton.InputEnded:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-					holding = false
-				end
-			end)
-			loadButton.MouseLeave:Connect(function()
-				holding = false
-			end)
-		end
+		end)
+		ui.hover(loadButton, function()
+			ui.paintIcon(loadButton, theme.SubTextLit)
+		end, function()
+			ui.paintIcon(loadButton, theme.SubText)
+		end)
 		-- Slinky's save glyph, on our button that imports; never greyed.
 		action('slinky-save', 'Click to import', 2, nil, function()
 			if actions.Import then actions.Import(name.Name) end
@@ -12994,6 +12880,7 @@ components.Dropdown = function(props, children, api)
 				ScrollingDirection = Enum.ScrollingDirection.Y,
 				Size = UDim2.fromScale(1, 1)
 			}, options)
+			layout.InnerLists[holder] = true
 		end
 		for index, v in props.List do
 			local selected = v == component.Value
@@ -13256,6 +13143,24 @@ components.GUI = function(props, children, api)
 		end
 	end)
 
+	--[[ No panel, as Slinky has none: the tab bar and the cards are laid straight onto the screen from
+	12 down, with no height of their own, and whatever is past the screen's foot is cut there. The
+	whole of it scrolls as one piece, tab bar included (layout.Scroll below). With a mouse the window
+	itself moves, so nothing but the screen cuts it; on a touch screen it rides in a ScrollingFrame for
+	the engine's drag, as wide as the window, so the HUD either side still takes touches. ]]
+	local scroller = isMobile() and ui.new('ScrollingFrame', {
+		Name = 'Scroller',
+		AnchorPoint = Vector2.new(0.5, 0),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		CanvasSize = UDim2.new(),
+		ElasticBehavior = Enum.ElasticBehavior.Never,
+		Position = UDim2.fromScale(0.5, 0),
+		ScrollBarThickness = 0,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		Size = UDim2.new(0, 876, 1, 0),
+		ZIndex = 1
+	}, clickgui) or nil
 	local window = ui.new('Frame', {
 		Name = 'MainWindow',
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -13263,10 +13168,23 @@ components.GUI = function(props, children, api)
 		Position = UDim2.new(0.5, 0, 0, 12),
 		Size = UDim2.new(0, 876, 1, -24),
 		ZIndex = 1
-	}, clickgui)
+	}, scroller or clickgui)
 	component.Object = window
-	-- What Move HUD hides while the menu stays open.
-	layout.Window, layout.Dim = window, dim
+	-- What Move HUD hides while the menu stays open: the window, or the scroller holding it.
+	layout.Window, layout.Dim = scroller or window, dim
+	--[[ The key footer's place (build.keyFooter): the screen's foot, under no scroll, in the window's
+	width and zoom (resize), over the cards scrolling past it. It drops in with the window as the menu
+	opens (layout.placeWindow). ]]
+	local footerHolder = ui.new('Frame', {
+		Name = 'Footer',
+		AnchorPoint = Vector2.new(0.5, 1),
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0.5, 0, 1, -12),
+		Size = UDim2.fromOffset(876, 32),
+		ZIndex = 2
+	}, clickgui)
+	local footerZoom = ui.new('UIScale', {Scale = 1}, footerHolder)
+	layout.FooterHolder = footerHolder
 
 	-- The tab bar.
 	local bar = ui.new('Frame', {
@@ -13316,24 +13234,221 @@ components.GUI = function(props, children, api)
 	up with the menu's open: each through its own cards' properties (ui.fade), the cards on screen
 	only, for the third of a second it lasts. Never through a CanvasGroup, which drew the whole page
 	into one texture, soft past the texture limit, and drew it again every frame. Not on a phone,
-	where the page only slides, cut at the pages' edges. Off a phone nothing cuts it: wherever it is
+	where the page only slides, cut at the scroller's sides. Off a phone nothing cuts it: wherever it is
 	more than 96 px from its place, nothing of it shows. ]]
 	layout.FadePages = not isMobile()
 
+	--[[ Scrolling, as Slinky's (measured off its recording, 2026-11-12). A notch of the wheel moves the
+	whole layout, tab bar and cards together, 30 px at 1080p -- 30 of the window's units -- at once:
+	no easing, no follow, nothing carried over, and notches add up. It stops hard at the top (the tab
+	bar at 12) and at the foot, where the lowest card ends 8 above the screen's edge (8 above the key
+	footer here, which Slinky has not), with no overscroll and no bar; a page shorter than the screen
+	does not move. The foot is taken from the cards' drawn heights, so it follows a card opening or
+	closing, and a page that shrinks brings the view back with it, at once. The wheel works wherever
+	the pointer is while the menu is up, except over a list that scrolls by itself, and it does not
+	zoom the camera meanwhile. Y is how far the layout is up, in the menu's units; on a touch screen
+	the engine's drag moves it instead (its CanvasPosition), on the same stops. ]]
+	-- Offsets: each page's own Y while another shows (showPages); Key: the page Y is for; Want: the
+	-- offset of the page just put back, while it is still being restored (scroll.update).
+	local scroll = {Y = 0, Max = 0, Offsets = {}}
+	layout.Scroll = scroll
+	-- How far the open still has the window up (OpenMotion), in the menu's units.
+	layout.Lift = 0
+	--[[ The window and the key footer in their places: under the top margin and up by the lift, and the
+	window, with a mouse, up by the scroll as well. In whole units; a place already there is not
+	written again. ]]
+	function layout.placeWindow()
+		local lift = layout.Lift or 0
+		local y = math.floor((layout.Top or 12) - lift - (scroller and 0 or scroll.Y) + 0.5)
+		local position = window.Position
+		if position.Y.Offset ~= y or position.Y.Scale ~= 0 or position.X.Scale ~= 0.5 or position.X.Offset ~= 0 then
+			window.Position = UDim2.new(0.5, 0, 0, y)
+		end
+		local foot = -math.floor((layout.Bottom or 12) + lift + 0.5)
+		if footerHolder.Position.Y.Offset ~= foot then
+			footerHolder.Position = UDim2.new(0.5, 0, 1, foot)
+		end
+	end
+	--[[ Rows moved under a still pointer get no enter or leave from Roblox: what is under it now lights
+	and what moved away goes out, after the frame's move, and again on the pointer's first move after
+	it (the wheel handler below). Hints follow their rows as well. ]]
+	local function placeTips()
+		scroll.TipsQueued = false
+		if vape.Loaded == nil or not clickgui.Visible then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		if ui.tooltipShown or next(ui.tooltipHovered) then
+			pcall(ui.refreshTooltip)
+		end
+		pcall(ui.placeTips)
+	end
+	function scroll.moved()
+		scroll.Moved = true
+		ui.rehoverSoon()
+		if scroll.TipsQueued then return end
+		scroll.TipsQueued = true
+		task.defer(placeTips)
+	end
+	-- The tallest of a page's columns so far, in screen pixels.
+	local function tallest(height, column)
+		if column and column.Visible then
+			return math.max(height, column.AbsoluteSize.Y)
+		end
+		return height
+	end
+	--[[ Where the scroll can go: the page showing, from the window's top (the 50 of the tab bar and
+	its gap) to its lowest card, then the 8 below it, or the key footer's room, in the menu's units
+	against the screen's height. Run a frame after what changed it (scroll.request). ]]
+	function scroll.update()
+		if not window.Parent then return end
+		local s = math.max(scale.Scale, 0.05)
+		local factor = layout.Zoom or 1
+		local height = 0
+		for _, info in layout.Pages do
+			if info.Frame.Visible then
+				if info.List then
+					height = math.max(height, info.List.AbsoluteContentSize.Y)
+				else
+					height = tallest(height, info.Left)
+					height = tallest(height, info.Mid)
+					height = tallest(height, info.Right)
+					height = tallest(height, info.Empty)
+				end
+			end
+		end
+		local foot = (layout.Top or 12) + (50 + height / (s * factor)) * factor
+		if layout.FooterClear then
+			foot += layout.FooterClear * factor + (layout.Bottom or 12)
+		else
+			foot += 8 * factor
+		end
+		local camera = gameCamera or workspace.CurrentCamera
+		local screen = (camera and camera.ViewportSize.Y or clickgui.AbsoluteSize.Y) / s
+		local max = screen > 0 and math.max(foot - screen, 0) or 0
+		scroll.Max = max
+		--[[ A page just put back (showPages) wants its own offset. Its cards can still be on their way
+		back (a search closing returns them a pass later, and the columns' sizes follow a frame after
+		that), so a short end only holds it down for now: it is kept until the page is tall enough, the
+		user scrolls, another page shows, or half a second of the menu being up has gone by. ]]
+		local target
+		local want = scroll.Want
+		if want then
+			local now = scroller and scroller.CanvasPosition.Y or scroll.Y
+			if (want.Applied and math.abs(now - want.Applied) > 0.5) or (want.Until and os.clock() >= want.Until) then
+				scroll.Want = nil
+			else
+				target = math.min(want.Y, max)
+				want.Applied = target
+				if max >= want.Y then
+					scroll.Want = nil
+				elseif clickgui.Visible and not want.Until then
+					want.Until = os.clock() + 0.5
+				end
+			end
+		end
+		if scroller then
+			local canvas = math.ceil(foot)
+			if scroller.CanvasSize.Y.Offset ~= canvas then
+				scroller.CanvasSize = UDim2.fromOffset(0, canvas)
+			end
+			if target then
+				if scroller.CanvasPosition.Y ~= target then
+					scroller.CanvasPosition = Vector2.new(0, target)
+				end
+			elseif scroller.CanvasPosition.Y > max then
+				scroller.CanvasPosition = Vector2.new(0, max)
+			end
+		elseif target and scroll.Y ~= target then
+			scroll.Y = target
+			layout.placeWindow()
+			scroll.moved()
+		elseif scroll.Y > max then
+			scroll.Y = max
+			layout.placeWindow()
+			scroll.moved()
+		end
+	end
+	-- Only a request, from inside a size change or a layout pass: the end is worked out once, next.
+	local function runUpdate()
+		scroll.Queued = false
+		if vape.Loaded == nil then return end
+		if vape.ThreadFix then
+			setthreadidentity(8)
+		end
+		pcall(scroll.update)
+	end
+	function scroll.request()
+		if scroll.Queued then return end
+		scroll.Queued = true
+		task.defer(runUpdate)
+	end
+	-- One notch's move, or a part of one at either end. Written at once, with no tween.
+	function scroll.by(delta)
+		-- The user's own scroll: a page's offset still being put back (scroll.Want) gives way to it.
+		scroll.Want = nil
+		local y = math.clamp(scroll.Y + delta, 0, scroll.Max)
+		if y == scroll.Y then return end
+		scroll.Y = y
+		layout.placeWindow()
+		scroll.moved()
+	end
+	--[[ The camera's own wheel zoom is sunk while the menu is up, as the wheel does nothing else with a
+	Minecraft screen open. Bound and unbound by layout.MenuShown, after the menu's change. ]]
+	local contextActions = cloneref(game:GetService('ContextActionService'))
+	function scroll.sink(on)
+		pcall(function()
+			contextActions:UnbindAction('PistonwareMenuWheel')
+		end)
+		if on then
+			pcall(function()
+				contextActions:BindActionAtPriority('PistonwareMenuWheel', function()
+					return Enum.ContextActionResult.Sink
+				end, false, Enum.ContextActionPriority.High.Value + 100, Enum.UserInputType.MouseWheel)
+			end)
+		end
+	end
+	vape:Clean(function()
+		scroll.sink(false)
+	end)
+	if not scroller then
+		vape:Clean(inputService.InputChanged:Connect(function(input)
+			local kind = input.UserInputType
+			if kind == Enum.UserInputType.MouseMovement then
+				if scroll.Moved then
+					scroll.Moved = false
+					ui.rehoverSoon()
+				end
+				return
+			end
+			if kind ~= Enum.UserInputType.MouseWheel then return end
+			if not (clickgui.Visible and window.Visible) or layout.MovingHud or (ui.modal and ui.modal.Parent) then return end
+			local notches = input.Position.Z
+			if notches ~= notches or notches == 0 then return end
+			-- A list that scrolls by itself (a long dropdown) takes the wheel over it, as the engine gives it.
+			local point = inputService:GetMouseLocation() + scaledgui.AbsolutePosition
+			for list in layout.InnerLists do
+				if list.Parent and ui.within(point, list.AbsolutePosition, list.AbsoluteSize) and ui.rowShowing(list, point) then
+					return
+				end
+			end
+			-- Wheel down (Z below 0) shows what is further down.
+			scroll.by(-notches * 30 * (layout.Zoom or 1))
+		end))
+	end
+
+	--[[ A page is a plain frame now, as tall as its tallest column, cut by nothing but the screen; the
+	scroll moves the window holding it. ]]
 	local function makePage(name)
-		local page = ui.new('ScrollingFrame', {
+		local page = ui.new('Frame', {
 			Name = name,
-			AutomaticCanvasSize = Enum.AutomaticSize.Y,
 			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
-			CanvasSize = UDim2.new(),
-			ScrollBarImageColor3 = theme.Muted,
-			ScrollBarThickness = 0,
-			ScrollingDirection = Enum.ScrollingDirection.Y,
 			Size = UDim2.fromScale(1, 1),
 			Visible = false
 		}, pagesFrame)
 		-- Left and Right, and Mid between them for Layout > Wide's third column (layout.place sizes them).
+		-- A column of the page showing growing or shrinking moves the scroll's end.
 		local function column(frameName)
 			local frame = ui.new('Frame', {
 				Name = frameName,
@@ -13343,6 +13458,11 @@ components.GUI = function(props, children, api)
 				Visible = frameName ~= 'Mid'
 			}, page)
 			ui.list(frame, theme.Gap)
+			frame:GetPropertyChangedSignal('AbsoluteSize'):Connect(function()
+				if page.Visible then
+					scroll.request()
+				end
+			end)
 			return frame
 		end
 		local left, mid, right = column('Left'), column('Mid'), column('Right')
@@ -13358,21 +13478,21 @@ components.GUI = function(props, children, api)
 		makePage(name)
 	end
 
-	local profilesPage = ui.new('ScrollingFrame', {
+	-- The Profiles page, a plain frame as the tabs' are; its list's height is the scroll's end.
+	local profilesPage = ui.new('Frame', {
 		Name = 'Profiles',
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		CanvasSize = UDim2.new(),
-		ScrollBarImageColor3 = theme.Muted,
-		ScrollBarThickness = 0,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
 		Size = UDim2.fromScale(1, 1),
 		Visible = false
 	}, pagesFrame)
-	ui.list(profilesPage, theme.Gap)
-	ui.padding(profilesPage, 0, 0, 0, 12)
-	layout.Pages.Profiles = {Frame = profilesPage}
+	local profilesList = ui.list(profilesPage, theme.Gap)
+	profilesList:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+		if profilesPage.Visible then
+			scroll.request()
+		end
+	end)
+	layout.Pages.Profiles = {Frame = profilesPage, List = profilesList}
 
 	local currentTab = 'Combat'
 	-- Tabs a place has no use for (Kits in the lobby) are taken out of the bar.
@@ -13392,6 +13512,32 @@ components.GUI = function(props, children, api)
 		for tab, info in layout.Pages do
 			info.Frame.Visible = (searching and tab == 'Search') or (not searching and tab == currentTab)
 		end
+		--[[ Each page keeps its own scroll (the Profiles page and the search's too): leaving one notes
+		where it was, and coming back puts it there again, brought back within that page's end by the
+		update (scroll.Want, scroll.update). Kept while the menu is shut. A search opened anew starts at
+		the top. ]]
+		local key = searching and 'Search' or currentTab
+		if key ~= scroll.Key then
+			if scroll.Key then
+				local now = scroller and scroller.CanvasPosition.Y or scroll.Y
+				local want = scroll.Want
+				-- An offset still being put back, untouched since, is where that page was.
+				if want and (want.Applied == nil or math.abs(now - want.Applied) <= 0.5) then
+					now = want.Y
+				end
+				scroll.Offsets[scroll.Key] = now
+			end
+			local y = key ~= 'Search' and scroll.Offsets[key] or 0
+			scroll.Key = key
+			-- On a phone it is put there once the canvas has the page's size, or the engine would cut it short.
+			scroll.Want = {Y = y, Applied = not scroller and y or nil}
+			if not scroller and y ~= scroll.Y then
+				scroll.Y = y
+				layout.placeWindow()
+				scroll.moved()
+			end
+		end
+		scroll.request()
 	end
 
 	--[[ A tab switch, as Slinky's (ANIM_SPEC 1). The old page goes at once. The pill follows to the new
@@ -13424,13 +13570,7 @@ components.GUI = function(props, children, api)
 				end
 				local parts = motion.Parts
 				if parts then
-					local shown = 1 - math.clamp(math.abs(offset) / 96, 0, 1)
-					-- A switch made part way into the menu's open fades in with what is left of it too.
-					local open = layout.OpenMotion
-					if open and ui.anim.playing(window) then
-						shown *= open.P or 1
-					end
-					ui.fade.draw(parts, 1 - shown)
+					ui.fade.draw(parts, math.clamp(math.abs(offset) / 96, 0, 1))
 				end
 			end
 		end
@@ -13461,8 +13601,7 @@ components.GUI = function(props, children, api)
 	end
 	--[[ Ends a switch still moving: before the bar is re-spaced, as the search opens or closes, and as
 	the menu shuts. An open still coming in ends with it there, as the bar is about to change under it.
-	A tab click (keepOpen) lets the open carry on, as Slinky's is one tween a click does not cut short:
-	the open lets go of the page it was fading, and the switch fades its own in with it (selectTab). ]]
+	A tab click (keepOpen) lets the open carry on, as Slinky's is one tween a click does not cut short. ]]
 	function layout.FinishTabMotion(keepOpen)
 		if not keepOpen and layout.FinishOpenMotion then
 			layout.FinishOpenMotion()
@@ -13471,39 +13610,34 @@ components.GUI = function(props, children, api)
 	end
 	ui.whenShut(layout.FinishTabMotion)
 
-	--[[ The menu coming in, as Slinky's (measured off its recording): one 0.3 s Quint Out from the
-	moment it opens, the window dropping the last 50 px (in the window's own zoom) as it fades up from
-	nothing, and the screen behind greying out with it to the dim's 0.75. It goes at once, window and
-	dim in the same frame. Started from the menu's deferred Visible watcher (layout.MenuShown), never
-	inside the change. The fade (ui.fade): the tab bar, the key footer and the cards on screen in the
-	page showing, part by part, for a third of a second. On a phone the window only slides, under the
-	dim. Not while the HUD is being moved. ]]
+	--[[ The menu coming in, as Slinky's (measured off its recording, SPEC 3): the page, tab bar and key
+	footer fully opaque from the first frame, 50 px above their place (in the window's own zoom),
+	dropping into it with Quint Out over 0.30 s; the screen behind darkens with Quint Out over 0.28 s
+	to the dim's usual 0.75. Nothing fades. It goes at once, window and dim in the same frame. Started
+	from the menu's deferred Visible watcher (layout.MenuShown), never inside the change. The same on
+	a phone. Not while the HUD is being moved. ]]
 	layout.OpenMotion = {Owner = window, T = 0}
 	do
 		local motion = layout.OpenMotion
-		-- One frame at progress p, 0 to 1: the window up by what is left of the 50 px, in whole units.
-		function motion.Draw(p)
-			motion.P = p
-			local at = UDim2.new(0.5, 0, 0, (layout.Top or 12) - math.floor(50 * (layout.Zoom or 1) * (1 - p) + 0.5))
-			if window.Position ~= at then
-				window.Position = at
-			end
-			dim.BackgroundTransparency = 1 - 0.75 * p
-			if motion.Parts then
-				ui.fade.draw(motion.Parts, 1 - p)
-			end
-			if motion.PageParts then
-				ui.fade.draw(motion.PageParts, 1 - p)
+		local SLIDE, DARKEN = 0.30, 0.28
+		-- One frame at t seconds in: the window up by what is left of the 50 px, in whole units.
+		function motion.Draw(t)
+			local p = ui.anim.quintOut(math.min(t / SLIDE, 1))
+			-- The scroll stays where it was: the window drops onto it (layout.placeWindow).
+			layout.Lift = math.floor(50 * (layout.Zoom or 1) * (1 - p) + 0.5)
+			layout.placeWindow()
+			local shade = 1 - 0.75 * ui.anim.quintOut(math.min(t / DARKEN, 1))
+			if dim.BackgroundTransparency ~= shade then
+				dim.BackgroundTransparency = shade
 			end
 		end
 		function motion.Step(dt)
 			motion.T += dt
-			local duration = theme.ModalInfo.Time
-			if motion.T >= duration then
+			if motion.T >= SLIDE then
 				motion.Finish()
 				return true
 			end
-			motion.Draw(ui.anim.quintOut(motion.T / duration))
+			motion.Draw(motion.T)
 			motion.Tips()
 		end
 		-- A hint that comes up part way in rides along with the window, rather than waiting for the next check.
@@ -13513,53 +13647,17 @@ components.GUI = function(props, children, api)
 			end
 			pcall(ui.placeTips)
 		end
-		-- The page's cards back at their rest. A tab clicked part way in hides that page and fades its
-		-- own in with what is left of the open (TabMotion); the rest of the open carries on.
-		function motion.Release()
-			local parts = motion.PageParts
-			motion.PageParts = nil
-			if parts then
-				ui.fade.finish(parts)
-			end
-		end
-		-- The end state, or an open cut short: the window at rest, the dim at its 0.75, and every part
-		-- it faded at its rest.
+		-- The end state, or an open cut short: the window at rest and the dim at its 0.75.
 		function motion.Finish()
-			local parts = motion.Parts
-			motion.Parts, motion.P = nil, 1
-			window.Position = UDim2.new(0.5, 0, 0, layout.Top or 12)
+			layout.Lift = 0
+			layout.placeWindow()
 			dim.BackgroundTransparency = 0.25
-			motion.Release()
-			if parts then
-				ui.fade.finish(parts)
-			end
 			motion.Tips()
 		end
-		-- From the first frame: nothing of the window showing yet, 50 px up, and no dim.
+		-- From the first frame: everything showing, 50 px up, and no dim yet.
 		function motion.Start()
 			ui.anim.stop(window, true)
 			motion.T = 0
-			if layout.FadePages then
-				-- Everything showing outside the pages, whole: the tab bar and the key footer.
-				local parts = ui.fade.new()
-				for _, child in window:GetChildren() do
-					if child ~= pagesFrame then
-						ui.fade.add(parts, child)
-					end
-				end
-				motion.Parts = parts
-				-- The page showing, unless a switch is fading it in already (with the open, as it is).
-				local switching = layout.TabMotion.Parts and layout.TabMotion.Page
-				for _, info in layout.Pages do
-					local page = info.Frame
-					if page.Visible and page ~= switching then
-						local pageParts = ui.fade.new()
-						ui.fade.page(pageParts, page)
-						motion.PageParts = pageParts
-						break
-					end
-				end
-			end
 			motion.Draw(0)
 			ui.anim.play(window, motion)
 		end
@@ -13571,6 +13669,9 @@ components.GUI = function(props, children, api)
 	function layout.MenuShown(open)
 		local shown = open == true and not layout.MovingHud
 		dim.Visible = shown
+		-- The wheel is the menu's while it is up (layout.Scroll); a touch screen has none.
+		scroll.sink(open == true and not scroller)
+		scroll.request()
 		if shown then
 			layout.OpenMotion.Start()
 			if layout.CheckFits then
@@ -13611,15 +13712,11 @@ components.GUI = function(props, children, api)
 			local page = info.Frame
 			motion.Page = page
 			if layout.FadePages then
-				-- An open still coming in lets go of the page it was fading, hidden now.
-				if layout.OpenMotion then
-					layout.OpenMotion.Release()
-				end
 				motion.Parts = ui.fade.new()
 				ui.fade.page(motion.Parts, page)
-			else
-				pagesFrame.ClipsDescendants = true
 			end
+			-- On a phone the scroller cuts the sliding page at the window's sides, as the pages' frame
+			-- did; it no longer has a foot to cut at.
 			motion.Draw()
 			ui.anim.play(activePill, motion)
 		end
@@ -13812,7 +13909,7 @@ components.GUI = function(props, children, api)
 		local focusUntil = 0
 		--[[ Closing fades rather than snapping shut (the owner, 2026-11-10), on the menu's own open curve, 0.3 s
 		Quint Out (theme.ModalInfo): the field and the cross go out as the tabs, the magnifier and the tab's page
-		come back in, the page card by card (ui.fade), as when the menu opens. The search page and its results go
+		come back in, the page card by card (ui.fade). The search page and its results go
 		at once, as a tab switch drops the page it leaves. The field keeps what was typed while it fades, out of
 		the keyboard's reach, and is emptied at the end. On a phone (no FadePages) it closes at once. ]]
 		local closeMotion = {Owner = window, T = 0}
@@ -14030,19 +14127,26 @@ components.GUI = function(props, children, api)
 			if ok and typeof(inset) == 'Vector2' then
 				top = math.max(12, (inset.Y + 6) / s)
 			end
-			-- The key footer runs along the window's foot: kept clear of a phone's rounded corners and
+			-- The key footer runs along the screen's foot: kept clear of a phone's rounded corners and
 			-- home indicator.
 			local edge = (ok and typeof(insetBottom) == 'Vector2' and insetBottom.Y or 0) + 16
 			bottom = math.max(12, edge / s)
 		end
-		-- The confirm dialog and the colour picker open level with the window.
-		layout.Top = top
-		window.Position = UDim2.new(0.5, 0, 0, top)
+		-- The confirm dialog and the colour picker open level with the tab bar at rest.
+		layout.Top, layout.Bottom = top, bottom
 		if factor ~= 1 or top ~= 12 or bottom ~= 12 then
 			window.Size = UDim2.new(0, width, 0, math.floor((pxHeight / s - top - bottom) / factor))
 		else
 			window.Size = UDim2.new(0, width, 1, -24)
 		end
+		-- The scroller and the key footer's place are the window's width in the menu's units.
+		if scroller then
+			scroller.Size = UDim2.new(0, math.ceil(width * factor), 1, 0)
+		end
+		footerHolder.Size = UDim2.fromOffset(width, 32)
+		footerZoom.Scale = factor
+		layout.placeWindow()
+		scroll.request()
 		-- The visible tabs and the search magnifier share the bar in equal slots: 16 em px at 876 and
 		-- 1476 wide, 10 on the single-column bar.
 		local tabSize = theme.em(math.clamp(math.floor((width / (#visibleTabs() + 1) - 6) / 4.6), 10, 16))
