@@ -330,7 +330,12 @@ local function httpGet(url, ...)
 		end)
 		refused = not indexed or type(method) ~= 'function'
 	end
-	local send = type(request) == 'function' and request or type(http_request) == 'function' and http_request or nil
+	-- Every name the executors put it under; Real's answers a failure with an error string, which the
+	-- table check below turns down like any other bad answer.
+	local send = type(request) == 'function' and request or type(http_request) == 'function' and http_request
+		or type(httprequest) == 'function' and httprequest
+		or type(http) == 'table' and type(http.request) == 'function' and http.request
+		or type(syn) == 'table' and type(syn.request) == 'function' and syn.request or nil
 	if not (refused and send) then error(body, 0) end
 	local response = send({Url = url, Method = 'GET'})
 	local status = type(response) == 'table' and tonumber(response.StatusCode) or nil
@@ -16073,9 +16078,13 @@ run(function()
 	the options are ESP's -- 2D or 3D box, fill, health bar, name with a background, priority
 	only, distance range -- read against a bed instead of a character.
 
-	Every bed is boxed by its own block: a BasePart two cells long, or a model's bounding box.
-	The 3D mode draws its twelve edges; the 2D mode the screen rectangle around them. The name
-	and the health bar hang off that rectangle in both modes. ]]
+	Every bed is boxed by the two blocks the game counts it as. The part with the 'bed' tag is
+	only the model's invisible Root, one block; the bed lies across that block and the next one
+	along the Root's own +Z, and the block engine files both under the bed (BedBlockHandler:
+	getContainedPositions; og_bed's handler always names world +Z, the same block while the
+	bed is not turned). Anything else with the tag keeps its own box: a part's, or a model's
+	bounding box. The 3D mode draws its twelve edges; the 2D mode the screen rectangle around
+	them. The name and the health bar hang off that rectangle in both modes. ]]
 	local CORNERS = {
 		Vector3.new(-1, -1, -1), Vector3.new(1, -1, -1), Vector3.new(1, -1, 1), Vector3.new(-1, -1, 1),
 		Vector3.new(-1, 1, -1), Vector3.new(1, 1, -1), Vector3.new(1, 1, 1), Vector3.new(-1, 1, 1)
@@ -16183,8 +16192,18 @@ run(function()
 		return health, maxHealth
 	end
 
+	-- A bed's two blocks in its Root's frame: their middle, half a block along the Root's +Z,
+	-- and their size (3 studs is the engine's block size). Keyed by the names the block engine
+	-- gives the two bed types.
+	local TWO_BLOCK_BEDS = {bed = true, og_bed = true}
+	local TWO_BLOCK_OFFSET = CFrame.new(0, 0, 1.5)
+	local TWO_BLOCK_SIZE = Vector3.new(3, 3, 6)
+
 	local function bedBox(bed)
 		if bed:IsA('BasePart') then
+			if TWO_BLOCK_BEDS[bed.Name] then
+				return bed.CFrame * TWO_BLOCK_OFFSET, TWO_BLOCK_SIZE
+			end
 			return bed.CFrame, bed.Size
 		end
 		local ok, cframe, size = pcall(bed.GetBoundingBox, bed)
@@ -17098,17 +17117,26 @@ run(function()
 	-- Reference holds every live tag.
 	local TagLayers = setmetatable({}, {__mode = 'k'})
 
+	-- A run of non-ASCII in the shadow: the heart is drawn, anything else (colour emoji) keeps its
+	-- width without being drawn. Made once rather than as a fresh closure on every text write.
+	local function shadowRun(run)
+		if run == '\u{2665}' then
+			return run
+		end
+		return '<font transparency="1">'..run..'</font>'
+	end
+
+	local function readLabelText(label)
+		return label.Text
+	end
+
 	-- The layers copy the label's text as it stands after the write, read back rather than passed in.
 	local function syncTagText(nametag, layers)
 		local text = nametag.Text
+		layers.Synced = text
 		layers.Front.Text = text
 		local plain = removeTags(text):gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
-		layers.Shadow.Text = plain:gsub('[\128-\255]+', function(run)
-			if run == '\u{2665}' then
-				return run
-			end
-			return '<font transparency="1">'..run..'</font>'
-		end)
+		layers.Shadow.Text = (plain:gsub('[\128-\255]+', shadowRun))
 	end
 
 	--[[ Drawn like the mod overlay's lines: the tag's own text is hidden and two layers carry it, a
@@ -17158,6 +17186,11 @@ run(function()
 		end
 		nametag:GetPropertyChangedSignal('Text'):Connect(function()
 			if layers.Queued then return end
+			--[[ Our own write: setTagText already brought the layers along, so there is nothing to
+			catch up and no thread is queued for it (that was one per tag per distance change). Only
+			read here, never written. ]]
+			local ok, text = pcall(readLabelText, nametag)
+			if ok and text == layers.Synced then return end
 			layers.Queued = true
 			task.defer(catchUp)
 		end)
@@ -17282,6 +17315,81 @@ run(function()
 			icon.Size = UDim2.fromOffset(iconSize, iconSize)
 			icon.Position = UDim2.new(0.5, (index - 1 - #carried / 2) * iconSize, 0, -iconSize)
 		end
+	end
+
+	--[[ Measuring a tag's text, at most one thread per tag and only when the text changed.
+
+	getfontsize is GetTextBoundsAsync, and with the distance in the text most strings are new to its
+	cache, so it yields. Every distance change used to spawn a thread of its own to measure, and every
+	health or gear update measured again in its own thread even when the text had not changed: with
+	fifteen players moving that was a stream of threads, each with its own async call, and nothing
+	stopped them piling up behind a slow one. Now a tag has one measuring thread at a time. It measures
+	the newest text, and if the text moved on while it waited it measures again before it stops, so the
+	tag is still sized for what it says. Text that is what was last measured is not measured at all. ]]
+	local MEASURE_BOUNDS = Vector2.new(100000, 100000)
+	local MeasuredText = setmetatable({}, {__mode = 'k'})
+	local MeasuredWidth = setmetatable({}, {__mode = 'k'})
+	local MeasuredHeight = setmetatable({}, {__mode = 'k'})
+	-- when the tag's measuring thread started; it also tells that thread whether it is still the one
+	local Measuring = setmetatable({}, {__mode = 'k'})
+	-- Where each tag was last put and whether it is shown, so the frame loop writes only changes.
+	local PlacedX, PlacedY = setmetatable({}, {__mode = 'k'}), setmetatable({}, {__mode = 'k'})
+	local Shown = setmetatable({}, {__mode = 'k'})
+
+	local function measureLoop(nametag)
+		repeat
+			local text = nametag.Text
+			if text == MeasuredText[nametag] then
+				positionIcons(nametag, MeasuredWidth[nametag], MeasuredHeight[nametag])
+				return
+			end
+			local size = getfontsize(removeTags(text), nametag.TextSize, nametag.FontFace, MEASURE_BOUNDS)
+			-- taken down while it was being measured
+			if not nametag.Parent then return end
+			if nametag.Text == text then
+				MeasuredText[nametag] = text
+				MeasuredWidth[nametag], MeasuredHeight[nametag] = size.X, size.Y + 7
+				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
+				positionIcons(nametag, size.X, size.Y + 7)
+				return
+			end
+			-- the text changed during the yield: measure the newest instead
+		until false
+	end
+
+	local function runMeasure(nametag, started)
+		pcall(measureLoop, nametag)
+		if Measuring[nametag] == started then
+			Measuring[nametag] = nil
+		end
+	end
+
+	--[[ `relayout` lays the icons out again even when the text is unchanged (an update may have
+	changed what they show). A running measure does that itself when it lands. One that has not come
+	back in five seconds is given up on, so a lost async call cannot leave a tag unmeasured for good. ]]
+	local function requestMeasure(nametag, relayout)
+		local started = Measuring[nametag]
+		if started and os.clock() - started < 5 then return end
+		local width = MeasuredWidth[nametag]
+		if width and nametag.Text == MeasuredText[nametag] then
+			if relayout then
+				positionIcons(nametag, width, MeasuredHeight[nametag])
+			end
+			return
+		end
+		started = os.clock()
+		Measuring[nametag] = started
+		task.spawn(runMeasure, nametag, started)
+	end
+
+	-- Everything kept per tag label, dropped when the label is destroyed.
+	local function forgetTag(nametag)
+		TagLayers[nametag] = nil
+		TagIcons[nametag] = nil
+		MeasuredText[nametag], MeasuredWidth[nametag], MeasuredHeight[nametag] = nil, nil, nil
+		Measuring[nametag] = nil
+		PlacedX[nametag], PlacedY[nametag] = nil, nil
+		Shown[nametag] = nil
 	end
 
 	local function requestRank(plr, ent)
@@ -17551,6 +17659,16 @@ run(function()
 		return text
 	end
 
+	-- A build that did not end in a tag, with no other build or tag for the entity: what it
+	-- claimed goes (its string, and the enchant listener a late cancel can leave behind).
+	local function abandonBuild(ent)
+		if Building[ent] == nil and Reference[ent] == nil then
+			Strings[ent] = nil
+			Sizes[ent] = nil
+			unwatchEnchant(ent)
+		end
+	end
+
 	local Added = {
 		Normal = function(ent)
 			local token = {}
@@ -17579,14 +17697,18 @@ run(function()
 
 				nametag.TextSize = 14 * Scale.Value
 				nametag.FontFace = FontOption.Value
-				local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
+				local measuredText = Strings[ent]
+				local size = getfontsize(removeTags(measuredText), nametag.TextSize, nametag.FontFace, MEASURE_BOUNDS)
 				-- getfontsize yielded: a removal or a restart in the meantime cancels this build
 				if Building[ent] ~= token then
 					nametag:Destroy()
+					abandonBuild(ent)
 					return
 				end
 				nametag.Name = ent.Player and ent.Player.Name or ent.Character.Name
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
+				MeasuredText[nametag] = measuredText
+				MeasuredWidth[nametag], MeasuredHeight[nametag] = size.X, size.Y + 7
 
 				--[[ Same shape as the Rank and Enchant icons below: no Position and no Size
 				here, because positionIcons owns the layout and setting either now would flash
@@ -17643,6 +17765,7 @@ run(function()
 				shadeTag(nametag)
 				if Building[ent] ~= token then
 					nametag:Destroy()
+					abandonBuild(ent)
 					return
 				end
 				-- Only now does it become a real tag: finished and parented in the same step,
@@ -17654,6 +17777,7 @@ run(function()
 			-- A build that threw part way must not leave the entity marked as in progress.
 			if Building[ent] == token then
 				Building[ent] = nil
+				abandonBuild(ent)
 			end
 		end
 	}
@@ -17672,12 +17796,23 @@ run(function()
 					end
 					v:Destroy()
 					Reference[ent] = nil
-					Strings[ent] = nil
-					Sizes[ent] = nil
+					forgetTag(v)
 				end
 			end)
+			--[[ Tag or no tag: a build cancelled mid-measure, or a tag the render loop had already dropped,
+			used to keep these, and with them the entity table and the character it points at. ]]
+			if Reference[ent] == nil then
+				Strings[ent] = nil
+				Sizes[ent] = nil
+			end
 		end
 	}
+
+	-- Whether entitylib still tracks this entity table.
+	local function isListed(ent)
+		local list = entitylib.List
+		return list ~= nil and table.find(list, ent) ~= nil
+	end
 	
 	--[[ Whether this entity table has been superseded.
 
@@ -17757,6 +17892,17 @@ run(function()
 				-- Parent as well as existence: the label is dropped by the render loop when
 				-- its container goes, and that left the entity in the same dead end
 				if not nametag or not nametag.Parent then
+					--[[ Only for an entity entitylib still has. An update can arrive after its entity was
+					removed -- the armour-slot watcher fires its own a tenth of a second after a slot changes,
+					and on a death that can land after the respawn -- and the tag it rebuilt belonged to a
+					character nobody tracked any more: hidden, but drawn over every frame until the once-a-second
+					sweep found its character gone, and kept for good if the character stayed in the workspace. ]]
+					if not isListed(ent) then
+						if nametag then
+							Removed['Normal'](ent)
+						end
+						return
+					end
 					rebuildTag(ent, 'Normal')
 					return
 				end
@@ -17840,11 +17986,11 @@ run(function()
 					end)
 				end
 
-				local size = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-				-- getfontsize yielded: a newer update, or a removed tag, owns the label now
+				-- a newer update, or a removed tag, owns the label now
 				if UpdateGen[ent] ~= gen or Reference[ent] ~= nametag then return end
-				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
-				positionIcons(nametag, size.X, size.Y + 7)
+				-- re-measured only if the text changed, by the tag's one measuring thread; the icons are
+				-- laid out again either way, since this may have changed what they show
+				requestMeasure(nametag, true)
 			end)
 		end
 	}
@@ -17867,25 +18013,6 @@ run(function()
 		end
 	}
 	
-	--[[ The re-measure after a distance change, on a thread of its own. getfontsize is
-	GetTextBoundsAsync, and with the distance in the text most strings are new to its cache, so
-	it yields -- and inside the render loop that yield held up every tag after this one until it
-	came back, with the next frame's loop already running over the same tags. Same measure and
-	the same writes, in the same order once it returns; the loop just no longer waits on it. It
-	reads the label's text at once, before any yield, so it measures what was just written.
-
-	A measure that comes back after the text has moved on is dropped. Whatever moved it has a
-	measure of its own coming, and with Sizes already set to the new distance nothing would
-	measure again: an older string finishing last would leave the tag sized for the wrong text
-	until the distance next changed. ]]
-	local function measureTag(nametag)
-		local text = nametag.Text
-		local size = getfontsize(removeTags(text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-		if nametag.Text ~= text then return end
-		nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
-		positionIcons(nametag, size.X, size.Y + 7)
-	end
-
 	--[[ One tag's worth of work, under its own pcall.
 
 	The comment inside spells out why a throw here used to freeze every tag after it in the
@@ -17902,7 +18029,14 @@ run(function()
 	Potassium about a microsecond and 48 bytes of garbage a call, measured live 2026-11-10). Where
 	each tag was last put, so one that has not moved is not written again. ]]
 	local worldToViewport
-	local PlacedX, PlacedY = setmetatable({}, {__mode = 'k'}), setmetatable({}, {__mode = 'k'})
+
+	-- Visible is written only when it changes, not every frame for every tag.
+	local function setShown(nametag, shown)
+		if Shown[nametag] ~= shown then
+			Shown[nametag] = shown
+			nametag.Visible = shown
+		end
+	end
 
 	local function paintTag(ent, nametag, selfPos)
 		--[[ THIS is why tags froze on screen.
@@ -17922,7 +18056,7 @@ run(function()
 		and the real cleanup happens there. ]]
 		local root = ent.RootPart
 		if not (root and root.Parent) then
-			nametag.Visible = false
+			setShown(nametag, false)
 			return
 		end
 
@@ -17931,7 +18065,7 @@ run(function()
 		over an empty spot -- two property reads a frame is cheaper than explaining
 		that to anyone. ]]
 		if supersededEntity(ent) then
-			nametag.Visible = false
+			setShown(nametag, false)
 			return
 		end
 
@@ -17940,14 +18074,14 @@ run(function()
 		if DistanceCheck.Enabled then
 			local distance = selfPos and (selfPos - rootPos).Magnitude or math.huge
 			if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
-				nametag.Visible = false
+				setShown(nametag, false)
 				return
 			end
 		end
 
 		worldToViewport = worldToViewport or gameCamera.WorldToViewportPoint
 		local headPos, headVis = worldToViewport(gameCamera, rootPos + Vector3.new(0, ent.HipHeight + 1, 0))
-		nametag.Visible = headVis
+		setShown(nametag, headVis)
 		if not headVis then
 			return
 		end
@@ -17957,7 +18091,7 @@ run(function()
 			if Sizes[ent] ~= mag then
 				setTagText(nametag, string.format(Strings[ent], distanceText(mag)))
 				Sizes[ent] = mag
-				task.spawn(pcall, measureTag, nametag)
+				requestMeasure(nametag)
 			end
 		end
 		-- Moved only once it is half a pixel or more from where it was last put: below that nothing on
@@ -17989,9 +18123,7 @@ run(function()
 				continue
 			end
 			if hidden then
-				if nametag.Visible then
-					nametag.Visible = false
-				end
+				setShown(nametag, false)
 				continue
 			end
 			drawTag(ent, nametag, selfPos)
@@ -18027,6 +18159,8 @@ run(function()
 	empty the maid, then let the module drop its own state -- done from in here because a
 	second start never gives the GUI the chance. ]]
 	local liveSetup = false
+	-- each player's UserInputType watcher, dropped when they leave
+	local deviceConns = {}
 
 	local function dropSetup()
 		for _, connection in NameTags.Connections do
@@ -18052,6 +18186,12 @@ run(function()
 		for ent in enchantConns do
 			unwatchEnchant(ent)
 		end
+		for _, connection in deviceConns do
+			pcall(function() connection:Disconnect() end)
+		end
+		table.clear(deviceConns)
+		table.clear(Strings)
+		table.clear(Sizes)
 
 		liveSetup = false
 	end
@@ -18125,6 +18265,8 @@ run(function()
 				a gap: an entity deliberately left untagged stays untagged. ]]
 				local sweepAt = 0
 				local npcPollAt = 0
+				-- the sweep's view of entitylib.List, refilled each time rather than made anew
+				local listed = {}
 				NameTags:Clean(runService.Heartbeat:Connect(function()
 					local now = os.clock()
 
@@ -18152,14 +18294,22 @@ run(function()
 					the backstop for anything that slipped past it -- a player gone mid-build, a
 					character destroyed without CharacterRemoving. ]]
 					local remove = Removed[methodused]
-					if remove then
+					local list = entitylib.List
+					if remove and list then
+						-- and one entitylib no longer has: nothing would ever report it again
+						table.clear(listed)
+						for _, ent in list do
+							listed[ent] = true
+						end
 						for ent in Reference do
-							local gone = (ent.Player and ent.Player.Parent == nil)
+							local gone = not listed[ent]
+								or (ent.Player and ent.Player.Parent == nil)
 								or not (ent.Character and ent.Character.Parent)
 							if gone then
 								remove(ent)
 							end
 						end
+						table.clear(listed)
 					end
 
 					local add = Added[methodused]
@@ -18177,19 +18327,31 @@ run(function()
 				updates -- which is why the emoji was missing on some players and not
 				others. Redraw whoever's attribute lands or changes. ]]
 				local function watchDevice(plr)
-					NameTags:Clean(plr:GetAttributeChangedSignal('UserInputType'):Connect(function()
+					local old = deviceConns[plr]
+					if old then
+						old:Disconnect()
+					end
+					deviceConns[plr] = plr:GetAttributeChangedSignal('UserInputType'):Connect(function()
 						if not Device.Enabled then return end
 						local ent = entitylib.getEntity(plr)
 						if ent then
 							queueTagRefresh(ent)
 						end
-					end))
+					end)
 				end
 
 				for _, plr in playersService:GetPlayers() do
 					watchDevice(plr)
 				end
 				NameTags:Clean(playersService.PlayerAdded:Connect(watchDevice))
+				-- a leaver's watcher goes with them instead of staying in the module's list all match
+				NameTags:Clean(playersService.PlayerRemoving:Connect(function(plr)
+					local connection = deviceConns[plr]
+					if connection then
+						deviceConns[plr] = nil
+						connection:Disconnect()
+					end
+				end))
 			else
 				dropSetup()
 			end

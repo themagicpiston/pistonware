@@ -764,17 +764,33 @@ local function finishLoading()
 						end
 						local release = shared.PistonwareRelease
 							local ref = type(release) == 'table' and (release.sourceRef or release.branch) or 'main'
-							local ok, source = pcall(function()
-								return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..ref..'/loader.lua', true)
-							end)
-							if not ok or type(source) ~= 'string' or source == '' or source == '404: Not Found' then
-								queuedError('teleport.loader.download', source)
-								releaseHeldMatch()
-								return
+							-- Three tries a second or two apart, then the copy the loader's update pass keeps on
+							-- disk, as the loader's own queued copy does: one failed request on the way into a
+							-- match left the new server without Pistonware.
+							local chunk, compileError, source
+							for attempt = 1, 3 do
+								local ok, body = pcall(function()
+									return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..ref..'/loader.lua', true)
+								end)
+								source = body
+								if ok and type(body) == 'string' and body ~= '' and body ~= '404: Not Found' then
+									chunk, compileError = loadstring(body, 'loader')
+									if chunk then break end
+								end
+								if attempt < 3 then task.wait(attempt) end
 							end
-							local chunk, compileError = loadstring(source, 'loader')
 							if not chunk then
-								queuedError('teleport.loader.compile', compileError)
+								local readOk, cached = pcall(readfile, 'pistonware/loader.lua')
+								if readOk and type(cached) == 'string' and cached ~= '' then
+									chunk = loadstring(cached, 'loader')
+								end
+							end
+							if not chunk then
+								if compileError then
+									queuedError('teleport.loader.compile', compileError)
+								else
+									queuedError('teleport.loader.download', source)
+								end
 								releaseHeldMatch()
 								return
 							end

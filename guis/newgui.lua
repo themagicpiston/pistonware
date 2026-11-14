@@ -101,7 +101,13 @@ local function pistonwareRequest(options)
 	if type(adapter) == 'function' then
 		return adapter(options)
 	end
-	return request(options)
+	-- Every name the executors put it under. Callers pcall this and fall back to HttpGet.
+	local send = type(request) == 'function' and request or type(http_request) == 'function' and http_request
+		or type(httprequest) == 'function' and httprequest
+		or type(http) == 'table' and type(http.request) == 'function' and http.request
+		or type(syn) == 'table' and type(syn.request) == 'function' and syn.request
+	if not send then error('this executor has no request function', 0) end
+	return send(options)
 end
 
 --[[
@@ -5053,11 +5059,14 @@ function build.lists()
 		local reason
 		local ok, res = pcall(pistonwareRequest, {Url = url, Method = 'GET', Headers = profileSync.Headers})
 		if ok and type(res) == 'table' and type(res.Body) == 'string' then
-			local status = tonumber(res.StatusCode) or 200
+			-- A failure with no status code (or 0) never reached GitHub; HttpGet below gets its try.
+			local status = tonumber(res.StatusCode) or (res.Success == false and 0 or 200)
 			if status >= 200 and status < 300 and res.Body ~= '' then
 				return res.Body
 			end
-			reason = profileSync.describe(status, res.Body)
+			if status ~= 0 then
+				reason = profileSync.describe(status, res.Body)
+			end
 		end
 		local got, body = pcall(pistonwareHttpGet, url, true)
 		if got and type(body) == 'string' and body ~= '' and body ~= '404: Not Found' then

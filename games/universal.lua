@@ -274,7 +274,12 @@ local function pistonwareHttpGet(url, nocache, attempt)
 		end)
 		refused = not indexed or type(method) ~= 'function'
 	end
-	local send = type(request) == 'function' and request or type(http_request) == 'function' and http_request or nil
+	-- Every name the executors put it under; Real's answers a failure with an error string, which the
+	-- table check below turns down like any other bad answer.
+	local send = type(request) == 'function' and request or type(http_request) == 'function' and http_request
+		or type(httprequest) == 'function' and httprequest
+		or type(http) == 'table' and type(http.request) == 'function' and http.request
+		or type(syn) == 'table' and type(syn.request) == 'function' and syn.request or nil
 	if not (refused and send) then error(body, 0) end
 	local response = send({Url = url, Method = 'GET'})
 	local status = type(response) == 'table' and tonumber(response.StatusCode) or nil
@@ -309,8 +314,10 @@ local function downloadFile(path, func, chunkName)
 		local suc, res = pcall(function()
 			return pistonwareHttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..select(1, path:gsub('pistonware/', '')), true)
 		end)
-		if not suc or res == '404: Not Found' then
-			error(res)
+		-- An empty body is a failed fetch too: Real's HttpGet answers one instead of raising, and
+		-- writing it would leave a file that is never fetched again.
+		if not suc or type(res) ~= 'string' or res == '' or res == '404: Not Found' then
+			error(suc and ('failed to download '..path) or res)
 		end
 		if path:find('.lua') then
 			res = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res

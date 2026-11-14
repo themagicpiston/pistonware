@@ -548,10 +548,14 @@ pcall(function()
 	local candidates = {
 		request,
 		http_request,
-		syn and syn.request,
-		http and http.request
+		httprequest,
+		type(syn) == 'table' and syn.request or nil,
+		type(http) == 'table' and http.request or nil
 	}
-	for _, candidate in ipairs(candidates) do
+	-- Counted, not ipairs: ipairs stops at the first name the executor does not have, so without a
+	-- global request none of the others was ever looked at.
+	for index = 1, 5 do
+		local candidate = candidates[index]
 		if type(candidate) == 'function' then
 			telemetry.requestFn = candidate
 			break
@@ -712,6 +716,42 @@ local function rewriteProjectUrl(url)
 	return value
 end
 
+--[[ game:HttpGet as before wherever the executor has it: what it returns or raises comes back
+unchanged. The executor's request function stands in only where HttpGet is missing or refused to
+the calling thread, and there only a 2xx answer with a body counts, so an error page never comes
+back as the file (Real's request hands back an error string rather than a table). The same rule as
+httpGet in games/6872274481.lua and pistonwareHttpGet in universal.lua: in the public build every
+file's download comes through here (the adapters below), which used to skip those fallbacks. ]]
+local function httpGet(url, nocache)
+	local ok, body = pcall(function()
+		return game:HttpGet(url, nocache)
+	end)
+	if ok then return body end
+	local reason = tostring(body):lower()
+	local refused = false
+	for _, hint in {'not a valid member', 'lacking capability', 'lacking permission', 'cannot call'} do
+		if reason:find(hint, 1, true) then
+			refused = true
+			break
+		end
+	end
+	if not refused then
+		local indexed, method = pcall(function()
+			return game.HttpGet
+		end)
+		refused = not indexed or type(method) ~= 'function'
+	end
+	local send = telemetry.requestFn
+	if not (refused and send) then error(body, 0) end
+	local response = send({Url = url, Method = 'GET'})
+	local status = type(response) == 'table' and tonumber(response.StatusCode) or nil
+	if type(response) ~= 'table' or response.Success == false or (status and (status < 200 or status > 299))
+		or type(response.Body) ~= 'string' or response.Body == '' then
+		error('GET '..tostring(url)..' failed'..(status and ' (HTTP '..status..')' or ''), 0)
+	end
+	return response.Body
+end
+
 shared.PistonwareRawUrl = projectRawUrl
 shared.PistonwareProtectedRawUrl = protectedRawUrl
 shared.PistonwareRewriteUrl = rewriteProjectUrl
@@ -720,10 +760,10 @@ shared.PistonwareTelemetry = telemetry
 shared.PistonwareChannel = release.channel
 if not isDeveloper then
 	shared.PistonwareDevHttpGet = function(url, nocache)
-		return game:HttpGet(rewriteProjectUrl(url), nocache)
+		return httpGet(rewriteProjectUrl(url), nocache)
 	end
 	shared.PistonwareDevProtectedHttpGet = function(url, nocache)
-		return game:HttpGet(rewriteProjectUrl(url), nocache)
+		return httpGet(rewriteProjectUrl(url), nocache)
 	end
 end
 
@@ -941,9 +981,9 @@ local function downloadFile(path, func, chunkName)
 			attempts = attempt
 			local suc, res = pcall(function()
 				if isBedwars then
-					return game:HttpGet(protectedRawUrl(), true)
+					return httpGet(protectedRawUrl(), true)
 				end
-				return game:HttpGet(projectRawUrl(relPath), true)
+				return httpGet(projectRawUrl(relPath), true)
 			end)
 			if suc and res and res ~= '' and res ~= '404: Not Found' then
 				if not isLua then
@@ -1086,16 +1126,19 @@ local function githubGet(url)
 	if requestFn then
 		local ok, res = pcall(requestFn, {Url = url, Method = 'GET', Headers = GITHUB_HEADERS})
 		if ok and type(res) == 'table' and type(res.Body) == 'string' then
-			local status = tonumber(res.StatusCode) or 200
+			-- A failure with no status code (or 0) never reached GitHub, so HttpGet still gets its try.
+			local status = tonumber(res.StatusCode) or (res.Success == false and 0 or 200)
 			if status >= 200 and status < 300 then
 				if res.Body ~= '' then return res.Body end
 				return nil, 'GitHub sent an empty response'
 			end
-			return nil, describeGithubFailure(status, res.Body)
+			if status ~= 0 then
+				return nil, describeGithubFailure(status, res.Body)
+			end
 		end
 	end
 	local ok, body = pcall(function()
-		return game:HttpGet(url, true)
+		return httpGet(url, true)
 	end)
 	if ok and type(body) == 'string' and body ~= '' then return body end
 	return nil, ok and 'GitHub sent an empty response' or safeText(body, 200)
@@ -1419,7 +1462,7 @@ local function downloadProfilesListing(body, commit, onProgress)
 				pcall(function()
 					for attempt = 1, 4 do
 						local suc, res = pcall(function()
-							return game:HttpGet(projectRawUrl(relPath, commit or release.sourceRef), true)
+							return httpGet(projectRawUrl(relPath, commit or release.sourceRef), true)
 						end)
 						if suc and not unusableBody('pistonware/'..relPath, res) then
 							local wrote = writeChecked('pistonware/'..relPath, mergeGuiState('pistonware/'..relPath, res))
@@ -1546,7 +1589,7 @@ local function updateCachedFiles(onProgress)
 				local attempts = (release.cacheReady == true and manifest[path] == nil) and 1 or 4
 				for attempt = 1, attempts do
 					local suc, res = pcall(function()
-							return game:HttpGet(projectRawUrl(select(1, path:gsub(' ', '%%20')), headSha), true)
+							return httpGet(projectRawUrl(select(1, path:gsub(' ', '%%20')), headSha), true)
 					end)
 					--[[ compile check: never overwrite a working cached file with an error page ]]
 					if suc and res and res ~= '' and res ~= '404: Not Found' and loadstring(res) ~= nil then
@@ -2764,7 +2807,7 @@ do
 
 		for attempt = 1, 3 do
 			local ok, body = pcall(function()
-				return game:HttpGet('https://sdkapi-public.luarmor.net/library.lua', true)
+				return httpGet('https://sdkapi-public.luarmor.net/library.lua', true)
 			end)
 			if not ok then
 				apiFailure, apiDetail = 'network', shortError(body)
@@ -3621,7 +3664,7 @@ if repairing and release.fromMarker then
 	nothing to fetch, and the repair waits for a run that can reach GitHub. ]]
 	local rawUp = false
 	pcall(function()
-		local res = game:HttpGet(projectRawUrl('main.lua'), true)
+		local res = httpGet(projectRawUrl('main.lua'), true)
 		rawUp = not unusableBody('main.lua', res) and loadstring(res) ~= nil
 	end)
 	if not rawUp then
