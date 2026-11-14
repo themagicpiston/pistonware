@@ -7426,6 +7426,61 @@ function knitless.newBlockSelector(ctx, engine)
 	return selector
 end
 
+--[[ The place sound, after block-placement-audio-controller's playPlaceAudio(blockRef, blockType): with the
+block within 50 studs of your character, one of its place sounds at its world position. The server sends
+everyone else's placements to you and never your own, so for a block this layer places nothing else
+plays it. Each block's sounds are game-block-engine's default (GENERIC_BLOCK_PLACE) under its item meta's
+createPlaceAudioPlayers, a function the data file cannot carry, so the blocks that differ are listed here
+from item-meta. The names come from the data file's GameSound and play through the AudioManager stand-in. ]]
+function knitless.newPlaceAudio(ctx, engine)
+	local stone = {'STONE_BREAK'}
+	local crop = {'CROP_PLANT_1', 'CROP_PLANT_2', 'CROP_PLANT_3'}
+	local snow = {'SNOW_FOOTSTEP_1', 'SNOW_FOOTSTEP_2', 'SNOW_FOOTSTEP_3', 'SNOW_FOOTSTEP_4'}
+	local egg = {'CHICKEN_EGG_CRACK'}
+	local sounds = {
+		snow = snow, snow_pile = snow, chicken_egg_block = egg, egg_block = egg,
+		cursed_coffin = {'CURSED_COFFIN_PLACE'}, slime_block = {'SLIME_BLOCK_PLACE'},
+		magic_glass = {'MAGIC_GLASS_PLACE_1', 'MAGIC_GLASS_PLACE_2', 'MAGIC_GLASS_PLACE_3'},
+		pinata = {'PINATA_HIT_1', 'PINATA_HIT_2', 'PINATA_HIT_3'}
+	}
+	for _, blockType in {'andesite', 'andesite_polished', 'big_gargoyle_statue', 'brick', 'ceramic', 'clay', 'clay_black',
+		'clay_blue', 'clay_dark_brown', 'clay_dark_green', 'clay_gray', 'clay_green', 'clay_light_brown', 'clay_light_green',
+		'clay_orange', 'clay_pink', 'clay_purple', 'clay_red', 'clay_tan', 'clay_white', 'clay_yellow', 'concrete_green',
+		'cotton_candy_machine', 'damage_banner', 'defense_banner', 'diorite', 'diorite_polished', 'gargoyle_statue',
+		'gargoyle_statue_breaker', 'gargoyle_statue_fighter', 'gargoyle_statue_swift', 'granite', 'granite_polished', 'gravel',
+		'halloween_crystal_block', 'heal_banner', 'ice', 'ice_bricks', 'iron_ore_mesh_block', 'marble', 'marble_pillar',
+		'pirate_flag', 'red_sand', 'red_sandstone', 'red_sandstone_polished', 'red_sandstone_smooth', 'sacrophagus', 'sand',
+		'sandstone', 'sandstone_polished', 'sandstone_smooth', 'slate_brick', 'slate_tiles', 'teleport_block', 'tuff_bricks',
+		'void_teleport_portal'} do
+		sounds[blockType] = stone
+	end
+	for _, blockType in {'carrot', 'crystalheart_flower', 'melon', 'pumpkin', 'soulvine_flower', 'tearbloom_flower'} do
+		sounds[blockType] = crop
+	end
+	local fallback = {'GENERIC_BLOCK_PLACE'}
+	local assets
+
+	return function(blockRef, blockType)
+		local cell = type(blockRef) == 'table' and blockRef.blockPosition
+		if typeof(cell) ~= 'Vector3' or type(blockType) ~= 'string' then return end
+		local position = engine:getWorldPosition(cell)
+		if engine:distanceFromCharacter(ctx.lplr, position) >= 50 then return end
+		-- Kept once read; a failed read is tried again on the next placement.
+		if not assets then
+			local ok, data = pcall(ctx.data, 'GameSound')
+			if ok and type(data) == 'table' then assets = data end
+		end
+		local core = ctx.modules['ReplicatedStorage.rbxts_include.node_modules.@easy-games.game-core.out']
+		local audio = type(core) == 'table' and core.AudioManager
+		if not (assets and type(audio) == 'table' and type(audio.playAudio) == 'function') then return end
+		local list = sounds[blockType] or fallback
+		local asset = assets[list[math.random(#list)]]
+		if type(asset) == 'string' then
+			audio:playAudio(asset, {position = position})
+		end
+	end
+end
+
 --[[ The BlockPlacer class. placeBlock(cell, mouseInfo) runs the game's checks, then sends
 PlaceBlock {blockType, position, mouseBlockInfo?} through the block-engine client, exactly the
 keys of the game's strict interface, and returns nothing, as the game's does. blockData is the
@@ -7436,6 +7491,7 @@ function knitless.newBlockPlacerClass(ctx, engine)
 	local workspace = ctx.services.Workspace
 	local replicatedStorage = ctx.services.ReplicatedStorage
 	local paceFallback = {lastPlaceTimestamp = 0}
+	local playPlaceAudio = knitless.newPlaceAudio(ctx, engine)
 	local underfoot = {
 		Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0), Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
 		Vector3.new(1, 0, 1), Vector3.new(-1, 0, -1), Vector3.new(-1, 0, 1), Vector3.new(1, 0, -1),
@@ -7550,7 +7606,7 @@ function knitless.newBlockPlacerClass(ctx, engine)
 		return setmetatable({clientManager = clientManager, blockType = blockType}, BlockPlacer)
 	end
 
-	--[[ The game's placer without its animation and sound: after the game's checks and pace, a
+	--[[ The game's placer without its animation (its place sound is newPlaceAudio's): after the game's checks and pace, a
 	copy of a plain block holds the cell in the store (holdCell) until the server answers, as the
 	game's own copy does, and the request is sent and answered in the caller's thread, as the
 	game's is. The type is read once, at the call, so a caller switching blockType while this
@@ -7584,6 +7640,10 @@ function knitless.newBlockPlacerClass(ctx, engine)
 		it. Scaffold and the other callers that must not wait call this from a thread of their own. ]]
 		count('sent')
 		local copy = holdCell(blockType, cell)
+		--[[ The game's placer plays the place sound once its local placement is in, before the server
+		answers. That covers prefabs (traps, banners), which holdCell keeps no copy of, so it plays for every
+		placement that got this far. ]]
+		pcall(playPlaceAudio, {blockPosition = cell}, blockType)
 		if copy then
 			count('held')
 			task.delay(HOLD_LIMIT, function()
@@ -7754,9 +7814,12 @@ function knitless.buildBlocks(ctx)
 	function clientEngine:getConfig()
 		return self.config
 	end
-	--[[ This layer's placer plays no place sound. ]]
+	--[[ The place sound this layer's placer plays (newPlaceAudio), for any other caller. ]]
+	local placeAudio = knitless.newPlaceAudio(ctx, engine)
 	function clientEngine:getBlockPlacementAudioController()
-		return {playPlaceAudio = function() end}
+		return {playPlaceAudio = function(_, blockRef, blockType)
+			pcall(placeAudio, blockRef, blockType)
+		end}
 	end
 	--[[ The store already follows the block tag. ]]
 	function clientEngine:startBlockReplication() end
@@ -8762,7 +8825,7 @@ function knitless.ctrlSprint(h)
 	local WALK, RUN, FOV_MULT = 14, 20, 1.1
 	local lplr, workspace = h.lplr, h.workspace
 	local state = {humanoid = nil, gameMultiplier = 1, own = 1, written = nil}
-	local inferred = {}
+	local inferred, zephyrEntry = {}, {}
 	local sprint = {
 		Name = 'SprintController',
 		sprinting = false,
@@ -8877,10 +8940,19 @@ function knitless.ctrlSprint(h)
 	end
 
 	--[[ This file's modifiers, plus one that stands for all of the game's: its multiplier as read
-	off WalkSpeed. ]]
+	off WalkSpeed. With Speed on, Zephyr's boost (zephyrConstant, from the WindWalkerController
+	stand-in) is reported as the constantSpeedMultiplier Knit executors turn it into, and taken out of
+	the multiplier read off WalkSpeed, which carries it as a moveSpeedMultiplier. ]]
 	function modifier:getModifiers()
 		local set = table.clone(self.modifiers)
-		inferred.moveSpeedMultiplier = state.gameMultiplier
+		local zephyr = sprint.zephyrConstant
+		if type(zephyr) == 'number' and zephyr > 1 then
+			zephyrEntry.constantSpeedMultiplier = zephyr
+			set[zephyrEntry] = true
+			inferred.moveSpeedMultiplier = math.max(state.gameMultiplier - (zephyr - 1), 1)
+		else
+			inferred.moveSpeedMultiplier = state.gameMultiplier
+		end
 		set[inferred] = true
 		return set
 	end
@@ -10203,6 +10275,46 @@ end
 --[[ Kit controllers the payload calls without a guard, built on their remotes, and empty ones for
 the kit controllers whose methods the payload only replaces: the game never calls those
 replacements, so the modules that install them do nothing here instead of failing. ]]
+--[[ WindWalkerController (Zephyr), after wind-walker-controller. The game's own controller keeps running
+and applies the speed boost and the air jumps itself, so this one only follows its state off the same
+server event (WindWalkerSpeedUpdate): the speed multiplier and the orb count. doubleJumpActive stays
+false, as when there was no stand-in: AutoZephyr's air jumps lean on the game's JumpHeightController,
+which has none here. setSpeedConversion is Speed's: where Knit is live, Speed turns the game's
+moveSpeedMultiplier into a constantSpeedMultiplier (debug.setconstant), which getSpeed reads; here the
+SprintController stand-in reports the boost that way instead (zephyrConstant). Nothing here writes
+WalkSpeed. ]]
+function knitless.ctrlWindWalker(h)
+	local controller = {Name = 'WindWalkerController', multiplier = 1, orbCount = 0, doubleJumpActive = false, speedConversion = false}
+	local function publish()
+		local sprint = h.ctx.controllers.SprintController
+		if type(sprint) == 'table' then
+			sprint.zephyrConstant = if controller.speedConversion and controller.multiplier > 1 then controller.multiplier else nil
+		end
+	end
+	function controller:updateSpeed(multiplier)
+		self.multiplier = tonumber(multiplier) or 1
+		publish()
+	end
+	function controller:updateJump(orbCount)
+		self.orbCount = tonumber(orbCount) or 0
+	end
+	function controller:setSpeedConversion(enabled)
+		self.speedConversion = enabled == true
+		publish()
+	end
+	knitless.ctrlListen(h, 'WindWalkerSpeedUpdate', function(update)
+		if type(update) ~= 'table' then return end
+		controller:updateSpeed(update.multiplier)
+		controller:updateJump(update.orbCount)
+	end)
+	-- The stacks go with the character, as the game's movement modifiers do.
+	knitless.ctrlOnCharacter(h, function()
+		controller:updateSpeed(1)
+		controller:updateJump(0)
+	end)
+	knitless.ctrlPut(h, 'WindWalkerController', controller)
+end
+
 function knitless.ctrlKits(h, ability)
 	local lplr, workspace = h.lplr, h.workspace
 
@@ -10506,6 +10618,7 @@ function knitless.buildControllers(ctx)
 	end
 	-- Most kit stand-ins do not need the ability tracker; a failure there costs only its own.
 	part('ctrlKits', ability)
+	part('ctrlWindWalker')
 	part('ctrlKnockbackUtil')
 	part('ctrlStatusEffectUtil')
 
@@ -15943,6 +16056,14 @@ run(function()
 		if zephyrHook then
 			zephyrHook.remove()
 			zephyrHook = nil
+		end
+		--[[ Knitless (Solara, Xeno): bedwars.WindWalkerController is the stand-in, which follows the game's
+		controller and reports the boost to getSpeed as the constant itself; there is no game function
+		here to replace. ]]
+		local controller = bedwars.WindWalkerController
+		if type(controller) == 'table' and type(controller.setSpeedConversion) == 'function' then
+			controller:setSpeedConversion(enabled)
+			return
 		end
 		if not enabled then return end
 		zephyrHook = fieldPatch.wrap(bedwars.WindWalkerController, 'updateSpeed', function()
