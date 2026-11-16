@@ -12844,20 +12844,40 @@ run(function()
 
 	--[[ The direction to look for a shot that lands: where the target will be when the
 	projectile gets there, with the drop allowed for (the same SolveTrajectory the other aim
-	code uses, with the target's own fall and landing). SolveTrajectory returns origin plus the
-	launch velocity, so this is that velocity's direction. The camera is turned to look ALONG
-	it rather than through a point on it: a bow fires at what the crosshair is over, and that is
-	usually well past the target, so it is the look direction that has to match. ]]
+	code uses, with the target's own fall, landing and knockback model). SolveTrajectory
+	returns origin plus the launch velocity, so this is that velocity's direction. The camera
+	is turned to look ALONG it rather than through a point on it: a bow fires at what the
+	crosshair is over, and that is usually well past the target, so it is the look direction
+	that has to match.
+
+	Three things the raw call was missing. Airborne is read off FloorMaterial rather than
+	left to SolveTrajectory's own inference: a standing humanoid's vertical velocity crosses
+	that function's 0.01 threshold constantly, which armed the falling model on grounded
+	targets and led them down. The root rides along so the motion filter inside
+	SolveTrajectory runs -- raw replicated velocity carried a knockback at full strength for
+	the whole flight and spiked on a rubber-band. And the solved arc has to actually reach
+	the target: a bow's arc drops below the sight-line and clips edges the line to the target
+	clears, so a straight check is not enough, and an aim the world blocks only wastes the
+	arrow. ]]
 	local function projectileDirection(ent, projectile)
 		local head = entitylib.character.Head
 		local root = ent.RootPart
 		if not (head and root and prediction) then return end
 		local origin = head.Position
 		projectileRay.FilterDescendantsInstances = {lplr.Character, gameCamera}
-		local aim = prediction.SolveTrajectory(origin, projectile.Speed, projectile.Gravity, root.Position,
-			root.Velocity, workspace.Gravity, ent.HipHeight, nil, projectileRay)
-		local direction = aim and (aim - origin)
-		if not direction or direction.Magnitude < 0.01 then return end
+		local airborne
+		local humanoid = ent.Humanoid
+		if typeof(humanoid) == 'Instance' then
+			airborne = humanoid.FloorMaterial == Enum.Material.Air
+		end
+		local aim, flight = prediction.SolveTrajectory(origin, projectile.Speed, projectile.Gravity, root.Position,
+			root.Velocity, workspace.Gravity, ent.HipHeight, nil, projectileRay, nil, nil, airborne, root)
+		if not (aim and flight) then return end
+		if not prediction.IsTrajectoryClear(origin, aim, projectile.Gravity, flight, projectileRay, root) then
+			return
+		end
+		local direction = aim - origin
+		if direction.Magnitude < 0.01 then return end
 		return direction.Unit
 	end
 
@@ -19354,6 +19374,21 @@ run(function()
 		return bar and bar.TargetTextChannel
 	end
 
+	--[[ A moderation timeout keeps Quick Words out too, and every try puts Roblox's "You cannot currently
+	send chats" line in the chat. The first sign of it (a ModerationTimeout verdict, or that line itself)
+	stops every send for the rest of the match; the next match starts fresh. ]]
+	local muted = false
+	vape:Clean(textChatService.MessageReceived:Connect(function(message)
+		if muted or message.TextSource then return end
+		local text = string.lower(tostring(message.Text))
+		if text:find('cannot currently send chats', 1, true) or text:find("can't send messages", 1, true) then
+			muted = true
+			if shared.PistonwareDeveloper then
+				bufferCall('warn', 'bedwars.autotoxic', 'chat is blocked for this account; AutoToxic stays quiet for the rest of the match')
+			end
+		end
+	end))
+
 	--[[ Sends one message and gives its final status; nil and the error when the call threw, nil alone
 	when no verdict came within 5 s. SendAsync and SendPresetAsync can hand back a message that is still
 	Sending, and the server's verdict reaches the sender through MessageReceived under the same
@@ -19378,6 +19413,9 @@ run(function()
 		end)
 		watch:Disconnect()
 		if not ok then return nil, tostring(status) end
+		if status == Enum.TextChatMessageStatus.ModerationTimeout then
+			muted = true
+		end
 		return status ~= SENDING and status or nil
 	end
 
@@ -19449,6 +19487,7 @@ run(function()
 
 	-- One message, on the worker: after you kill a player (killed), or when a game ends (nil).
 	local function deliver(killed)
+		if muted then return end
 		local left = lastSent + GAP - os.clock()
 		if left > 0 then
 			if killed then return end
