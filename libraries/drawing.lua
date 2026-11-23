@@ -74,10 +74,15 @@ local classes = {
 	}
 }
 
+--[[ Both ends of the drawing bridge between an actor and the main side over one comm channel. The
+channel is one BindableEvent, so each side also hears what it fired itself: the actor takes only
+messages flagged true, the main side only those flagged false. On the main side 'new' creates the
+real Drawing object and answers with its current properties and a short ref, 'update' writes the
+properties the actor changed, and 'remove' removes the object. On the actor side 'new' wraps the
+answer in a proxy that records each property write for the next batched update and hands it to the
+waiting Drawing.new; 'update' stores the values sent to it. ]]
 commchannel.Event:Connect(function(...)
 	local actor, key = ...
-	-- The channel is one BindableEvent, so each side also hears what it fired itself:
-	-- the actor only takes messages flagged true, the main side only those flagged false.
 	if (actor and true or false) ~= isactor then return end
 	local args = {select(3, ...)}
 	if isactor and actor then

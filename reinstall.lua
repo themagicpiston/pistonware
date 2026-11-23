@@ -15,13 +15,13 @@ local function bufferRaise(event, message, level)
 	return error(message, level)
 end
 
-if shared.vape then
-	pcall(function() shared.vape:Uninject() end)
-	shared.vape = nil
+if shared.slinky then
+	pcall(function() shared.slinky:unload() end)
+	shared.slinky = nil
 end
 
-shared.VapeCustomProfile = nil
-shared.vapereload = nil
+shared.SlinkyCustomProfile = nil
+shared.slinkyreload = nil
 
 task.wait(2)
 
@@ -50,7 +50,7 @@ if isfolder and isfolder('pistonware') then
 end
 
 task.wait(2)
-shared.VapeSmoothBoot = true
+shared.SlinkySmoothBoot = true
 
 local suc, res = pcall(function()
 	return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/main/loader.lua', true)

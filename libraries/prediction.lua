@@ -28,6 +28,7 @@ local function push(list, ...)
 	end
 end
 
+-- Real roots of c0*x^2 + c1*x + c2 = 0: none, one (a discriminant within eps of zero) or two.
 local function solveQuadric(c0, c1, c2)
 	local s0, s1
 
@@ -42,7 +43,7 @@ local function solveQuadric(c0, c1, c2)
 		return s0
 	elseif (D < 0) then
 		return
-	else --[[ if (D > 0) ]]
+	else
 		local sqrt_D = math.sqrt(D)
 
 		s0 = sqrt_D - p
@@ -51,6 +52,9 @@ local function solveQuadric(c0, c1, c2)
 	end
 end
 
+--[[ Real roots of c0*x^3 + c1*x^2 + c2*x + c3 = 0, up to three values. In the three-root case rounding
+can push the acos argument a hair outside [-1, 1]; it is clamped, since a nan there would turn every
+root of the quartic built on this cubic into nan as well. ]]
 local function solveCubic(c0, c1, c2, c3)
 	local s0, s1, s2
 
@@ -71,18 +75,16 @@ local function solveCubic(c0, c1, c2, c3)
 	D = q * q + cb_p
 
 	if isZero(D) then
-		if isZero(q) then --[[ one triple solution ]]
+		if isZero(q) then
 			s0 = 0
 			num = 1
-		else --[[ one single and one double solution ]]
+		else
 			local u = cuberoot(-q)
 			s0 = 2 * u
 			s1 = -u
 			num = 2
 		end
-	elseif (D < 0) then --[[ Casus irreducibilis: three real solutions ]]
-		-- Rounding can push the ratio a hair outside [-1, 1]; acos of that is nan, and a nan
-		-- here turns every root of the quartic built on this cubic into nan as well.
+	elseif (D < 0) then
 		local phi = (1 / 3) * math.acos(math.clamp(-q / math.sqrt(-cb_p), -1, 1))
 		local t = 2 * math.sqrt(-p)
 
@@ -90,7 +92,7 @@ local function solveCubic(c0, c1, c2, c3)
 		s1 = -t * math.cos(phi + math.pi / 3)
 		s2 = -t * math.cos(phi - math.pi / 3)
 		num = 3
-	else --[[ one real solution ]]
+	else
 		local sqrt_D = math.sqrt(D)
 		local u = cuberoot(sqrt_D - q)
 		local v = -cuberoot(sqrt_D + q)
@@ -286,7 +288,8 @@ local function castPastCharacters(from, dir, params)
 	return nil
 end
 
-local LAND_LIFT = 0.1      -- probe from just above the feet, so a target standing on a floor finds it
+-- How far above the feet the landing probe starts, so a target standing on a floor finds it.
+local LAND_LIFT = 0.1
 local LAND_SEGMENTS = 40
 local LAND_LIFT_OFFSET = Vector3.new(0, LAND_LIFT, 0)
 
@@ -296,11 +299,11 @@ local function fallingAt(pos, vel, grav, tt)
 	return pos + vel * tt - Vector3.new(0, 0.5 * grav * tt * tt, 0)
 end
 
---[[ When the falling target's feet (`height` below the root) first meet a floor, within
-`tEnd` seconds. The arc is walked in short chords rather than one straight ray from the root:
-that ray cut the corner of the parabola and started inside the target's own legs. Only the way
-down is probed -- nothing is landed on while rising. Returns the time and the root position
-there. ]]
+--[[ When the falling target's feet (height below the root) first meet a floor within tEnd seconds;
+returns that time and the root position there, or nil. The arc is walked in short chords from its
+top, because a single straight ray from the root cuts the corner of the parabola and starts inside
+the target's own legs; nothing is landed on while rising. A hit is a floor when its normal points
+up, and the landing time is solved exactly for that surface's height. ]]
 local function findLanding(pos, vel, grav, height, params, tEnd)
 	if grav <= 0 or tEnd <= 0 then return nil end
 	local t = math.max(vel.Y / grav, 0)
@@ -314,7 +317,6 @@ local function findLanding(pos, vel, grav, height, params, tEnd)
 		local a = fallingAt(pos, vel, grav, t) - feet + LAND_LIFT_OFFSET
 		local hit = castPastCharacters(a, fallingAt(pos, vel, grav, t2) - feet - a, params)
 		if hit and hit.Normal.Y > 0.5 then
-			-- The exact moment the feet reach that surface on the way down.
 			local disc = vel.Y * vel.Y - 2 * grav * (hit.Position.Y - (pos.Y - height))
 			local tl = disc >= 0 and (vel.Y + math.sqrt(disc)) / grav or t
 			tl = math.clamp(tl, t, t2)
@@ -358,10 +360,22 @@ local resetMotion = function(st, pos, vel, now)
 	return st
 end
 
---[[ Fresh filtered velocity for a root at `pos` moving at replicated `vel`, and the state it
-came from. A nil velocity passes the raw one through unchanged -- first sighting, a
-displacement no running speed explains, or a second call inside the same frame -- while the
-state, whenever it exists, is still read by the caller for its knockback fields. ]]
+--[[ Filtered velocity for a root at pos moving at replicated vel, and the motion state behind it. A nil
+velocity passes the raw one through: on first sighting or after 0.75 s unseen, and after a
+displacement no running speed explains (a teleport or a rubber-band), which restarts the track. A
+second call at the same moment returns the last filtered velocity. The caller reads the state for
+its knockback fields whenever it exists. Speeds above 260 studs/s are not trusted.
+
+Positions are sampled only when they change: replication arrives slower than frames, and counting
+the frames between as samples of a target standing still would read every runner as slower than they
+are. Horizontally the replicated velocity is nudged toward the measured one when the two agree, and
+replaced by it when replication reads still but the target moves. Smoothing scales with how far the
+reading moved, so steady movement stays damped and a real change of direction or speed is followed
+within the frame.
+
+Knockback starts on a damage tick (LastDamageTakenTime) together with a jump in velocity, or a
+PlatformStand shove. The pre-hit velocity is kept as kbBase, the target's friction is learned from
+the impulse dying away, and a push the other way ends it as the target moving again. ]]
 local filterMotion = function(root, pos, vel, now, airborne)
 	local character = root.Parent
 	local humanoid = typeof(character) == 'Instance' and character:FindFirstChildWhichIsA('Humanoid') or nil
@@ -379,8 +393,6 @@ local filterMotion = function(root, pos, vel, now, airborne)
 		return st.velocity, st
 	end
 
-	-- A jump no running speed explains is a teleport or a rubber-band: restart the track
-	-- from here rather than learn a velocity from it.
 	local displacement = pos - st.position
 	local limit = math.max(12, (math.max(st.velocity.Magnitude, vel.Magnitude) + 30) * dt * 1.5)
 	if not finite(vel.Magnitude) or vel.Magnitude > 260 or displacement.Magnitude > limit then
@@ -389,9 +401,6 @@ local filterMotion = function(root, pos, vel, now, airborne)
 		return nil, st
 	end
 
-	-- Sampled only when the position actually changes: replication arrives slower than
-	-- frames do, and counting the frames in between as samples of a target standing still
-	-- read every runner as slower than they are.
 	local samplePos, sampleTime = st.samplePos, st.sampleTime
 	local head, count = st.sampleHead, st.sampleCount
 	if count == 0 or (pos - samplePos[(head + count - 2) % 8 + 1]).Magnitude > 1e-4 then
@@ -411,8 +420,6 @@ local filterMotion = function(root, pos, vel, now, airborne)
 		if measured.Magnitude > 260 then measured = nil end
 	end
 
-	-- Horizontal: the replicated velocity, nudged toward what was actually covered when the
-	-- two agree, and replaced by it when the replication reads still but the target is not.
 	local assemblyH = vel * H
 	local horiz = assemblyH
 	if measured then
@@ -426,8 +433,6 @@ local filterMotion = function(root, pos, vel, now, airborne)
 	end
 	local combined = Vector3.new(horiz.X, vel.Y, horiz.Z)
 
-	-- Smoothed at a rate that scales with how far the reading moved: steady movement stays
-	-- damped, a real change of direction or speed is followed within the frame.
 	local previous = st.velocity
 	local previousH = previous * H
 	local turned = horiz.Magnitude > 2 and previousH.Magnitude > 2 and horiz.Unit:Dot(previousH.Unit) < 0.65
@@ -441,7 +446,6 @@ local filterMotion = function(root, pos, vel, now, airborne)
 	end
 	local currentH = current * H
 
-	-- Knockback: a damage tick together with a jump in velocity, or a PlatformStand shove.
 	local damaged = finite(damageTime) and damageTime > 0 and damageTime ~= st.damageTime
 	st.damageTime = damageTime
 	local jolt = (current - previous) * H
@@ -461,11 +465,9 @@ local filterMotion = function(root, pos, vel, now, airborne)
 		local impulse = currentH - st.kbBase
 		local last = st.kbImpulse
 		if last and last.Magnitude > 4 and impulse.Magnitude > 4 and last.Unit:Dot(impulse.Unit) < 0.35 then
-			-- Sent the other way: that is the target moving again, not the knockback.
 			st.kbUntil, knocked = nil, false
 		elseif last and last.Magnitude > 3 and impulse.Magnitude > 3
 			and last.Unit:Dot(impulse.Unit) > 0.8 and impulse.Magnitude < last.Magnitude then
-			-- Learn this target's friction from the impulse dying away.
 			local decay = -math.log(impulse.Magnitude / last.Magnitude) / dt
 			if finite(decay) and decay > 0 then
 				st.kbDecay += (math.clamp(decay, 0.75, 8) - st.kbDecay) * 0.35
@@ -601,25 +603,17 @@ function module.IsTrajectoryClear(origin, solution, gravity, flight, params, tar
 	return true
 end
 
---[[ Aim point for a projectile (origin plus launch velocity) onto a moving target, or nil when
-no launch at this speed reaches it. The flight time comes back as a second value on every
-solved path, so a caller can walk the arc it is being pointed along.
+--[[ Aim point for a projectile (origin and launch speed) onto a moving target, and the flight time on
+every solved path so a caller can walk the arc, or nil when no launch at this speed reaches it. ping
+ages the target by up to 1 s; offset is the aimed part's offset from targetPos, carried along;
+playerJump is unused.
 
-  playerGravity, playerHeight -- the target's fall and its root height above its feet
-  playerJump                  -- accepted for older callers; unused
-  params                      -- RaycastParams for the world. Passing it (with an airborne
-                                 target and playerGravity) turns on the falling-target model
-  offset                      -- aimed part's offset from targetPos, carried along
-  ping                        -- extra seconds to age the target by (capped at 1)
-  airborne                    -- nil infers it from the vertical velocity
-  targetRoot                  -- the target's root BasePart. Passing it turns on the motion
-                                 filter above, whose knockback model is solved numerically
-
-Without params the target keeps a constant velocity, exactly as before. With them an airborne
-target falls under its own gravity -- solved exactly, not approximated -- until its feet meet a
-floor, and from then on keeps its run speed along it. The correction this replaced aimed at the
-landing spot with every bit of velocity lead thrown away, and its ray started inside the
-target's own legs, so any airborne target read as "landing half a stud below itself". ]]
+Without params the target keeps a constant velocity. With params, playerGravity and an airborne
+target (nil airborne is inferred from the vertical velocity), it falls under its own gravity, solved
+exactly, until its feet (playerHeight below the root) meet a floor, and from then on keeps its run
+speed along it, with the intercept after the landing. Passing targetRoot turns on filterMotion:
+during a knockback the push is carried as a decaying impulse on top of the pre-hit velocity rather
+than the full reading extrapolated for the whole flight, and that case is solved numerically. ]]
 function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, targetVelocity, playerGravity, playerHeight, playerJump, params, offset, ping, airborne, targetRoot)
 	local aimOffset = offset or Vector3.zero
 	local lead = (ping and ping > 0) and math.min(ping, 1) or 0
@@ -637,8 +631,6 @@ function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, tar
 		end
 	end
 
-	-- A knockback in flight carries as a decaying impulse on top of the pre-hit velocity,
-	-- not the full-strength reading the raw velocity would extrapolate for the whole flight.
 	local kbOffset
 	if motion and motion.knocked and motion.kbImpulse and motion.kbBase then
 		local impulse, decay, base = motion.kbImpulse, math.max(motion.kbDecay or 1.8, 1e-3), motion.kbBase
@@ -663,8 +655,6 @@ function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, tar
 	local g = playerGravity
 
 	if kbOffset then
-		-- Under its own gravity until the landing the plain solve would find, on the floor
-		-- from then: the vertical model is unchanged by the knockback's horizontal push.
 		local horizon = lead + 2 * (targetPos - origin).Magnitude / math.max(projectileSpeed, 1e-3)
 		local landTime, landPos = findLanding(targetPos, targetVelocity, g, height, params, horizon)
 		local velY = targetVelocity.Y
@@ -677,7 +667,6 @@ function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, tar
 			end)
 	end
 
-	-- Aged by the ping under its own gravity: position and velocity both.
 	local startPos = targetPos + targetVelocity * lead - Vector3.new(0, 0.5 * g * lead * lead, 0)
 	local startVel = targetVelocity - Vector3.new(0, g * lead, 0)
 	local aim, t = intercept(origin, projectileSpeed, gravity, startPos + aimOffset, startVel, g)
@@ -688,8 +677,6 @@ function module.SolveTrajectory(origin, projectileSpeed, gravity, targetPos, tar
 		return aim, t
 	end
 
-	-- On the floor before the projectile arrives: from the landing on it runs at its
-	-- horizontal speed, and the intercept has to come after the landing.
 	local flat = Vector3.new(targetVelocity.X, 0, targetVelocity.Z)
 	local groundStart = landPos + flat * (lead - landTime) + aimOffset
 	local groundAim, groundTime = intercept(origin, projectileSpeed, gravity, groundStart, flat, 0, landTime - lead)

@@ -1,3 +1,14 @@
+--[[ The entity library's state, and Events: signals made by name on first use (LocalAdded, EntityAdded,
+EntityRemoved and the rest). Disconnect swap-removes, moving the last record into the freed slot.
+
+Fire dispatches over a copy of the list. task.spawn runs each handler inline up to its first yield,
+and a handler may connect and disconnect while the dispatch is walking: applying a profile toggles a
+module off and back on for every option whose value differs, and the off empties that module's maid
+inside whatever Fire is running. On the live list a record swapped into a slot already passed would
+never be reached, so a handler connected when the event fired would miss it; a missed EntityRemoved
+leaves a nametag nothing will ever destroy or move, a missed EntityAdded a player who never gets
+one. The ConnectionIndex check skips a handler disconnected earlier in the same dispatch, as a real
+signal does. ]]
 local entitylib = {
 	isAlive = false,
 	character = {},
@@ -41,25 +52,6 @@ local entitylib = {
 				}
 			end
 
-			--[[ Dispatched over a copy of the list, not the list itself.
-
-			task.spawn resumes its function INLINE on this thread, so every handler runs
-			to its first yield before the next one is reached -- and a handler is free to
-			connect and disconnect while the dispatch is still walking. Applying a profile
-			does exactly that: it toggles a module off and straight back on for every
-			option whose value differs, and the off empties that module's maid from inside
-			whatever Fire happens to be running at the time.
-
-			Disconnect swap-removes -- it moves the LAST record down into the freed slot.
-			If that slot has already been passed, the record moved into it is never
-			reached, so a handler that was connected when the event fired silently misses
-			it. A missed EntityRemoved is a nametag with nothing left that will ever
-			destroy it or move it again; a missed EntityAdded is a player who never gets
-			one at all.
-
-			The ConnectionIndex read is what makes the copy safe in the other direction: a
-			handler disconnected earlier in this same dispatch is skipped rather than
-			called after the fact, which is the behaviour a real signal has. ]]
 			function event:Fire(...)
 				local connections = self.Connections
 				if not connections then return end
@@ -965,6 +957,10 @@ local function wallFilterCurrent()
 	return count == wallFilter.Count
 end
 
+--[[ Raycasts from origin to position and returns the hit, ignoring the camera, your character and every
+targetable character, so only the world counts as a wall. A table of extra objects joins that filter
+for one check; an Instance is used as the filter itself. The shared filter is rebuilt only when the
+characters in it changed (wallFilterCurrent) or the last check carried extras. ]]
 entitylib.Wallcheck = function(origin, position, ignoreobject)
 	if typeof(ignoreobject) ~= 'Instance' then
 		local extra = typeof(ignoreobject) == 'table'
@@ -984,7 +980,6 @@ entitylib.Wallcheck = function(origin, position, ignoreobject)
 				for _, obj in ignoreobject do
 					table.insert(ignorelist, obj)
 				end
-				-- this filter carries the caller's extras, so the next plain check rebuilds
 				wallFilter.Count = -1
 			else
 				wallFilter.Count = #characters
@@ -1056,14 +1051,16 @@ local function defaultCandidateBefore(first, second)
 	return first.DistanceSq < second.DistanceSq
 end
 
+--[[ Inserts a candidate into candidateBuffer, kept in defaultCandidateBefore order (the current target
+first, then the nearest), and returns the new count. At the limit a candidate that does not beat the
+last entry is dropped; one that does copies its values into that evicted record, because the scratch
+record at limit + 1 is handed out again for the next entity and must never enter the buffer. ]]
 local function insertCandidate(count, candidate, limit)
 	if limit and count >= limit then
 		local evicted = candidateBuffer[count]
 		if not defaultCandidateBefore(candidate, evicted) then
 			return count
 		end
-		-- The scratch record at limit + 1 is handed out again for the next entity, so it must
-		-- never enter the buffer: the evicted record takes over its values instead.
 		evicted.Entity, evicted.DistanceSq, evicted.Target = candidate.Entity, candidate.DistanceSq, candidate.Target
 		candidate = evicted
 	else
@@ -1085,11 +1082,13 @@ local function finishQuery(settings, result)
 	return result
 end
 
+--[[ Returns the entity's partName part when the query may target it: the kind the settings allow (player
+or NPC), targetable and vulnerable, and with Ignore Milo (the Targets row) not a player hidden in a
+disguise the game says is one. ]]
 local function entityPartIsEligible(entity, settings, partName)
 	if not settings.Players and entity.Player then return end
 	if not settings.NPCs and entity.NPC then return end
 	if not entity.Targetable then return end
-	-- Ignore Milo (the Targets row): a player hidden in a disguise the game says is one.
 	if settings.Milo and entity.Player and entitylib.isDisguised(entity) then return end
 	local part = entity[partName]
 	if not part or not entitylib.isVulnerable(entity) then return end
@@ -1123,6 +1122,12 @@ local function getPositionCacheKey(settings, partName, range)
 	}
 end
 
+--[[ Returns the entities whose part lies within the coverage radius of origin, from a short-lived cache
+per query shape. A list built at one origin covers range * 1.5, at least 20 studs, and answers a
+query of range only while neither side can have closed the spare margin: you may have moved at most
+half of it, and the lifetime of 0.06 s (0.12 s in low-end mode) bounds a target's move in the other
+half. At the smallest margin (about 6.7 studs, a 13.3 stud range) half is 3.3 studs, which 0.06 s
+covers for anything slower than about 55 studs/s. ]]
 local function getPositionCandidates(settings, origin, range, partName, now)
 	local key = getPositionCacheKey(settings, partName, range)
 	local cache = positionCaches[key]
@@ -1138,12 +1143,6 @@ local function getPositionCandidates(settings, origin, range, partName, now)
 		positionCacheOrder[#positionCacheOrder + 1] = key
 	end
 
-	-- The list holds everything that was inside CoverageRadius of the origin it was built
-	-- at, so it only answers a query of `range` while neither end can have closed the spare
-	-- margin in between: we may have moved at most half of it, and the short lifetime below
-	-- bounds how far a target can have moved in the other half. Reused for a full second
-	-- with no check on movement, it let a player who closed in quickly stand inside the
-	-- aura's range for most of a second without ever being a candidate.
 	local reusable = cache.Version == positionCacheVersion
 		and cache.ExpiresAt and now < cache.ExpiresAt
 	if reusable and cache.CoverageRadius ~= math.huge then
@@ -1174,8 +1173,6 @@ local function getPositionCandidates(settings, origin, range, partName, now)
 		end
 	end
 
-	-- At the smallest margin the coverage formula produces (~6.7 studs, a 13.3 stud range)
-	-- half of it is 3.3 studs, which 0.06s covers for anything slower than ~55 studs/s.
 	cache.Origin = origin
 	cache.CoverageRadius = coverageRadius
 	cache.ExpiresAt = now + (lowEndMode() and 0.12 or 0.06)
@@ -1515,36 +1512,29 @@ entitylib.getEntity = function(char)
 	return nil
 end
 
---[[ A build is owned by a token in EntityThreads, not by its thread.
+--[[ Builds the entity for a character in a thread of its own, which waits for its Humanoid, root part
+and head, then registers it and fires LocalAdded or EntityAdded.
 
-The builder can sit in WaitForChild for up to ten seconds, and a stale one used to be ended
-with task.cancel from removeEntity and stop(). Cancelling a thread the engine is still holding
-for a wait is not safe -- the engine still means to resume it -- so nothing kills this builder
-any more. removeEntity, stop() and removePlayer only take its token away, and the builder
-checks after every wait and walks away once the token is no longer its own.
+A build is owned by a token in EntityThreads, not by its thread. The builder can sit in a wait for
+up to ten seconds (the root part under StreamingEnabled has no limit), and cancelling a thread the
+engine still holds for a wait is not safe, so removeEntity, stop() and removePlayer only take the
+token away; the builder checks it after every wait and walks away once the entry holds another token
+or none. It also walks away once its player has left, since removePlayer looks entities up by Player
+while a build in flight is keyed by character.
 
-It also walks away once its player has left. removePlayer looks the entity up by Player while
-a build in flight is keyed by character, so that build was never found there and finished
-afterwards, leaving an entity in the list that nothing would ever take out.
-
-The token is stored BEFORE task.spawn. The body has no yield at all when the character is
-already streamed in -- WaitForChild returns at once for a child that exists, and
-waitForChildOfType breaks before its first task.wait -- so the whole build, its release of the
-entry included, is over by the time task.spawn returns. An entry written after that would
-belong to a build that has already finished, and the guard on the first line would refuse the
-character from then on. ]]
+The token is stored before task.spawn: with the character already streamed in the body never yields,
+so the whole build, its release included, is over before task.spawn returns, and an entry written
+afterwards would refuse the character from then on. EntityThreads is held as a local because kill()
+strips every field off entitylib while a builder may still be waiting. ]]
 entitylib.addEntity = function(char, plr, teamfunc, spawntime)
 	if not char or entitylib.EntityByCharacter[char] or entitylib.EntityThreads[char] then return end
 
-	-- Held as a local: kill() strips every field off entitylib, and a builder still waiting
-	-- when that happens has to find its entry gone, not index a table that is no longer there.
 	local threads = entitylib.EntityThreads
 	local token = {}
 	threads[char] = token
 	local function wanted()
 		return threads[char] == token and not (plr and plr.Parent == nil)
 	end
-	-- Only ever clears its own entry: a newer build for the same character may own it by now.
 	local function release()
 		if threads[char] == token then
 			threads[char] = nil
@@ -1605,30 +1595,18 @@ entitylib.addEntity = function(char, plr, teamfunc, spawntime)
 				countStat('EntityAdds')
 				entitylib.Events.EntityAdded:Fire(entity)
 			end
-			--[[table.insert(entity.Connections, char.ChildRemoved:Connect(function(part)
-				if (part == humrootpart or part == hum or part == head) then
-					local found = char:FindFirstChild(part.Name)
-					if found then
-						if part == humrootpart then
-							entity.HumanoidRootPart = found
-							entity.RootPart = found
-							humrootpart = found
-							return
-						elseif part == head then
-							entity.Head = found
-							head = found
-							return
-						end
-					end
-					entitylib.removeEntity(char, plr == lplr)
-				end
-			end))]]
 		end
 
 		release()
 	end)
 end
 
+--[[ Takes an entity out of the library and fires LocalRemoved (isLocal) or EntityRemoved; the list
+swap-removes and fixes the moved entity's index. Clearing a character's EntityThreads entry is all
+the library's own builder needs to stop. An entry that is still a thread comes from a game file's
+own addEntity, which has no such check and would finish anyway, so it is cancelled too: cleared
+first, and only while suspended, because the removal and EntityRemoved have to run even for a stale
+entry. ]]
 entitylib.removeEntity = function(char, isLocal)
 	if isLocal then
 		if entitylib.isAlive then
@@ -1648,19 +1626,12 @@ entitylib.removeEntity = function(char, isLocal)
 			markRaycastFilterDirty()
 			countStat('EntityRemoves')
 			entitylib.Events.LocalRemoved:Fire(entity)
-			--[[ table.clear(entitylib.character) ]]
 		end
 
 		return
 	end
 
 	if char then
-		--[[ Clearing the entry is all the library's own builder needs: it looks for its
-		token after every wait and stops once it is gone. An entry that is still a thread
-		comes from a game file's own addEntity, which has no such check and would finish
-		its build anyway, so that one is still cancelled -- cleared first, and only while
-		suspended, because everything below this point (the List removal and
-		Events.EntityRemoved) has to run even if the entry is stale. ]]
 		local builder = entitylib.EntityThreads[char]
 		if builder then
 			entitylib.EntityThreads[char] = nil
@@ -1729,6 +1700,9 @@ entitylib.addPlayer = function(plr)
 	}
 end
 
+--[[ Drops a leaving player's connections and entity. A build still waiting on the player's character is
+keyed by the character, which the lookup by Player never finds, so its token is taken here and the
+build stops after its current wait. ]]
 entitylib.removePlayer = function(plr)
 	if entitylib.PlayerConnections[plr] then
 		for _, v in entitylib.PlayerConnections[plr] do
@@ -1739,8 +1713,6 @@ entitylib.removePlayer = function(plr)
 		entitylib.PlayerConnections[plr] = nil
 	end
 
-	-- A build still waiting on this player's character is keyed by the character, which the
-	-- lookup by Player below never finds. Taking its token stops it after its current wait.
 	local char = plr.Character
 	local builder = char and entitylib.EntityThreads[char]
 	if builder and type(builder) ~= 'thread' then
@@ -1775,6 +1747,9 @@ entitylib.start = function()
 	entitylib.Running = true
 end
 
+--[[ Disconnects everything, removes every entity (the local one included) with its removed event, and
+clears all tables and position caches. Builders holding a token stop because EntityThreads is
+cleared; only thread entries from a game file's own addEntity are cancelled, while suspended. ]]
 entitylib.stop = function()
 	for _, v in entitylib.Connections do
 		v:Disconnect()
@@ -1794,7 +1769,6 @@ entitylib.stop = function()
 		entitylib.removeEntity(entity.Character)
 	end
 
-	-- Tokens need nothing here: clearing the table below is what stops those builders.
 	for _, thread in entitylib.EntityThreads do
 		if type(thread) == 'thread' and coroutine.status(thread) == 'suspended' then
 			pcall(task.cancel, thread)
@@ -1815,6 +1789,9 @@ entitylib.stop = function()
 	entitylib.Running = false
 end
 
+--[[ Stops the library if it is running, destroys every event and strips entitylib of its fields.
+IgnoreObject is a RaycastParams, a datatype with no Destroy (indexing one throws), so only its
+filter list is emptied. ]]
 entitylib.kill = function()
 	if entitylib.Running then
 		entitylib.stop()
@@ -1824,8 +1801,6 @@ entitylib.kill = function()
 		event:Destroy()
 	end
 
-	-- RaycastParams is a datatype with no Destroy (indexing it throws); drop its filter list
-	-- and let loopClean below nil the field.
 	if entitylib.IgnoreObject then
 		entitylib.IgnoreObject.FilterDescendantsInstances = {}
 	end

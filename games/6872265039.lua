@@ -18,6 +18,23 @@ end
 -- Solara and Xeno support. Approach credit: stxvv (gitlab.com/stxvv/bedwarsdeps).
 -- Written for pistonware from BedWars' own modules; no code from that project is included.
 local exec = shared.PistonwareExec
+--[[ Probes what this executor can do and keeps the answers in shared.PistonwareExec. exec.hide takes a
+module out of the menu and keeps the reason for a later notice, before or after the module exists.
+
+Solara's require runs a module's code again instead of handing back the game's copy, and when that
+code errors (KnitClient does) the calling thread is left at identity 2 without its executor
+capabilities: file calls, gethui and CoreGui refuse it from then on, pcall or not.
+exec.isolatedRequire makes each such require in a thread of its own; one still running at the
+timeout counts as failed. NativeRequire: require is Roblox's own C function. Require counts only
+when the same module comes back twice, tried on modules that just build a table, never on
+PlayerModule, which a re-running require would turn into a second camera and control stack. Live:
+require returns the modules the game runs, which only BedWars' KnitClient can show (a re-run copy
+has an empty Controllers table); the BedWars files also set it once Knit has started.
+
+getnamecallmethod is trusted when hookmetamethod exists, or when a pass-through wrapper on the raw
+__namecall reports 'GetService' for one game:GetService call; nothing may be written to Delta's
+metatable at load, so Delta is not tested. Full: every capability the scripts assume; a place with
+no module to try require on does not decide it. ]]
 if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 	local function probeExecutor()
 		local exec = {}
@@ -28,12 +45,6 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			local ok, result = pcall(check)
 			return ok and result == true
 		end
-		--[[ Solara's require runs a module's code again instead of handing back the game's copy, and when
-		that code errors (KnitClient does) the thread that called require is left at identity 2 without its
-		executor capabilities: file calls, gethui and CoreGui all refuse it from then on, and pcall does not
-		prevent it. A require made in a thread of its own costs only that thread, so the probe requires
-		through here, and so can any later require that may fail (exec.isolatedRequire). Returns what pcall
-		would; a require still running when the timeout ends counts as failed, with no error value. ]]
 		local function isolatedRequire(module, timeout)
 			local finished, ok, result = false, false, nil
 			task.spawn(function()
@@ -48,10 +59,6 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			return ok, result
 		end
 		exec.isolatedRequire = isolatedRequire
-		--[[ Roblox's own require is a C function. Solara's is written in Lua (its init script): it runs a
-		module's code again instead of handing back the game's copy, and Knit's code fails there with its
-		error printed to the console. Where there is no debug library to reach Knit by either, nothing
-		tries KnitClient through such a require: not the Live check below, not the BedWars files. ]]
 		exec.NativeRequire = passes(function()
 			return debug.info(require, 's') == '[C]'
 		end)
@@ -61,12 +68,6 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 		end)
 		exec.Name = (named and type(name) == 'string') and name or ''
 
-		--[[ Roblox's own require exists everywhere: what counts is whether it hands back a game module.
-		It is tried only on modules whose bodies just build a table (PlayerModule's helpers, roblox-ts'
-		RuntimeLib), never on PlayerModule itself: a require that re-ran modules instead of handing back
-		the game's cached ones would build a second camera and control stack from it. Asked twice, the
-		same module has to come back. A place with none of these leaves require untried, which does not
-		count against Full below. ]]
 		local requireTarget
 		pcall(function()
 			local scripts = game:GetService('Players').LocalPlayer:FindFirstChild('PlayerScripts')
@@ -94,11 +95,6 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 			end
 			return debug.getupvalue(probeUpvalueHolder, 1) == marker
 		end)
-		--[[ Live: require hands back the modules the game itself runs, not fresh copies of them. Only
-		BedWars' Knit can show that from here: the game registers every controller in KnitClient's
-		Controllers table, which a re-run copy holds empty. Everywhere else it stays false. An injection
-		made before the game registered them sees an empty table too, so the BedWars files also set it
-		once Knit has started through require. ]]
 		exec.Live = exec.Require and passes(function()
 			local node = game:GetService('ReplicatedStorage')
 			for _, step in {'rbxts_include', 'node_modules', '@easy-games', 'knit', 'src', 'Knit'} do
@@ -106,13 +102,11 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 				if not node then return false end
 			end
 			local client = node:FindFirstChild('KnitClient')
-			-- KnitClient waits for its Services folder, so without one this would hang
 			if not (client and node:FindFirstChild('Services')) then return false end
 			if not exec.NativeRequire and not exec.Debug then return false end
 			local loaded, knit = isolatedRequire(client)
 			return loaded and type(knit) == 'table' and type(knit.Controllers) == 'table' and next(knit.Controllers) ~= nil
 		end)
-		-- Tried in a throwaway thread, so the check cannot leave this one at another identity.
 		exec.Identity = present(setthreadidentity) and passes(function()
 			local thread = coroutine.create(function()
 				local level = 8
@@ -135,11 +129,6 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 		exec.HookFunction = present(hookfunction)
 		exec.HookMetamethod = present(hookmetamethod)
 
-		--[[ getnamecallmethod is trusted only once something proves it. hookmetamethod is how full
-		executors hook namecalls, and its presence is taken as proof. Without it, a pass-through wrapper
-		goes on the raw __namecall for exactly one call of our own, game:GetService, which has to report
-		'GetService'; the original goes straight back whatever happens. Delta is not tested that way:
-		nothing may be written to its metatable at load (see the Delta notes in 6872274481.lua). ]]
 		exec.Namecall = false
 		if present(getnamecallmethod) then
 			if exec.HookMetamethod then
@@ -204,13 +193,9 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 		exec.HttpGet = passes(function()
 			return type(game.HttpGet) == 'function'
 		end)
-		-- Everything the scripts were first written against: on such an executor nothing changes.
-		-- A place with no module to try require on (requireTarget nil) does not decide it.
 		exec.Full = (exec.Require or requireTarget == nil) and exec.Identity and exec.Rawmeta
 			and exec.Namecall and exec.HookFunction and exec.Connections and exec.Debug
 
-		-- Takes a module out of the list on this executor and keeps the reason for a later notice.
-		-- Safe before the module exists (only the reason is kept) and after it was created.
 		function exec.hide(moduleName, reason)
 			if type(moduleName) ~= 'string' then return end
 			local hidden = shared.PistonwareHidden
@@ -219,9 +204,9 @@ if not (type(exec) == 'table' and type(exec.hide) == 'function') then
 				shared.PistonwareHidden = hidden
 			end
 			hidden[moduleName] = reason or 'not supported on this executor'
-			local vape = shared.vape
-			if type(vape) == 'table' and type(vape.Modules) == 'table' and vape.Modules[moduleName] ~= nil then
-				pcall(vape.Remove, vape, moduleName)
+			local slinky = shared.slinky
+			if type(slinky) == 'table' and type(slinky.modules) == 'table' and slinky.modules[moduleName] ~= nil then
+				pcall(slinky.remove, slinky, moduleName)
 			end
 		end
 		return exec
@@ -285,12 +270,16 @@ local coreGui = (function()
 end)()
 
 local lplr = playersService.LocalPlayer
-local vape = shared.vape
-local entitylib = vape.Libraries.entity
-local sessioninfo = vape.Libraries.sessioninfo
+local slinky = shared.slinky
+local combat = slinky.categories.Combat
+local utility = slinky.categories.Utility
+local minigames = slinky.categories.Minigames
+local legit = slinky.legit
+local entitylib = slinky.libraries.entity
+local sessioninfo = slinky.libraries.sessioninfo
 local bedwars = {}
 
-sessioninfo = sessioninfo or vape.Libraries.sessioninfo
+sessioninfo = sessioninfo or slinky.libraries.sessioninfo
 if type(sessioninfo) ~= 'table' or type(sessioninfo.Objects) ~= 'table' or type(sessioninfo.AddItem) ~= 'function' then
 	local added = 0
 	sessioninfo = {
@@ -313,33 +302,37 @@ if type(sessioninfo) ~= 'table' or type(sessioninfo.Objects) ~= 'table' or type(
 			}
 		end
 	}
-	vape.Libraries.sessioninfo = sessioninfo
+	slinky.libraries.sessioninfo = sessioninfo
 end
 
 local function notif(...)
-	return vape:CreateNotification(...)
+	return slinky:notify(...)
 end
 
---[[ Knit out of reach (Solara, Xeno): the lobby's bedwars table rebuilt from the game itself, so the
-modules below run as they are. Remotes come by name through exec.net, data from games/bedwars-data.json
-(exec.loadData), and the store's slices from what the game pushes and answers:
-  Party                    the reducer's default (you, solo), then partyInfoEvent; asked for once
-                           with requestPartyInfo, which the server answers once you have a party
-  Consumable.inventory     ConsumableUpdate, push-only: empty until the game sends one
-  Lobby.profileData        RequestProfileData replies (ClaimRewards asks every 30 s)
-  Bedwars.playerLevel      the PlayerLevel attribute, PlayerLevelUpdate and profile replies
-  milestoneRewardsClaimed  MilestoneRewardUpdate, push-only
-CrateAltarController reads the RewardCrate-tagged crates and sends SpawnRewardCrate/OpenRewardCrate.
-UserInputController answers the server's RequestUserInputType a frame after the game does, so a type
-DeviceSpoofer sets on it is the one the server keeps. ]]
+--[[ Builds the lobby's bedwars table without Knit (Solara, Xeno) from the game itself, so the lobby
+modules run unchanged. Remotes come by name through exec.net, static data from
+games/bedwars-data.json through exec.loadData, and the store's state from what the game pushes and
+answers.
+
+Party starts as the lobby reducer's own default, you leading a party of one, not queued: the server
+only has a party for you once you queue or join one, and only then answers requestPartyInfo.
+Consumable.inventory (ConsumableUpdate) and the claimed milestones (MilestoneRewardUpdate) are
+push-only and stay empty until the game sends them. Lobby.profileData comes from the
+RequestProfileData replies ClaimRewards dispatches (every 30 s at most), the player level from the
+PlayerLevel attribute, PlayerLevelUpdate and those replies. Store:dispatch handles only the two
+actions the lobby modules send.
+
+CrateAltarController lists the RewardCrate-tagged crates by their altarId attribute.
+UserInputController follows the game's rule: a gamepad, a touch screen without a mouse, or PC. Once
+its getUserInputType is replaced (DeviceSpoofer), it answers the server's RequestUserInputType
+deferred, after the game's own answer, so that type is the one the server keeps. QueryUtil uses the
+gamecore_GameQueryIgnore attribute, game-core's GameQueryUtil ignore list that the game's targeting
+reads. ]]
 local function knitlessLobby()
 	local net = exec.net
-	local Client = net.client(replicatedStorage.rbxts_include.node_modules['@rbxts'].net.out._NetManaged)
+	local client = net.client(replicatedStorage.rbxts_include.node_modules['@rbxts'].net.out._NetManaged)
 	local collectionService = cloneref(game:GetService('CollectionService'))
 	local state = {
-		--[[ The lobby's party reducer starts here too: you, leading a party of one, not queued. The
-		server only has a party for you once you queue or join one, and only then answers
-		requestPartyInfo; until then this default is the game's own state as well. ]]
 		Party = {
 			leader = {userId = lplr.UserId, name = lplr.Name, displayName = lplr.DisplayName},
 			members = {},
@@ -351,11 +344,11 @@ local function knitlessLobby()
 		Bedwars = {playerLevel = tonumber(lplr:GetAttribute('PlayerLevel')) or 0}
 	}
 	local consumablesKnown = false
-	local layer = {Knitless = true, Client = Client}
+	local layer = {Knitless = true, Client = client}
 
 	local function listen(name, callback)
 		pcall(function()
-			vape:Clean(Client:Get(name):Connect(callback))
+			slinky:clean(client:Get(name):Connect(callback))
 		end)
 	end
 	listen('ConsumableUpdate', function(data)
@@ -370,13 +363,13 @@ local function knitlessLobby()
 	listen('MilestoneRewardUpdate', function(claimed)
 		if type(claimed) == 'table' then state.Bedwars.milestoneRewardsClaimed = claimed end
 	end)
-	vape:Clean(lplr:GetAttributeChangedSignal('PlayerLevel'):Connect(function()
+	slinky:clean(lplr:GetAttributeChangedSignal('PlayerLevel'):Connect(function()
 		local level = tonumber(lplr:GetAttribute('PlayerLevel'))
 		if level then state.Bedwars.playerLevel = level end
 	end))
 	pcall(function()
 		local events = net.events('@easy-games/lobby:shared/event/lobby-events@getEvents.Events')
-		vape:Clean(events:FindFirstChild('partyInfoEvent').OnClientEvent:Connect(function(data)
+		slinky:clean(events:FindFirstChild('partyInfoEvent').OnClientEvent:Connect(function(data)
 			if type(data) == 'table' and type(data.party) == 'table' then state.Party = data.party end
 		end))
 		events:FindFirstChild('requestPartyInfo'):FireServer()
@@ -388,7 +381,6 @@ local function knitlessLobby()
 	function Store:getState()
 		return state
 	end
-	-- The two actions the lobby modules send; everything else stays with the game's own store.
 	function Store:dispatch(action)
 		if type(action) ~= 'table' then return end
 		if action.type == 'LobbySetProfileData' and type(action.profileData) == 'table' then
@@ -405,9 +397,8 @@ local function knitlessLobby()
 		return not consumablesKnown
 	end
 
-	local rewardCrate = Client:GetNamespace('RewardCrate')
+	local rewardCrate = client:GetNamespace('RewardCrate')
 	layer.CrateAltarController = {
-		-- activeCrates[altarId]: the crates on that altar, as the game's component lists them.
 		activeCrates = setmetatable({}, {__index = function(_, altarId)
 			local crates = {}
 			for _, crate in collectionService:GetTagged('RewardCrate') do
@@ -434,24 +425,22 @@ local function knitlessLobby()
 		return state.Bedwars.milestoneRewardsClaimed or {}
 	end}
 
-	-- The game's own rule (user-input-controller): a gamepad, a touch screen without a mouse, or PC.
-	local UserInputController = {getUserInputType = function()
+	local userInputController = {getUserInputType = function()
 		if inputService.GamepadEnabled then return 'GAMEPAD' end
 		if inputService.TouchEnabled and not inputService.MouseEnabled then return 'MOBILE' end
 		return 'PC'
 	end}
-	local realInputType = UserInputController.getUserInputType
-	layer.UserInputController = UserInputController
+	local realInputType = userInputController.getUserInputType
+	layer.UserInputController = userInputController
 	listen('RequestUserInputType', function()
-		if UserInputController.getUserInputType == realInputType then return end
+		if userInputController.getUserInputType == realInputType then return end
 		task.defer(function()
 			pcall(function()
-				Client:Get('SendUserInputType'):SendToServer({userInputType = UserInputController:getUserInputType()})
+				client:Get('SendUserInputType'):SendToServer({userInputType = userInputController:getUserInputType()})
 			end)
 		end)
 	end)
 
-	-- game-core's GameQueryUtil keeps its ignore list as this attribute, which the game's targeting reads.
 	layer.QueryUtil = {
 		setQueryIgnored = function(_, part, ignored)
 			if ignored == nil then ignored = true end
@@ -469,7 +458,6 @@ local function knitlessLobby()
 		local name = crateNames[itemType]
 		return name and {displayName = name} or nil
 	end
-	-- AchievementUtil.hasUnclaimedRewards, as the game has it: achieved, rewards listed, not yet claimed.
 	local ids = exec.loadData('lobby', 'AchievementIds')
 	local rewards = exec.loadData('lobby', 'AchievementRewards')
 	if ids and rewards then
@@ -485,34 +473,43 @@ local function knitlessLobby()
 	return layer
 end
 
+--[[ Finds BedWars' Knit and builds the lobby's bedwars table from it: Client is the remotes client,
+Store the UI's ClientStore, and every other field is looked up in knit.Controllers on first use.
+
+With the debug library Knit comes from an upvalue of the knit module's setup, and the wait for its
+start has no limit. Without one but with Roblox's own require (exec.NativeRequire), KnitClient's own
+export is required, as 6872274481.lua does, and waited on for at most 30 s: a require that hands
+back a fresh copy never starts and must not hold up the rest of the file. Each try runs through
+exec.isolatedRequire, because on Solara KnitClient errors and would leave this thread without its
+executor capabilities; an error ends the wait, since a module that failed to load fails again. Knit
+started that way sets exec.Live.
+
+QueueMeta (AutoQueue's mode list) and getCrateItemMeta (AutoGamble's reward names, the lookup the
+game's crate reveal uses) are each required under their own pcall, so a moved module costs only
+that. Without Knit the knitless layer from knitlessLobby is used where exec.net exists. Knit out of
+reach (no debug library and no Roblox require) is logged as a warning, not an error, since it is
+expected on Solara and Xeno; needsKnit then hides the modules that need it. ]]
 run(function()
 	local function dumpRemote(tab)
 		local ind = table.find(tab, 'Client')
 		return ind and tab[ind + 1] or ''
 	end
 
-	local KnitInit, Knit, knitError
+	local knitInit, knit, knitError
 	if exec.Debug then
 		repeat
-			KnitInit, Knit = pcall(function() return debug.getupvalue(require(lplr.PlayerScripts.TS.knit).setup, 9) end)
-			if KnitInit then break end
+			knitInit, knit = pcall(function() return debug.getupvalue(require(lplr.PlayerScripts.TS.knit).setup, 9) end)
+			if knitInit then break end
 			task.wait()
-		until KnitInit
-		if not debug.getupvalue(Knit.Start, 1) then
-			repeat task.wait() until debug.getupvalue(Knit.Start, 1)
+		until knitInit
+		if not debug.getupvalue(knit.Start, 1) then
+			repeat task.wait() until debug.getupvalue(knit.Start, 1)
 		end
 	elseif exec.Require and exec.NativeRequire then
-		--[[ No debug library, but Roblox's own require (exec.NativeRequire): KnitClient's own export,
-		the way 6872274481.lua takes it.
-		Its Controllers table is public and OnStart resolves once Knit has started. Bounded, unlike
-		the path above: a require that hands back a fresh copy instead of the game's module never
-		starts, and must not hold up the rest of this file. Each try runs in a thread of its own
-		(exec.isolatedRequire): on Solara KnitClient errors, which would leave this thread without its
-		executor capabilities. An error ends the wait, since a module that failed to load fails again. ]]
 		local deadline = os.clock() + 30
 		local started = false
 		local observing = false
-		while os.clock() < deadline and vape.Loaded ~= nil do
+		while os.clock() < deadline and slinky.loaded ~= nil do
 			local found, knitClient = pcall(function()
 				return replicatedStorage.rbxts_include.node_modules['@easy-games'].knit.src.Knit.KnitClient
 			end)
@@ -534,8 +531,7 @@ run(function()
 					end)
 				end
 				if started and next(client.Controllers) ~= nil then
-					Knit = client
-					-- started through require: the game's own KnitClient (exec.Live)
+					knit = client
 					exec.Live = true
 					break
 				end
@@ -543,9 +539,7 @@ run(function()
 			task.wait(0.1)
 		end
 	end
-	if not Knit then
-		--[[ Expected with no debug library and no Roblox require (Solara, Xeno): a warning, not an error
-		dump on every boot. The modules below that need Knit are not offered then (needsKnit). ]]
+	if not knit then
 		if knitError or (exec.Require and exec.NativeRequire) then
 			bufferCall('error', 'lobby.knit', knitError and 'KnitClient does not load through require here: '..knitError
 				or 'Knit did not start within 30s through require')
@@ -556,24 +550,21 @@ run(function()
 		end
 	end
 
-	if Knit then
-		local Client = require(replicatedStorage.TS.remotes).default.Client
+	if knit then
+		local client = require(replicatedStorage.TS.remotes).default.Client
 
 		bedwars = setmetatable({
-			Client = Client,
+			Client = client,
 			Store = require(lplr.PlayerScripts.TS.ui.store).ClientStore
 		}, {
 			__index = function(self, ind)
-				rawset(self, ind, Knit.Controllers[ind])
+				rawset(self, ind, knit.Controllers[ind])
 				return rawget(self, ind)
 			end
 		})
-		-- AutoQueue's mode list. Guarded on its own: a moved module costs that list, not the
-		-- controllers every other lobby module needs from this table.
 		pcall(function()
 			bedwars.QueueMeta = require(replicatedStorage.TS.game['queue-meta']).QueueMeta
 		end)
-		-- AutoGamble's reward names: the lookup the game's own crate reveal uses, guarded the same way.
 		pcall(function()
 			bedwars.getCrateItemMeta = require(replicatedStorage.TS['reward-crate']['crate-item']['crate-item-meta']).getCrateItemMeta
 		end)
@@ -591,36 +582,36 @@ run(function()
 	local wins = sessioninfo:AddItem('Wins')
 	local games = sessioninfo:AddItem('Games')
 
-	vape:Clean(function()
+	slinky:clean(function()
 		table.clear(bedwars)
 	end)
 end)
 
 for _, v in {'AntiRagdoll', 'TriggerBot', 'SilentAim', 'AutoRejoin', 'Rejoin', 'Disabler', 'Timer', 'ServerHop', 'MouseTP', 'MurderMystery', 'Swim', 'Jesus', 'Invisible', 'Desync', 'Waypoints', 'PlayerModel', 'Schematica'} do
-	vape:Remove(v)
+	slinky:remove(v)
 end
 
 --[[ Two bugs in the three lines this replaces, and they hid each other.
 
-It called vape:Remove(i), and `i` is not declared anywhere in this file -- it was an
+It called slinky:Remove(i), and `i` is not declared anywhere in this file -- it was an
 undeclared global, so every call was Remove(nil). Remove looks its argument up in
 self.Modules and bails when it finds nothing, so the loop silently did nothing at all and the
 lobby kept showing the combat modules this is meant to strip.
 
 The second bug is why it cannot simply be corrected in place: Remove ends with `tab[obj] =
-nil`, so fixing the argument would have it deleting keys out of vape.Modules while this loop
-is still walking vape.Modules. Removing a key other than the one `next` is currently sitting
+nil`, so fixing the argument would have it deleting keys out of slinky.Modules while this loop
+is still walking slinky.Modules. Removing a key other than the one `next` is currently sitting
 on is undefined in Lua -- in practice it skips entries or errors mid-iteration.
 
 Collect first, remove after: the walk finishes before anything is mutated. ]]
 local toRemove = {}
-for name, module in (vape.EachModule and vape:EachModule() or vape.Modules) do
-	if module.Category == 'Combat' or module.Category == 'Minigames' then
+for name, module in (slinky.eachModule and slinky:eachModule() or slinky.modules) do
+	if module.category == 'Combat' or module.category == 'Minigames' then
 		table.insert(toRemove, name)
 	end
 end
 for _, name in toRemove do
-	vape:Remove(name)
+	slinky:remove(name)
 end
 
 --[[ With neither Knit nor the knitless layer (an executor without exec.net) bedwars stays empty, so a
@@ -632,31 +623,33 @@ local function needsKnit(name)
 	return true
 end
 
+--[[ Sprint
+Keeps you sprinting: the game's SprintController starts sprinting again whenever it stops.
+
+Without Knit (Solara, Xeno) there is no controller to hook, so the module does what startSprinting
+does to your character from outside it. The game's sprint is client-only, WalkSpeed going from
+SprintConstants.WALK_SPEED (14) to RUN_SPEED (20), each times the status multiplier, so a walking
+speed the game set is raised by 20/14 and a speed set while the game sprints you itself (its
+Sprinting attribute), or one this set, is left alone. Nothing changes during freecam. It is checked
+each Heartbeat, not from a Changed handler, which must never write properties.
+
+The game's sprint also tweens the camera to FovController:getFOV() * 1.1 (RUN_FOV_MULT) over 0.1 s
+while you move and back when you stop. Without Knit there is no FovController, and the FOV module
+(universal.lua) writes the camera every frame while it is on, so the view is widened only while that
+module is off, from the FOV the camera rests on, and restored only over its own widening still on
+screen. Each edge sets the FOV rather than multiplying the live value, which would compound frame on
+frame. On touch screens the game's mobile sprint button is hidden while the module is on. ]]
 run(function()
-	local Sprint
+	local sprint
 	local old
 
-	--[[ Without Knit (Solara, Xeno) there is no SprintController to hook, so this does what its
-	startSprinting does to your character, from outside it, and nothing to the camera: the game's sprint
-	is client-only, WalkSpeed going from SprintConstants.WALK_SPEED (14) to RUN_SPEED (20), each times
-	the status multiplier. So a walking speed the game set (its Sprinting attribute is off) is raised to
-	the matching run speed; a speed set while the game sprints itself, or one this set, is left alone.
-	Checked each Heartbeat, not from a Changed handler, which must never write properties. ]]
 	local RUN_SCALE = 20 / 14
-	-- SprintConstants.RUN_FOV_MULT: the game's own startSprinting tweens the camera to
-	-- FovController:getFOV() * 1.1 over 0.1 s and tweens it back when you stop.
 	local RUN_FOV_MULT = 1.1
 	local raisedTo, raisedOn
 	local fovBase, fovTween
-	--[[ The game's FovController owns the base FOV and its sprint widens relative to it. Without Knit
-	there is none, and pistonware's own FOV module (universal.lua) writes the camera every frame while
-	it is on. So this never fights it: the camera is widened only while the FOV module is OFF, from
-	whatever FOV the camera is resting on, and it is handed back the moment the FOV module (or a game
-	effect) owns the camera again. Each edge SETS the FOV, never multiplies the live value frame on
-	frame -- the compounding that glitched the camera before. ]]
 	local function fovModuleOwns()
-		local fov = vape.Modules and vape.Modules.FOV
-		return fov ~= nil and fov.Enabled == true
+		local fov = slinky.modules and slinky.modules.FOV
+		return fov ~= nil and fov.enabled == true
 	end
 	local function tweenSprintFov(target)
 		if fovTween then pcall(function() fovTween:Cancel() end) end
@@ -665,7 +658,6 @@ run(function()
 		fovTween = tweenService:Create(camera, TweenInfo.new(0.1, Enum.EasingStyle.Linear), {FieldOfView = target})
 		fovTween:Play()
 	end
-	-- Widen once, from the FOV the camera rests on, unless the FOV module owns it or we already have.
 	local function widenFov()
 		if fovBase or fovModuleOwns() then return end
 		local camera = workspace.CurrentCamera
@@ -673,8 +665,6 @@ run(function()
 		fovBase = camera.FieldOfView
 		tweenSprintFov(fovBase * RUN_FOV_MULT)
 	end
-	-- Back to the base, but only over a widening of ours still on screen: a game effect or the FOV
-	-- module taking the camera elsewhere since is left alone.
 	local function restoreFov()
 		local base, tween = fovBase, fovTween
 		fovBase, fovTween = nil, nil
@@ -689,10 +679,9 @@ run(function()
 			pcall(function() lplr.PlayerGui.MobileUI['2'].Visible = not callback end)
 		end
 		if callback then
-			Sprint:Clean(runService.Heartbeat:Connect(function()
+			sprint:clean(runService.Heartbeat:Connect(function()
 				local character = lplr.Character
 				local humanoid = character and character:FindFirstChildOfClass('Humanoid')
-				-- The game's own startSprinting does nothing while it sprints you itself or in freecam.
 				if not humanoid or lplr:GetAttribute('Sprinting') == true or workspace:GetAttribute('FreecamEnabled') then
 					if fovBase then restoreFov() end
 					return
@@ -702,7 +691,6 @@ run(function()
 					raisedTo, raisedOn = speed * RUN_SCALE, humanoid
 					humanoid.WalkSpeed = raisedTo
 				end
-				-- Widen the view while actually moving, as the game does; hand it back when you stop.
 				if humanoid.MoveDirection.Magnitude > 0.01 then
 					widenFov()
 				elseif fovBase then
@@ -710,7 +698,6 @@ run(function()
 				end
 			end))
 		else
-			-- Back to the walking speed, unless the game has set another one since.
 			if raisedOn and raisedOn.Parent and math.abs(raisedOn.WalkSpeed - raisedTo) < 0.01 then
 				raisedOn.WalkSpeed = raisedTo / RUN_SCALE
 			end
@@ -719,15 +706,14 @@ run(function()
 		end
 	end
 
-	Sprint = vape.Categories.Combat:CreateModule({
-		Name = 'Sprint',
-		Tab = 'Move',
-		Function = function(callback)
+	sprint = combat:module('Sprint', {
+		tab = 'Move',
+		toggled = function(on)
 			if not bedwars.SprintController then
-				sprintWithoutKnit(callback)
+				sprintWithoutKnit(on)
 				return
 			end
-			if callback then
+			if on then
 				if inputService.TouchEnabled then pcall(function() lplr.PlayerGui.MobileUI['2'].Visible = false end) end
 				old = bedwars.SprintController.stopSprinting
 				bedwars.SprintController.stopSprinting = function(...)
@@ -735,7 +721,7 @@ run(function()
 					bedwars.SprintController:startSprinting()
 					return call
 				end
-				Sprint:Clean(entitylib.Events.LocalAdded:Connect(function() bedwars.SprintController:stopSprinting() end))
+				sprint:clean(entitylib.Events.LocalAdded:Connect(function() bedwars.SprintController:stopSprinting() end))
 				bedwars.SprintController:stopSprinting()
 			else
 				if inputService.TouchEnabled then pcall(function() lplr.PlayerGui.MobileUI['2'].Visible = true end) end
@@ -743,17 +729,21 @@ run(function()
 				bedwars.SprintController:stopSprinting()
 			end
 		end,
-		Tooltip = 'Automatically sprints for you.'
+		about = 'Automatically sprints for you.'
 	})
 end)
 	
+--[[ AutoGamble
+Opens your reward crates one at a time on altar 1 and tells you what each one gave. The crate types
+come from your consumables in the store; without Knit that list only arrives with the game's next
+consumable update, so until then each known crate type is tried in turn, and a type that spawned
+nothing waits a minute, since the server only spawns crates you own. A spawned crate is opened by
+its crateId and altarId, as the game's own prompt does, and the reward is named the way the game's
+reveal names it: its visual override, else the item's meta. ]]
 run(function()
 	if needsKnit('AutoGamble') then return end
-	local AutoGamble
+	local autoGamble
 
-	--[[ The crate types to try, in the store's order: every crate among your consumables. Without Knit
-	that list only arrives with the game's next consumable update, so until then each known crate type
-	is tried in turn; a type that spawned nothing waits a minute (the server only spawns crates you own). ]]
 	local tried = {}
 	local function crateCandidates()
 		local list = {}
@@ -768,14 +758,12 @@ run(function()
 		return list
 	end
 	
-	AutoGamble = vape.Categories.Minigames:CreateModule({
-		Name = 'AutoGamble',
-		Tab = 'Utility',
-		Function = function(callback)
-			if callback then
-				AutoGamble:Clean(bedwars.Client:GetNamespace('RewardCrate'):Get('CrateOpened'):Connect(function(data)
+	autoGamble = minigames:module('AutoGamble', {
+		tab = 'Utility',
+		toggled = function(on)
+			if on then
+				autoGamble:clean(bedwars.Client:GetNamespace('RewardCrate'):Get('CrateOpened'):Connect(function(data)
 					if data.openingPlayer == lplr then
-						-- Named the way the game's reveal names it: its override, else the item's meta.
 						local itemType = data.reward and data.reward.itemType
 						local ok, meta = pcall(function() return bedwars.getCrateItemMeta(itemType) end)
 						local name = data.visualOverrides and data.visualOverrides.displayName or (ok and type(meta) == 'table' and meta.displayName) or tostring(itemType or 'unknown')
@@ -789,8 +777,6 @@ run(function()
 							tried[crateType] = os.clock()
 							bedwars.CrateAltarController:pickCrate(crateType, 1)
 							task.wait(1.2)
-							-- activeCrates[altarId] is the list of crates on that altar; open ours, as the
-							-- game's own prompt does (crateId and altarId).
 							local crates = bedwars.CrateAltarController.activeCrates[1]
 							if crates then
 								for index = #crates, 1, -1 do
@@ -806,30 +792,38 @@ run(function()
 						end
 					end
 					task.wait(1)
-				until not AutoGamble.Enabled
+				until not autoGamble.enabled
 			end
 		end,
-		Tooltip = 'Opens your crates for you one at a time.\nTells you what each crate gave you.'
+		about = 'Opens your crates for you one at a time.\nTells you what each crate gave you.'
 	})
 end)
 
+--[[ AutoQueue
+Queues you into the chosen mode once you have been out of a queue for the set delay, counted from
+enabling it, arriving in the lobby or leaving a queue. The modes are every queue in QueueMeta that
+is not disabled, voice-chat only or a tournament, read live so modes the game adds or retires follow
+it, with Solo, Doubles and Squads first; without QueueMeta those three are offered by their queue
+types.
+
+Party.queueState follows @easy-games/lobby's QueueState: NONE 0, JOINING_QUEUE 1, IN_QUEUE 2,
+LEAVING_QUEUE 3, MATCH_FOUND 4. Only the party leader can queue; the game ignores anyone else.
+Joining goes through QueueController:joinQueue, which the lobby's queue NPCs and play menu call (it
+checks party leadership and fires the lobby-events joinQueue remote with {queueType}); that remote
+is fired directly when the controller is missing or throws. A request that did not take is retried
+no faster than every 5 s. Picking another mode while in a queue leaves it so the loop joins the new
+one, never once a match is found. ]]
 run(function()
 	if needsKnit('AutoQueue') then return end
-	local AutoQueue
-	local Mode
-	local Delay
+	local autoQueue
+	local mode
+	local delaySlider
 	local modes, titles = {}, {}
 
-	-- Party.queueState, from @easy-games/lobby's QueueState: NONE 0, JOINING_QUEUE 1,
-	-- IN_QUEUE 2, LEAVING_QUEUE 3, MATCH_FOUND 4.
 	local QUEUE_NONE, QUEUE_IN = 0, 2
 	local LOBBY_EVENTS = 'events-@easy-games/lobby:shared/event/lobby-events@getEvents.Events'
-	-- The usual picks lead the list; List[1] is also the dropdown's default.
 	local FIRST = {bedwars_to1 = 1, bedwars_to2 = 2, bedwars_to4 = 3}
 
-	--[[ Every queue the lobby would let you into, under the title the game gives it: whatever
-	QueueMeta has that is not switched off, voice-chat only or a tournament. Read live, so a
-	mode the game adds or retires comes or goes without an update here. ]]
 	local function addMode(queueType, title)
 		title = tostring(title):gsub('[^%w%p ]', ''):gsub('^%s+', ''):gsub('%s+$', '')
 		if title == '' then title = queueType end
@@ -848,7 +842,6 @@ run(function()
 		end
 	end)
 	if #titles == 0 then
-		-- QueueMeta did not load: the three standard modes, by their queue types.
 		for queueType, title in {bedwars_to1 = 'BedWars (Solo)', bedwars_to2 = 'BedWars (Doubles)', bedwars_to4 = 'BedWars (Squads)'} do
 			addMode(queueType, title)
 			ranks[title] = FIRST[queueType]
@@ -873,10 +866,6 @@ run(function()
 		return events and events:FindFirstChild(name)
 	end
 
-	--[[ QueueController:joinQueue is what the lobby's own queue NPCs and play menu call. It
-	checks party leadership and hands the request to LobbyQueueController, which fires the
-	lobby-events joinQueue remote with {queueType}. That remote is fired directly when the
-	controller is missing or throws. ]]
 	local function joinQueue(queueType)
 		local ok = pcall(function()
 			bedwars.QueueController:joinQueue(queueType)
@@ -901,14 +890,11 @@ run(function()
 		end
 	end
 
-	AutoQueue = vape.Categories.Utility:CreateModule({
-		Name = 'AutoQueue',
-		Function = function(callback)
-			if not callback then return end
+	autoQueue = utility:module('AutoQueue', {
+		toggled = function(on)
+			if not on then return end
 
 			local warned = false
-			-- The delay counts from the moment you are out of a queue with nothing pending:
-			-- enabling it, arriving in the lobby, or leaving a queue.
 			local idleSince = os.clock()
 			local retryAt = 0
 
@@ -918,115 +904,104 @@ run(function()
 				if not party or party.queueState ~= QUEUE_NONE then
 					idleSince = now
 				elseif party.leader and party.leader.userId ~= lplr.UserId then
-					-- Only the leader can queue a party; the game ignores anyone else.
 					if not warned then
 						warned = true
 						notif('AutoQueue', 'You are not the party leader, so only they can queue.', 5)
 					end
 					idleSince = now
-				elseif now - idleSince >= Delay.Value and now >= retryAt then
-					local queueType = modes[Mode.Value]
+				elseif now - idleSince >= delaySlider.value and now >= retryAt then
+					local queueType = modes[mode.value]
 					if queueType then
 						joinQueue(queueType)
-						-- A request that did not take (a closed mode, a hiccup) is tried again,
-						-- but never faster than every 5s.
-						retryAt = now + math.max(Delay.Value, 5)
+						retryAt = now + math.max(delaySlider.value, 5)
 					end
 				end
 				task.wait(0.25)
-			until not AutoQueue.Enabled
+			until not autoQueue.enabled
 		end,
-		Tooltip = 'Automatically queues you into the chosen mode.'
+		about = 'Automatically queues you into the chosen mode.'
 	})
-	Mode = AutoQueue:CreateDropdown({
-		Name = 'Mode',
-		List = titles,
-		Function = function(_, isClick)
-			-- A different mode picked while already queued: leave, and the loop joins the new
-			-- one after the delay. Never once a match is found.
-			local party = isClick and AutoQueue.Enabled and partyState()
+	mode = autoQueue:dropdown('Mode', {
+		choices = titles,
+		changed = function(_, isClick)
+			local party = isClick and autoQueue.enabled and partyState()
 			if party and party.queueState == QUEUE_IN then
 				leaveQueue()
 			end
 		end,
-		Tooltip = 'The gamemode to queue for.'
+		about = 'The gamemode to queue for.'
 	})
-	Delay = AutoQueue:CreateSlider({
-		Name = 'Delay',
-		Min = 0,
-		Max = 30,
-		Default = 3,
-		Decimal = 10,
-		Suffix = function(val)
+	delaySlider = autoQueue:slider('Delay', {
+		min = 0,
+		max = 30,
+		default = 3,
+		decimal = 10,
+		suffix = function(val)
 			return val == 1 and 'second' or 'seconds'
 		end,
-		Tooltip = 'How long to wait in the lobby before queueing.'
+		about = 'How long to wait in the lobby before queueing.'
 	})
 end)
 
+--[[ RegionLock
+Only lets you load into a match server in a region you switched on; with none on, any region is
+allowed. The hold itself runs in main.lua's queued teleport script on the match server, the only
+reader of the settings file written here, so without queue_on_teleport (Xeno, and Solara builds
+without it) the module is not offered, the same check the match copy makes.
+
+The settings live in pistonware/regionlock.txt rather than the per-place profiles, since the lobby
+and the match are different places; the match copy reads and writes the same file, so it is one
+switch in both. Region codes are what main.lua matches the server against. Australia and New Zealand
+play on SEA servers (main.lua counts OCE, AU and NZ as SEA), and other names an older file holds are
+mapped through ALIASES. The file is read back once the profile has applied and then wins; nothing is
+written before that, nor once uninject has cleared slinky.loaded, so the switch-off on unload is not
+saved. The full region list is written alongside the switched-on ones for an older match copy. ]]
 run(function()
-	--[[ The hold runs in main.lua's queued teleport script on the match server, the only thing that
-	reads the file this module writes. With no queue_on_teleport (Xeno, and Solara builds without
-	it) that script never runs, so the module would do nothing at all, and it is not offered: the
-	same check the match copy makes. ]]
 	if not (exec.Teleport or type(queueonteleport) == 'function'
 		or (type(syn) == 'table' and type(syn.queue_on_teleport) == 'function')
 		or (type(fluxus) == 'table' and type(fluxus.queue_on_teleport) == 'function')) then
 		exec.hide('RegionLock', 'needs queue_on_teleport')
 		return
 	end
-	local RegionLock
-	local Timeout
-	local Requeue
+	local regionLock
+	local timeout
+	local requeue
 	local httpService = cloneref(game:GetService('HttpService'))
 
-	--[[ RegionLock's settings live in their own file, not the per-place profiles: the lobby and
-	the match are different places, and this is one switch you set before queueing. main.lua's
-	teleport script reads it on the match server, holds the connect, and loads you in once the
-	server's region is one switched on here. The match copy of the module reads and writes the same
-	file, so turning it on or off in either place is the same switch. ]]
 	local FILE = 'pistonware/regionlock.txt'
 	local synced, written = false, nil
 
-	--[[ The regions BedWars hosts, one toggle each, in this order. Code is what goes in the file and
-	what main.lua matches the server against; Label is what the toggle shows. Australia and New
-	Zealand play on SEA servers, so that one says OCE as well (main.lua already counts OCE, AU and
-	NZ as SEA). A region added here gets its toggle and its place in the file with nothing else. ]]
 	local REGIONS = {
 		{Code = 'NA', Label = 'NA', Tooltip = 'North America'},
 		{Code = 'EU', Label = 'EU', Tooltip = 'Europe'},
 		{Code = 'SEA', Label = 'SEA / OCE', Tooltip = 'Asia and Oceania (Australia and New Zealand play here)'}
 	}
-	-- Other names an older file can hold for one of the codes above.
 	local ALIASES = {
 		OCE = 'SEA', OCEANIA = 'SEA', AU = 'SEA', AUS = 'SEA', NZ = 'SEA', ASIA = 'SEA', SG = 'SEA',
 		US = 'NA', USA = 'NA', CA = 'NA', UK = 'EU', GB = 'EU', EUROPE = 'EU'
 	}
-	local RegionToggles = {}
+	local regionToggles = {}
 
 	local function regionCodes(onlyEnabled)
 		local codes = {}
 		for _, region in REGIONS do
-			local toggle = RegionToggles[region.Code]
-			if not onlyEnabled or (toggle and toggle.Enabled) then
+			local toggle = regionToggles[region.Code]
+			if not onlyEnabled or (toggle and toggle.enabled) then
 				table.insert(codes, region.Code)
 			end
 		end
 		return codes
 	end
 
-	-- Only once the file has been read back: the profile applying first must not overwrite it.
 	local function writeSettings()
-		-- Uninject clears vape.Loaded before it switches modules off; that off is not the user's.
-		if not synced or vape.Loaded == nil then return end
+		if not synced or slinky.loaded == nil then return end
 		local ok, encoded = pcall(function()
 			return httpService:JSONEncode({
-				enabled = RegionLock.Enabled,
-				-- Every region there is, as the old Regions list kept it: an older match copy loads both.
+				enabled = regionLock.enabled,
 				list = regionCodes(false),
 				regions = regionCodes(true),
-				timeout = Timeout.Value,
-				requeue = Requeue.Enabled
+				timeout = timeout.value,
+				requeue = requeue.enabled
 			})
 		end)
 		if ok and encoded ~= written then
@@ -1035,55 +1010,50 @@ run(function()
 		end
 	end
 
-	RegionLock = vape.Categories.Utility:CreateModule({
-		Name = 'RegionLock',
-		Function = function()
+	regionLock = utility:module('RegionLock', {
+		toggled = function()
 			writeSettings()
 		end,
-		ExtraText = function()
+		info = function()
 			local codes = regionCodes(true)
 			return #codes > 0 and table.concat(codes, ' ') or 'Any'
 		end,
-		Tooltip = 'Only plays on servers in the regions you switch on. With none on, any region is allowed.'
+		about = 'Only plays on servers in the regions you switch on. With none on, any region is allowed.'
 	})
-	Timeout = RegionLock:CreateSlider({
-		Name = 'Timeout',
-		Min = 0,
-		Max = 120,
-		Default = 30,
-		Function = function()
+	timeout = regionLock:slider('Timeout', {
+		min = 0,
+		max = 120,
+		default = 30,
+		changed = function()
 			writeSettings()
 		end,
-		Suffix = function(val)
+		suffix = function(val)
 			return val == 1 and 'second' or 'seconds'
 		end,
-		Tooltip = 'Loads anyway after this long without a region. 0 waits forever.'
+		about = 'Loads anyway after this long without a region. 0 waits forever.'
 	})
-	Requeue = RegionLock:CreateToggle({
-		Name = 'Requeue',
-		Function = function()
+	requeue = regionLock:toggle('Requeue', {
+		changed = function()
 			writeSettings()
 		end,
-		Tooltip = 'Queues again when the server is in the wrong region. Not in a party.'
+		about = 'Queues again when the server is in the wrong region. Not in a party.'
 	})
-	RegionLock:CreateDivider({Text = 'Regions'})
+	regionLock:divider('Regions')
 	for _, region in REGIONS do
-		RegionToggles[region.Code] = RegionLock:CreateToggle({
-			Name = 'Allow '..region.Code,
-			DisplayName = region.Label,
-			Default = true,
-			Function = function()
+		regionToggles[region.Code] = regionLock:toggle('Allow '..region.Code, {
+			label = region.Label,
+			default = true,
+			changed = function()
 				writeSettings()
-				vape:UpdateTextGUI()
+				slinky:updateOverlay()
 			end,
-			Tooltip = 'Plays on '..region.Tooltip..' servers.'
+			about = 'Plays on '..region.Tooltip..' servers.'
 		})
 	end
 
-	-- Once the profile is applied, the file wins: it is the last thing set anywhere.
 	task.spawn(function()
-		repeat task.wait(0.5) until vape.Loaded == true or vape.Loaded == nil
-		if vape.Loaded == nil then return end
+		repeat task.wait(0.5) until slinky.loaded == true or slinky.loaded == nil
+		if slinky.loaded == nil then return end
 		local data
 		pcall(function()
 			if isfile(FILE) then
@@ -1091,40 +1061,41 @@ run(function()
 			end
 		end)
 		if type(data) == 'table' then
-			-- The switched-on regions, by code or by an older name for one; anything else is passed over.
 			if type(data.regions) == 'table' then
 				local wanted = {}
 				for _, entry in data.regions do
 					local code = tostring(entry):gsub('%s+', ''):upper()
 					wanted[ALIASES[code] or code] = true
 				end
-				for code, toggle in RegionToggles do
-					if (wanted[code] == true) ~= toggle.Enabled then
-						toggle:Toggle()
+				for code, toggle in regionToggles do
+					if (wanted[code] == true) ~= toggle.enabled then
+						toggle:flip()
 					end
 				end
 			end
 			if tonumber(data.timeout) then
-				Timeout:SetValue(tonumber(data.timeout))
+				timeout:set(tonumber(data.timeout))
 			end
-			if (data.requeue == true) ~= Requeue.Enabled then
-				Requeue:Toggle()
+			if (data.requeue == true) ~= requeue.enabled then
+				requeue:flip()
 			end
-			if (data.enabled == true) ~= RegionLock.Enabled then
-				RegionLock:Toggle()
+			if (data.enabled == true) ~= regionLock.enabled then
+				regionLock:flip()
 			end
 		end
 		synced = true
 		repeat
 			writeSettings()
 			task.wait(1)
-		until vape.Loaded == nil
+		until slinky.loaded == nil
 	end)
 end)
+--[[ DeviceSpoofer
+Makes the game think you are playing on another device. Pick mobile, PC, gamepad or a random one. ]]
 run(function()
 	if needsKnit('DeviceSpoofer') then return end
-	local DeviceSpoofer
-	local Device
+	local deviceSpoofer
+	local device
 	local spoofedType
 	local realInputType
 	local realGetUserInputType
@@ -1136,17 +1107,16 @@ run(function()
 	end
 
 	local function resolveInputType()
-		if Device.Value == 'Random' then
+		if device.value == 'Random' then
 			local types = {'MOBILE', 'PC', 'GAMEPAD'}
 			return types[math.random(#types)]
 		end
-		return Device.Value:upper()
+		return device.value:upper()
 	end
 
-	DeviceSpoofer = vape.Categories.Utility:CreateModule({
-		Name = 'DeviceSpoofer',
-		Function = function(callback)
-			if callback then
+	deviceSpoofer = utility:module('DeviceSpoofer', {
+		toggled = function(on)
+			if on then
 				realInputType = bedwars.UserInputController:getUserInputType()
 				realGetUserInputType = bedwars.UserInputController.getUserInputType
 				spoofedType = resolveInputType()
@@ -1162,20 +1132,19 @@ run(function()
 				realGetUserInputType = nil
 			end
 		end,
-		ExtraText = function()
-			if Device.Value == 'Random' then
+		info = function()
+			if device.value == 'Random' then
 				return 'Random'..(spoofedType and ' ('..spoofedType..')' or '')
 			end
-			return Device.Value
+			return device.value
 		end,
-		Tooltip = 'Makes the game think you are playing on another device.\nPick mobile, PC, gamepad or a random one.'
+		about = 'Makes the game think you are playing on another device.\nPick mobile, PC, gamepad or a random one.'
 	})
 
-	Device = DeviceSpoofer:CreateDropdown({
-		Name = 'Device',
-		List = {'Mobile', 'PC', 'Gamepad', 'Random'},
-		Function = function(value)
-			if DeviceSpoofer.Enabled then
+	device = deviceSpoofer:dropdown('Device', {
+		choices = {'Mobile', 'PC', 'Gamepad', 'Random'},
+		changed = function(value)
+			if deviceSpoofer.enabled then
 				spoofedType = resolveInputType()
 				sendInputType(spoofedType)
 			end
@@ -1183,12 +1152,18 @@ run(function()
 	})
 end)
 
+--[[ ClaimRewards
+Claims the free daily store item (100 bedcoins, once per enable), unclaimed achievement rewards and
+level milestone rewards, checking every 5 s. Profile data is asked of the server at most every 30 s
+and dispatched into the store, where the achievement check reads it; each milestone is tried once
+per enable. Without Knit the achievement and milestone tables come from the data file, since the
+game's own modules for them load Knit. ]]
 run(function()
 	if needsKnit('ClaimRewards') then return end
-	local ClaimRewards
-	local DailyReward
-	local ClaimAchievements
-	local Milestones
+	local claimRewards
+	local dailyReward
+	local claimAchievementsToggle
+	local milestones
 
 	local achievement
 	local milestoneRewards
@@ -1199,7 +1174,6 @@ run(function()
 	local function getAchievement()
 		if not achievement then
 			if bedwars.Knitless then
-				-- From the data file: these modules load Knit, which is out of reach here.
 				achievement = bedwars.Achievement
 			else
 				local folder = replicatedStorage.TS.achievement
@@ -1278,57 +1252,66 @@ run(function()
 		end
 	end
 
-	ClaimRewards = vape.Categories.Minigames:CreateModule({
-		Name = 'ClaimRewards',
-		Tab = 'Utility',
-		Function = function(callback)
-			if callback then
+	claimRewards = minigames:module('ClaimRewards', {
+		tab = 'Utility',
+		toggled = function(on)
+			if on then
 				dailyAttempted = false
 				nextProfileRefresh = 0
 				table.clear(milestoneAttempts)
 
 				repeat
-					if DailyReward and DailyReward.Enabled and not dailyAttempted then
+					if dailyReward and dailyReward.enabled and not dailyAttempted then
 						dailyAttempted = true
 						pcall(claimDaily)
 					end
-					if ClaimAchievements and ClaimAchievements.Enabled then
+					if claimAchievementsToggle and claimAchievementsToggle.enabled then
 						pcall(claimAchievements)
 					end
-					if Milestones and Milestones.Enabled then
+					if milestones and milestones.enabled then
 						pcall(claimMilestones)
 					end
 					task.wait(5)
-				until not ClaimRewards.Enabled
+				until not claimRewards.enabled
 			end
 		end,
-		Tooltip = 'Claims your daily, achievement and level rewards.'
+		about = 'Claims your daily, achievement and level rewards.'
 	})
 
-	DailyReward = ClaimRewards:CreateToggle({
-		Name = 'Daily Reward',
-		Default = true,
-		Function = function(state)
+	dailyReward = claimRewards:toggle('Daily Reward', {
+		default = true,
+		changed = function(state)
 			if not state then dailyAttempted = false end
 		end,
-		Tooltip = 'Claims the free daily store item (100 bedcoins) once per enable.'
+		about = 'Claims the free daily store item (100 bedcoins) once per enable.'
 	})
 
-	ClaimAchievements = ClaimRewards:CreateToggle({
-		Name = 'Claim Achievements',
-		Default = true,
-		Tooltip = 'Claims the rewards of every achievement you have unlocked but not collected.'
+	claimAchievementsToggle = claimRewards:toggle('Claim Achievements', {
+		default = true,
+		about = 'Claims the rewards of every achievement you have unlocked but not collected.'
 	})
 
-	Milestones = ClaimRewards:CreateToggle({
-		Name = 'Milestones',
-		Default = true,
-		Tooltip = 'Claims level milestone rewards as soon as they become available.'
+	milestones = claimRewards:toggle('Milestones', {
+		default = true,
+		about = 'Claims level milestone rewards as soon as they become available.'
 	})
 end)
 
+--[[ NightmareEmote
+Plays the Nightmare emote, visible only to you: the NightmareEmote effect from Assets.Effects, its
+looped animation and its sound. As in the game's controller, every part of the effect is anchored,
+non-collidable and out of the query set, since it is parented to workspace and the game would
+otherwise stand on, walk into and raycast against it; it is dropped two studs so the ring sits at
+your feet.
+
+The sound is the emote's soundsOnBegin entry, locker.emotes.nightmare_1_sounds_on_begin_sound, which
+the meta marks looped: a drone under the whole emote that has to be stopped with the rest. It is
+parented to the torso so it dies with the character. The emote ends the way a real one does, on your
+first step, a jump or death, and also when the character is removed, because a respawn would
+otherwise leave the effect in workspace. The module switches itself off deferred after enabling,
+since flipping from inside the enable callback would re-enter the module's state mid-transition. ]]
 run(function()
-	local NightmareEmote
+	local nightmareEmote
 	local effect
 	local track
 	local sound
@@ -1359,9 +1342,6 @@ run(function()
 		end
 	end
 
-	--[[ Mirrors the controller: every part anchored, non-collidable and out of the query
-	set, because the effect is parented to workspace and would otherwise be something the
-	game can stand on, walk into and raycast against. ]]
 	local function neutralise(model)
 		for _, descendant in model:GetDescendants() do
 			if descendant:IsA('BasePart') then
@@ -1408,17 +1388,10 @@ run(function()
 		effect = template:Clone()
 		neutralise(effect)
 		effect.Parent = workspace
-		--[[ The controller drops it two studs so the ring sits at your feet rather than
-		through your waist. ]]
 		pcall(function() effect:PivotTo(pivot.CFrame + Vector3.new(0, -2, 0)) end)
 		spin(effect, 'Outer', 360, 1.5)
 		spin(effect, 'Middle', -360, 12.5)
 
-		--[[ The emote's own soundsOnBegin entry: locker.emotes.nightmare_1_sounds_on_begin_sound,
-		which the meta marks looped -- it is a drone that runs under the whole emote, not a
-		one-shot sting, so it has to be stopped with everything else rather than left to
-		finish. Parented to the torso so it is positional and dies with the character even if
-		stopEmote never gets to run. ]]
 		pcall(function()
 			sound = Instance.new('Sound')
 			sound.Name = 'PistonwareNightmareEmote'
@@ -1441,9 +1414,6 @@ run(function()
 			end)
 		end
 
-		--[[ Ends the way a real emote ends: the first step you take, or dying. Both are
-		checked rather than only one, because a respawn destroys the character out from
-		under the animation but leaves the effect parented to workspace forever. ]]
 		connections[#connections + 1] = humanoid:GetPropertyChangedSignal('MoveDirection'):Connect(function()
 			if playing and humanoid.MoveDirection.Magnitude > 0 then
 				stopEmote()
@@ -1458,44 +1428,55 @@ run(function()
 		end)
 	end
 
-	NightmareEmote = vape.Categories.Utility:CreateModule({
-		Name = 'NightmareEmote',
-		Tab = 'Visual',
-		Function = function(callback)
-			if not callback then return end
+	nightmareEmote = utility:module('NightmareEmote', {
+		tab = 'Visual',
+		toggled = function(on)
+			if not on then return end
 
 			playEmote()
 
-			--[[ Deferred rather than called straight from here: this IS the enable callback,
-			and toggling from inside it would re-enter the module's own state machine
-			mid-transition. One step later the enable has settled and the off is a normal
-			toggle. ]]
 			task.defer(function()
-				if NightmareEmote.Enabled then
-					NightmareEmote:Toggle(nil, true)
+				if nightmareEmote.enabled then
+					nightmareEmote:flip(nil, true)
 				end
 			end)
 		end,
-		Tooltip = 'Plays the Nightmare emote, visible only to you.\nEnds when you move, jump or die.'
+		about = 'Plays the Nightmare emote, visible only to you.\nEnds when you move, jump or die.'
 	})
 
-	vape:Clean(function() stopEmote() end)
+	slinky:clean(function() stopEmote() end)
 end)
 
-run(function()
-	local UICleanup
-	--[[ Topbar Position. The BedWars top bar -- its row of buttons, the Settings menu that drops
-	from them and, in a match, the scores and timer beside them -- sits at the right of the strip
-	Roblox leaves free along the top of the screen. Middle centres that whole row on the screen
-	instead. The game's own app draws it and moves it again whenever its size changes, so each
-	move of the game's is kept (it is where Default puts it back) and the row is centred again
-	straight after.
+--[[ UI Cleanup
+Tidies up the BedWars HUD; in the lobby it covers the top bar. The BedWars top bar (its row of
+buttons, the Settings menu that drops from them and, in a match, the scores and timer beside them)
+sits at the right of the strip Roblox leaves free along the top of the screen, which is
+GuiService.TopbarInset where the client reports one; TopBarAppGui itself covers the whole screen.
+Topbar Position Middle centres that whole row on the screen, kept inside the strip so it never runs
+under Roblox's buttons. The game's app moves the row again whenever its size changes, so each move
+of the game's is kept as the piece's origin (where Default puts it back) and the row is centred
+again in one deferred pass however many changes come in a frame. The game builds the bar again when
+it remounts its HUD, and the strip changes as Roblox's own buttons come and go; both are watched.
 
-	On a phone the row also keeps room for the Pistonware button wherever that is: beside the
-	buttons (Button Next To Topbar) or, by default, in the corner at the right end of the strip.
-	The corner's room is kept with UI Cleanup off too, as that is where the button goes then. ]]
-	local TopbarPosition
-	local NextToTopbar
+On a phone the row also keeps room for the Pistonware button: its width plus the 7 px the GUI keeps
+from the game's buttons, in the corner at the right end of the strip by default (kept with UI
+Cleanup off too, as the button goes there then) or beside the buttons with Button Next To Topbar.
+The room is a UIPadding inside the row, set in the units of the row's UIScale, so the game lays the
+row out around it as around one more button of its own and nothing is pushed over the scores. For
+the corner the row ends 12 px in from the end of the strip, as the game keeps it, and the game sizes
+the row and the scores to the strip less 24 px, so the centred row always fits. A hidden button
+takes no room and is docked beside the row, since left in the corner it would lie unseen over the
+game's last button and take its taps.
+
+After each layout the GUI places its button at once and again on the next step: the first call reads
+the row as it was, and moving the padding leaves the row's AbsoluteSize unchanged, so no signal
+follows the reflow; the follow-up is coalesced. The GUI's Hide Pistonware Mobile Button changes the
+button's room and docking, so its flip is wrapped to lay the bar out again (a click or a profile
+load). Unloading puts back every piece the game has not moved since. ]]
+run(function()
+	local uiCleanup
+	local topbarPosition
+	local nextToTopbar
 	local topbar = {
 		Original = setmetatable({}, {__mode = 'k'}),
 		Placed = setmetatable({}, {__mode = 'k'}),
@@ -1504,25 +1485,19 @@ run(function()
 	}
 
 	function topbar.middle()
-		return UICleanup ~= nil and UICleanup.Enabled and TopbarPosition ~= nil and TopbarPosition.Value == 'Middle'
+		return uiCleanup ~= nil and uiCleanup.enabled and topbarPosition ~= nil and topbarPosition.value == 'Middle'
 	end
 
-	-- Hide Pistonware Mobile Button: the button is still there to tap, but nothing of it shows.
 	function topbar.hidden()
-		local hide = vape.HideVapeButton
-		return type(hide) == 'table' and hide.Enabled == true
+		local hide = slinky.hideMenuButton
+		return type(hide) == 'table' and hide.enabled == true
 	end
 
-	--[[ Docked beside the buttons while UI Cleanup is on with Button Next To Topbar, and whenever the
-	button is hidden. Hidden it takes no room (vapeButton), and left in the corner it would lie
-	unseen over the game's last button and take its taps; beside the row it covers only the empty
-	strip or the scores. ]]
 	function topbar.docked()
 		if topbar.hidden() then return true end
-		return UICleanup ~= nil and UICleanup.Enabled and NextToTopbar ~= nil and NextToTopbar.Enabled
+		return uiCleanup ~= nil and uiCleanup.enabled and nextToTopbar ~= nil and nextToTopbar.enabled
 	end
 
-	-- The strip Roblox leaves free along the top of the screen, as screen x, where the client has one.
 	function topbar.strip()
 		local ok, low, high = pcall(function()
 			local inset = guiService.TopbarInset
@@ -1537,27 +1512,21 @@ run(function()
 		return nil
 	end
 
-	--[[ The room the mobile button takes in the row -- its width and the 7 px the GUI keeps from the
-	game's buttons -- or 0 where there is no button (a PC), and whether the GUI wants it in the
-	corner. A GUI without the corner always docks it. A hidden button takes none: with nothing
-	showing there is nothing to keep clear, and the bar stays where the game puts it. ]]
-	function topbar.vapeButton()
-		local button = vape.VapeButton
+	function topbar.slinkyButton()
+		local button = slinky.menuButton
 		if topbar.Unloaded or not (button and button.Parent) or topbar.hidden() then
 			return 0, false
 		end
-		return math.max(button.AbsoluteSize.X, 32) + 7, vape.SetVapeButtonDocked ~= nil and not vape.VapeButtonDocked
+		return math.max(button.AbsoluteSize.X, 32) + 7, slinky.dockMenuButton ~= nil and not slinky.menuButtonDocked
 	end
 
-	-- Whether there is anything to lay out: Middle, or room to keep for the button where it is.
 	function topbar.active()
 		if topbar.Unloaded then return false end
 		if topbar.middle() then return true end
-		local room, corner = topbar.vapeButton()
-		return room > 0 and (corner or (UICleanup ~= nil and UICleanup.Enabled))
+		local room, corner = topbar.slinkyButton()
+		return room > 0 and (corner or (uiCleanup ~= nil and uiCleanup.enabled))
 	end
 
-	-- Several changes in one frame (a resize moves and resizes everything) place it once.
 	function topbar.queue()
 		if topbar.Queued then return end
 		topbar.Queued = true
@@ -1587,7 +1556,6 @@ run(function()
 		end
 	end
 
-	-- Where the game last put a piece: where it is now, unless that is where this put it.
 	function topbar.origin(object)
 		local current = object.Position
 		if current ~= topbar.Placed[object] then
@@ -1596,7 +1564,6 @@ run(function()
 		return topbar.Original[object]
 	end
 
-	-- Puts a piece so its right edge is at `right` (a screen x), at the height the game gave it.
 	function topbar.move(object, gui, right)
 		local original = topbar.origin(object)
 		local x = right - gui.AbsolutePosition.X - (1 - object.AnchorPoint.X) * object.AbsoluteSize.X
@@ -1608,11 +1575,6 @@ run(function()
 		topbar.watch(object)
 	end
 
-	--[[ The button's room, made inside the row of buttons: padding on its right for the corner, on
-	its left beside them. The game lays the row out round it as it would round one more button of
-	its own -- the scores and timer move over, and on a full bar everything shrinks to fit -- so
-	nothing is moved over the scores, in Default or in Middle. The row is drawn under a UIScale, so
-	the padding is set in its units. Returns the room on the right, on screen. ]]
 	function topbar.pad(buttons, side, room)
 		local padding = topbar.Padding
 		if not buttons or room <= 0 then
@@ -1646,21 +1608,15 @@ run(function()
 		return side == 'Right' and width * factor or 0
 	end
 
-	-- The GUI places its button again now, not on its next once-a-second check.
 	function topbar.nudge()
-		if not vape.PlaceVapeButton then return end
-		vape.PlaceVapeButton()
-		--[[ And once more after this frame's layout pass. The call above reads the row as it was
-		before the change that asked for it (padding moved from one side to the other, a Middle
-		move), and moving the padding leaves the row's AbsoluteSize as it was, so no signal comes
-		after the reflow to correct it -- the button would wait for the GUI's once-a-second check,
-		sitting on the scores or a button until then. Coalesced: one follow-up however many calls. ]]
+		if not slinky.placeMenuButton then return end
+		slinky.placeMenuButton()
 		if topbar.Renudge then return end
 		topbar.Renudge = true
 		task.delay(0, function()
 			topbar.Renudge = false
-			if not topbar.Unloaded and vape.PlaceVapeButton then
-				vape.PlaceVapeButton()
+			if not topbar.Unloaded and slinky.placeMenuButton then
+				slinky.placeMenuButton()
 			end
 		end)
 	end
@@ -1673,18 +1629,14 @@ run(function()
 		if not (buttons and buttons:IsA('GuiObject') and camera) then return end
 		topbar.watch(appGui)
 		topbar.watch(buttons)
-		--[[ The mobile button's room, on the side of the row the button is on. The GUI measures the
-		corner from the strip, so without one the button docks and its room goes beside the buttons.
-		The corner keeps its room with UI Cleanup off too. ]]
 		local strip, stripEnd = topbar.strip()
-		local room, corner = topbar.vapeButton()
+		local room, corner = topbar.slinkyButton()
 		corner = corner and strip ~= nil
-		if not (corner or (UICleanup ~= nil and UICleanup.Enabled)) then
+		if not (corner or (uiCleanup ~= nil and uiCleanup.enabled)) then
 			room = 0
 		end
 		local cornerRoom = topbar.pad(buttons, corner and 'Right' or 'Left', room)
 		if not topbar.middle() then
-			-- Default: everything where the game puts it, with the button's room in the row.
 			topbar.unplace()
 			topbar.nudge()
 			return
@@ -1700,23 +1652,13 @@ run(function()
 			stats = nil
 		end
 		local statsWidth = stats and stats.Visible and stats.AbsoluteSize.X or 0
-		--[[ The mobile Pistonware button's room is part of the row's own width (see pad), so the
-		scores and timer stop short of it rather than running under it: beside the buttons the
-		button follows them, 7 px to their left, and in the corner the row stops short of it. ]]
 		local width = buttons.AbsoluteSize.X + (statsWidth > 0 and statsWidth + 8 or 0)
 		local left, area = appGui.AbsolutePosition.X, appGui.AbsoluteSize.X
 		if area <= 0 then return end
-		--[[ Centred on the screen, but kept inside the strip Roblox leaves free so it never runs under
-		Roblox's buttons. That strip is TopbarInset where the client reports one; TopBarAppGui itself
-		covers the whole screen. ]]
 		local low, high = left, left + area
 		if strip then
 			low, high = strip, stripEnd
 		end
-		--[[ For the corner the row ends 12 px in from the end of the strip, as the game keeps it, so
-		the room at its right end is under the corner button and the buttons stop 7 px short of it.
-		The room is empty, so what is centred is the rest. The game sizes the row and the scores to
-		the strip less 24 px, so this always fits. ]]
 		local shown = width
 		if corner then
 			high -= 12
@@ -1728,7 +1670,6 @@ run(function()
 		if statsWidth > 0 then
 			topbar.move(stats, statsGui, start + statsWidth)
 		end
-		-- The Settings menu hangs from the right end of the buttons, as it does by default.
 		for _, child in appGui:GetChildren() do
 			if child ~= buttons and child:IsA('GuiObject') and topbar.origin(child).X == UDim.new(1, -12) then
 				topbar.move(child, appGui, right - cornerRoom)
@@ -1737,7 +1678,6 @@ run(function()
 		topbar.nudge()
 	end
 
-	-- Back where the game last put each piece, unless the game has moved it itself since.
 	function topbar.unplace()
 		for object, original in topbar.Original do
 			if object.Parent and object.Position == topbar.Placed[object] then
@@ -1748,7 +1688,6 @@ run(function()
 		table.clear(topbar.Placed)
 	end
 
-	-- All of it undone: nothing watched, nothing moved, no room kept.
 	function topbar.restore()
 		for _, connection in topbar.Connections do
 			connection:Disconnect()
@@ -1761,8 +1700,8 @@ run(function()
 	end
 
 	function topbar.refresh()
-		if vape.SetVapeButtonDocked and not topbar.Unloaded then
-			vape:SetVapeButtonDocked(topbar.docked())
+		if slinky.dockMenuButton and not topbar.Unloaded then
+			slinky:dockMenuButton(topbar.docked())
 		end
 		if not topbar.active() then
 			topbar.restore()
@@ -1772,14 +1711,12 @@ run(function()
 			topbar.Hooked = true
 			local playerGui = lplr:FindFirstChildOfClass('PlayerGui')
 			if playerGui then
-				-- The game builds the bar again when it remounts its HUD.
 				table.insert(topbar.Connections, playerGui.ChildAdded:Connect(function(child)
 					if child.Name == 'TopBarAppGui' or child.Name == 'TopBarStatsGui' then
 						topbar.queue()
 					end
 				end))
 			end
-			-- Roblox's own buttons coming and going changes the free strip.
 			pcall(function()
 				table.insert(topbar.Connections, guiService:GetPropertyChangedSignal('TopbarInset'):Connect(topbar.queue))
 			end)
@@ -1787,46 +1724,40 @@ run(function()
 		topbar.queue()
 	end
 
-	UICleanup = vape.Legit:CreateModule({
-		Name = 'UI Cleanup',
-		Function = function()
+	uiCleanup = legit:module('UI Cleanup', {
+		toggled = function()
 			topbar.refresh()
 		end,
-		Tooltip = 'Tidies up the BedWars HUD and removes clutter.\nIn the lobby it covers the top bar.'
+		about = 'Tidies up the BedWars HUD and removes clutter.\nIn the lobby it covers the top bar.'
 	})
-	TopbarPosition = UICleanup:CreateDropdown({
-		Name = 'Topbar Position',
-		List = {'Default', 'Middle'},
-		Function = function()
+	topbarPosition = uiCleanup:dropdown('Topbar Position', {
+		choices = {'Default', 'Middle'},
+		changed = function()
 			topbar.refresh()
 		end,
-		Tooltip = 'Where the BedWars top bar sits: on the right (Default) or centred at the top of the screen (Middle).'
+		about = 'Where the BedWars top bar sits: on the right (Default) or centred at the top of the screen (Middle).'
 	})
-	NextToTopbar = UICleanup:CreateToggle({
-		Name = 'Button Next To Topbar',
-		Function = function()
+	nextToTopbar = uiCleanup:toggle('Button Next To Topbar', {
+		changed = function()
 			topbar.refresh()
 		end,
-		Tooltip = 'Puts the mobile menu button next to the top bar instead of in the top-right corner.'
+		about = 'Puts the mobile menu button next to the top bar instead of in the top-right corner.'
 	})
-	-- The corner's room is kept without UI Cleanup too; on unload everything goes back.
 	topbar.refresh()
-	vape:Clean(function()
+	slinky:clean(function()
 		topbar.Unloaded = true
 		topbar.restore()
 	end)
-	--[[ Hide Pistonware Mobile Button is the GUI's, and it changes the room the button takes and where
-	it docks, so the bar is laid out again whenever it is switched (a click or a profile load). ]]
-	local hideButton = vape.HideVapeButton
-	if type(hideButton) == 'table' and type(hideButton.Toggle) == 'function' then
-		local toggle = hideButton.Toggle
-		hideButton.Toggle = function(self, ...)
+	local hideButton = slinky.hideMenuButton
+	if type(hideButton) == 'table' and type(hideButton.flip) == 'function' then
+		local toggle = hideButton.flip
+		hideButton.flip = function(self, ...)
 			local results = table.pack(toggle(self, ...))
 			topbar.refresh()
 			return table.unpack(results, 1, results.n)
 		end
-		vape:Clean(function()
-			hideButton.Toggle = toggle
+		slinky:clean(function()
+			hideButton.flip = toggle
 		end)
 	end
 end)

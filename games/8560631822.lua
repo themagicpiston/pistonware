@@ -1,8 +1,8 @@
-local vape = shared.vape
+local slinky = shared.slinky
 local loadstring = function(...)
 	local res, err = loadstring(...)
-	if err and vape then
-		vape:CreateNotification('Vape', 'Failed to load : '..err, 30, 'alert')
+	if err and slinky then
+		slinky:notify('Pistonware', 'Failed to load : '..err, 30, 'alert')
 	end
 	return res
 end
@@ -29,9 +29,9 @@ local isfile = isfile or function(file)
 	end)
 	return suc and res ~= nil and res ~= ''
 end
-vape.Place = 6872274481
+slinky.place = 6872274481
 --[[ 8560631822 is the same BedWars game under a different PlaceId. The real
-setup (shared.bedwars, services, vape libs) lives in 6872274481.lua, which
+setup (shared.bedwars, services, slinky libs) lives in 6872274481.lua, which
 loads bedwars.lua itself once that's done -- loading bedwars.lua directly
 from here skips that setup and shared.bedwars is nil when it runs. ]]
 local gamePath = 'pistonware/games/6872274481.lua'
@@ -52,12 +52,12 @@ if type(loadSource) == 'function' then
 	return bootFailure('game.download', loaded and 'games/6872274481.lua was empty' or source)
 end
 local cached = cacheReady and isfile(gamePath) and readfile(gamePath) or nil
+--[[ Runs the cached games/6872274481.lua, or, outside developer mode, fetches it from GitHub with 4
+tries, caches it and runs it. A body that is an error page ('429: Too Many Requests') is never
+cached over a good copy. ]]
 if cached and cached:gsub('%s', '') ~= '' then
 	return runChunk(cached, '6872274481')
 elseif not shared.PistonwareDeveloper then
-	--[[ Fetched from GitHub: only bedwars.lua lives off-repo (on GitLab), and the old host's
-	stale copy of this file was being downloaded twice (once to probe for existence, then
-	again to save it). ]]
 	local content
 	for attempt = 1, 4 do
 		local suc, res = pcall(function()
@@ -65,7 +65,6 @@ elseif not shared.PistonwareDeveloper then
 			return type(rawUrl) == 'function' and game:HttpGet(rawUrl('games/6872274481.lua'), true)
 				or game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/games/6872274481.lua', true)
 		end)
-		-- An error page sent as the body ('429: Too Many Requests') is not a file to cache over a good copy.
 		if suc and type(res) == 'string' and res ~= '' and res ~= '404: Not Found' and not res:match('^%d%d%d: ') then
 			content = res
 			break
@@ -75,7 +74,7 @@ elseif not shared.PistonwareDeveloper then
 		end
 	end
 	if content then
-		pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..content)
+		pcall(writefile, gamePath, content)
 		return runChunk(content, '6872274481')
 	end
 end

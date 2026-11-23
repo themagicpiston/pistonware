@@ -1,0 +1,26 @@
+{
+	"categories": {
+		"blatant": {"__on": true, "__pos": {"x": 466, "y": 60}, "__open": true},
+		"combat": {"__on": true, "__pos": {"x": 236, "y": 60}, "__open": true},
+		"f_flags": {"__on": true, "__pos": {"x": 238, "y": 633}, "__open": true, "__selected": "default", "__items": [{"name": "default"}], "add_f_flags": ""},
+		"friends": {"__on": false, "__pos": {"x": 240, "y": 46}, "__open": false, "__items": [], "friends_color": {"r": 0.9529, "g": 0.3647, "b": 0.0706}, "recolor_visuals": true, "use_friends": true},
+		"inventory": {"__on": true, "__pos": {"x": 1386, "y": 60}, "__open": true},
+		"main": {"__pos": {"x": 6, "y": 60}},
+		"minigames": {"__on": true, "__pos": {"x": 1618, "y": 61}, "__open": true},
+		"profiles": {"__on": true, "__pos": {"x": 6, "y": 607}, "__open": true, "import_profile": ""},
+		"render": {"__on": true, "__pos": {"x": 695, "y": 60}, "__open": true},
+		"targets": {"__on": false, "__pos": {"x": 240, "y": 46}, "__open": false, "__items": []},
+		"utility": {"__on": true, "__pos": {"x": 926, "y": 60}, "__open": true},
+		"world": {"__on": true, "__pos": {"x": 1155, "y": 60}, "__open": true}
+	},
+	"profile": "blatant",
+	"profiles": [{"name": "default"}, {"name": "blatant"}, {"name": "legit"}],
+	"settings": {
+		"general": {"allow_setting_keybinds": false, "enable_multi_keybinding": false},
+		"gui": {"auto_rescale": true, "blur_background": false, "gui_bind_indicator": true, "hide_pistonware_mobile_button": false, "rainbow_mode": "Normal", "rainbow_speed": 1, "rainbow_update_rate": 60, "scale": 1, "search_bar_style": "Floating", "show_legit_mode": true, "show_tooltips": true},
+		"layout": {"compact": false, "wide": false},
+		"modules": {"teams_by_server": true, "use_team_color": true},
+		"notifications": {"notifications": true, "position": "Top left", "setting_toggle_alert": true, "toggle_alert": true},
+		"settings": {"allow_input_while_open": true, "gui_theme": {"preset": 2}, "rebind_gui": {"keys": ["RightShift"]}, "scale_preset": "Auto"}
+	}
+}
