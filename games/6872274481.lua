@@ -22088,7 +22088,7 @@ run(function()
 	local function buyItem(item, currencytable)
 		if not id then return end
 		bedwars.Client:Get('BedwarsPurchaseItem'):CallServerAsync({
-			shopItem = item,
+			itemType = item.itemType,
 			shopId = id
 		}):andThen(function(suc)
 			if suc then
