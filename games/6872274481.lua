@@ -14228,7 +14228,7 @@ run(function()
 			end
 		end,
 		info = function()
-			return 'Heatseeker'
+			return 'Blatant'
 		end,
 		about = 'Lets you fly around freely.\nRise with jump and sink with Shift; can use and pop your balloon.'
 	})
@@ -15495,13 +15495,16 @@ run(function()
 			end
 		end,
 		info = function()
-			return 'Heatseeker'
+			return mode and mode.value or nil
 		end,
 		about = 'Makes you move faster than normal.\nCan also jump for you while you fight, or all the time.'
 	})
 	mode = speed:dropdown('Mode', {
 		choices = {'Blatant', 'Legit'},
 		default = 'Blatant',
+		changed = function()
+			slinky:updateOverlay()
+		end,
 		about = 'Legit ignores the DamageBoost speed boost when working out how\nmuch to top you up. Blatant spends it.'
 	})
 	amount = speed:slider('Speed', {
@@ -19622,7 +19625,9 @@ end)
 Takes items out of the chests in Range, and with Steal out of enemy team crates in Loot Range.
 Deposit banks what it took within the Stolen Within window into your nearest personal chest, so gear
 you have carried all game is never banked. Delay paces every item, chest and deposit; at 0 every
-item of a chest is requested at once, the way clicking through the chest screen sends them.
+item of a chest is requested at once, the way clicking through the chest screen sends them. It acts
+only while the match is running: the server refuses every take before the match starts, and those
+refusals used up the 300 calls a minute it allows each remote before the first real take.
 
 Every item you can carry is taken, and the score only sets the order: what refuses an item is
 missing item meta, a block the game will not let you pick up and a full stack. Trap blocks (snap,
@@ -20284,7 +20289,7 @@ run(function()
 				if not chestSteal.enabled then return end
 				if (not skywars.enabled) or store.queueType:find('skywars') then
 					repeat
-						if entitylib.isAlive and store.matchState ~= 2 then
+						if entitylib.isAlive and store.matchState == 1 then
 							local localPosition = entitylib.character.RootPart.Position
 							local guiOpen = (not open.enabled) or chestAppOpen()
 

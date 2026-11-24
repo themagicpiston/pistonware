@@ -29,10 +29,8 @@ infer implementation behavior from a profile name alone.
 | Path | Role |
 | --- | --- |
 | `games/6872274481.lua` | Primary BedWars adapter. Discovers controllers and remotes, tracks game state, registers modules, and provides block and movement helpers. |
-| `games/8444591321.lua` | Alias wrapper. Sets `vape.Place` to `6872274481` and loads the primary adapter for that BedWars place variant. |
+| `games/8444591321.lua` | Alias wrapper. Sets `slinky.Place` to `6872274481` and loads the primary adapter for that BedWars place variant. |
 | `games/8560631822.lua` | Alias wrapper with the same primary-adapter mapping. |
-| `games/123804558118054.lua` | Separate wrapper for place `5938036553`; do not assume it is the primary BedWars adapter. |
-| `games/96342491571673.lua` | Separate wrapper for place `109983668079237`; do not assume it is the primary BedWars adapter. |
 | `games/tarmac.lua` | Static block-name-to-asset metadata used by the Scaffold block-count display. It is not the authoritative block store or geometry definition. |
 | `profiles/*6872274481*.txt` | Saved module configuration. Useful for discovering configured names and defaults, but not proof that a module is implemented in the checked-in source. |
 | `merge.md` | Recent hardening and validation notes. |
@@ -41,21 +39,14 @@ infer implementation behavior from a profile name alone.
 ## Place routing
 
 The filename of a game script is the place that Roblox initially selects, but the script may
-change `vape.Place` before loading the actual adapter. For this system, always follow the route to
+change `slinky.Place` before loading the actual adapter. For this system, always follow the route to
 the canonical ID before deciding where a BedWars change belongs.
 
-| Entry place ID | `vape.Place` / loaded adapter | Meaning |
+| Entry place ID | `slinky.Place` / loaded adapter | Meaning |
 | ---: | ---: | --- |
 | `6872274481` | `6872274481` | Canonical BedWars source and system anchor. |
 | `8444591321` | `6872274481` | BedWars variant wrapper; redirects to the canonical adapter. |
 | `8560631822` | `6872274481` | BedWars variant wrapper; redirects to the canonical adapter. |
-| `123804558118054` | `5938036553` | Separate adapter route; it does not redirect to the canonical BedWars source. |
-| `96342491571673` | `109983668079237` | Separate adapter route; it does not redirect to the canonical BedWars source. |
-
-The other wrapper families are outside this guide: `12011959048`, `14191889582`, and
-`14662411059` route to Bridge Duel (`11630038968`), while `13246639586`, `8542259458`,
-`8592115909`, and `8951451142` route to SkyWars (`8768229691`). Do not copy a fix into one of
-those adapters just because it contains a similarly named module.
 
 ## Runtime and source boundaries
 
@@ -75,7 +66,7 @@ those adapters just because it contains a similarly named module.
 
 ### Shared integration surface
 
-`shared.bedwars` is the adapter's shared integration surface. It exposes services, `vape`,
+`shared.bedwars` is the adapter's shared integration surface. It exposes services, `slinky`,
 `entitylib`, the live `bedwars` controller table, discovered `remotes`, `store`, `RunLoops`, and
 helpers including:
 
@@ -106,7 +97,7 @@ understand in five layers:
 1. Bootstrap and shared helpers (`1..2624`): services, inventory/entity state, controller
    discovery, the namecall guard, block helpers, and the `run` isolation boundary.
 2. Gameplay modules (`2627..7333`): Combat, Blatant, World, Render, Utility, and Inventory
-   modules declared with `CreateModule`.
+   modules declared with `<category>:module(...)`.
 3. Legit/UI modules (`7336..8610`): local presentation, sound, viewmodel, interface, and
    end-of-round effects.
 4. Device and nametag utilities (`8613..8733`): local input/device spoofing and nametag hiding.
@@ -154,13 +145,13 @@ of assuming the instance names or function constants are unchanged.
 
 The adapter has no checked-in `commands/` directory or separate text-command router. In this
 checkout, “commands” means the module/toggle surface and its options, plus the wrapper place
-routes. The complete checked-in `CreateModule` inventory is below. Do not treat a name found only
+routes. The complete checked-in `:module(...)` inventory is below. Do not treat a name found only
 in a saved profile as proof of an implementation here.
 
 ### Complete checked-in module inventory
 
 These are the 59 modules declared by `games/6872274481.lua`, grouped by the source category
-passed to `CreateModule`:
+the module is declared in:
 
 | Source category | Modules |
 | --- | --- |
