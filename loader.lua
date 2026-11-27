@@ -1723,35 +1723,52 @@ end
 	--------------
 	A fake terminal window that stands in for the executor console while pistonware boots.
 	The piston face is drawn one row at a time as the boot progresses, so the art is only
-	ever complete at the same moment the status flips to '> DONE'.
+	ever complete at the same moment the status flips to '> DONE'. A boot that fails
+	finishes it at once with X eyes (pistonFailedEyes).
+
+	The face is the logo pixel for pixel. The logo is 8 by 8, and each of its pixels is a
+	block of one glyph inked in that pixel's own colour (pistonColors). The glyph says what
+	the pixel is made of: '@' the eye whites and the tongue, '%' the wooden head, '#' stone,
+	and nothing where the logo is black.
 ]]
 
 local pistonFace = {
-	'******=============******++++++=============******',
-	'******=============******++++++=============******',
-	'******=============******++++++=============******',
-	'++++++=============++++++===================++++++',
-	'++++++=============++++++===================++++++',
-	'++++++=============++++++===================++++++',
-	'::::::@@@@@@       ------::::::@@@@@@       ::::::',
-	'::::::@@@@@@       ------::::::@@@@@@       ::::::',
-	'::::::@@@@@@       ------::::::@@@@@@       ::::::',
-	'::::::@@@@@@       ++++++------@@@@@@       ::::::',
-	'::::::@@@@@@       ++++++------@@@@@@       ::::::',
-	'::::::@@@@@@       ++++++------@@@@@@       ::::::',
-	'::::::######:::::::++++++======******:::::::::::::',
-	'::::::++++++=======++++++++++++=============::::::',
-	'::::::++++++=======++++++++++++=============::::::',
-	'::::::++++++=======++++++++++++=============::::::',
-	'------++++++                         =======------',
-	'------++++++                         =======------',
-	'------++++++                         =======------',
-	'::::::=============      ++++++++++++=======::::::',
-	'::::::=============      ++++++++++++=======::::::',
-	'::::::=============      ++++++++++++=======::::::',
-	'::::::------:::::::------::::::------:::::::::::::',
-	'::::::------:::::::------::::::------:::::::::::::',
-	'::::::------:::::::------::::::------:::::::::::::'
+	'######%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%######',
+	'######%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%######',
+	'######%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%######',
+	'######%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%######',
+	'######%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%######',
+	'######%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%######',
+	'######@@@@@@       ############@@@@@@       ######',
+	'######@@@@@@       ############@@@@@@       ######',
+	'######@@@@@@       ############@@@@@@       ######',
+	'######@@@@@@       ############@@@@@@       ######',
+	'######@@@@@@       ############@@@@@@       ######',
+	'######@@@@@@       ############@@@@@@       ######',
+	'##################################################',
+	'##################################################',
+	'##################################################',
+	'##################################################',
+	'############                         #############',
+	'############                         #############',
+	'############                         #############',
+	'###################      @@@@@@@@@@@@#############',
+	'###################      @@@@@@@@@@@@#############',
+	'###################      @@@@@@@@@@@@#############',
+	'##################################################',
+	'##################################################',
+	'##################################################'
+}
+
+--[[ The rows the eyes are swapped for when the boot fails, by their place in pistonFace: an X over
+each eye, drawn in 'X' glyphs in the eye white. ]]
+local pistonFailedEyes = {
+	[7] = '######XXX       XXX############XXX       XXX######',
+	[8] = '######  XXX   XXX  ############  XXX   XXX  ######',
+	[9] = '######    XXXXX    ############    XXXXX    ######',
+	[10] = '######    XXXXX    ############    XXXXX    ######',
+	[11] = '######  XXX   XXX  ############  XXX   XXX  ######',
+	[12] = '######XXX       XXX############XXX       XXX######'
 }
 
 --[[ Every offset below is authored against the base window and scaled as a whole by the
@@ -1779,6 +1796,9 @@ the key check and the loading, and the window a row taller than it needed. ]]
 local licenseY = statusY + 32
 local licenseRow = 28
 
+--[[ The console's colours. Accent is the orange of the >_ icon, the status word, a hovered answer
+and the focused key box, and AccentHex is the same colour for rich text. Both become the menu's GUI
+Theme colour when settings.json holds one (savedGuiColor). ]]
 local palette = {
 	Window = Color3.fromRGB(10, 10, 10),
 	TitleBar = Color3.fromRGB(38, 38, 38),
@@ -1786,6 +1806,7 @@ local palette = {
 	Title = Color3.fromRGB(232, 232, 232),
 	Glyph = Color3.fromRGB(190, 190, 190),
 	Accent = Color3.fromRGB(240, 122, 31),
+	AccentHex = '#F07A1F',
 	Line = Color3.fromRGB(237, 237, 237),
 	Footer = Color3.fromRGB(110, 110, 110),
 	ButtonIdle = Color3.fromRGB(200, 200, 200),
@@ -1794,20 +1815,91 @@ local palette = {
 	Ok = Color3.fromRGB(120, 225, 150)
 }
 
---[[ Ascii shading: the art is one colour in a real terminal, but the piston only reads as a
-face if the solid blocks sit brighter than the dithered background, so each glyph class
-gets its own tone. ]]
-local asciiShades = {
-	['@'] = '#F2F2F2',
-	['#'] = '#E4E4E4',
-	['%'] = '#D2D2D2',
-	['*'] = '#A6A6A6',
-	['+'] = '#8C8C8C',
-	['='] = '#6B6B6B',
-	['-'] = '#5C5C5C',
-	[':'] = '#4A4A4A',
-	['.'] = '#4A4A4A'
+--[[ The logo's own pixels, top row first. A glyph of the face takes the colour of the pixel it falls
+in: pistonColumns is how many glyphs wide each pixel column is drawn, pistonRows how many rows
+tall each pixel row. 50 by 25 does not divide by 8, so two columns are 7 glyphs wide and the
+plain row between the eyes and the mouth is 4 rows tall. ]]
+local pistonColors = {
+	{'#B1B1B1', '#98784C', '#947649', '#AA9F89', '#8D816C', '#8E7645', '#8E7245', '#B1B1B1'},
+	{'#878787', '#8B6F44', '#8C7242', '#90826C', '#83755E', '#91724A', '#8F7348', '#878787'},
+	{'#434343', '#FFFFFF', '#000000', '#5B5B5B', '#414141', '#FFFFFF', '#000000', '#3B3B3B'},
+	{'#3E3E3E', '#FFFFFF', '#000000', '#868686', '#606060', '#FFFFFF', '#000000', '#444444'},
+	{'#3E3E3E', '#878787', '#7B7B7B', '#818181', '#8A8A8A', '#707070', '#6A6A6A', '#444444'},
+	{'#494949', '#828282', '#000000', '#000000', '#000000', '#000000', '#737373', '#4F4F4F'},
+	{'#454545', '#6E6E6E', '#747474', '#000000', '#F78328', '#F78328', '#7B7B7B', '#3C3C3C'},
+	{'#444444', '#484848', '#3F3F3F', '#4F4F4F', '#434343', '#4C4C4C', '#3C3C3C', '#353535'}
 }
+local pistonColumns = {6, 6, 7, 6, 6, 6, 7, 6}
+local pistonRows = {3, 3, 3, 3, 4, 3, 3, 3}
+
+--[[ The menu's GUI Theme colour as settings.json holds it, or nil when the file is missing, does
+not read or holds none. It is one setting for every place. It is saved as {preset = n}, one of the
+menu's seven presets (an unknown n is its orange, 2), or as the colour itself in r, g and b from 0
+to 1, which is taken as saved when the rainbow is on too. ]]
+local function savedGuiColor()
+	local presets = {
+		Color3.fromRGB(250, 50, 56),
+		Color3.fromRGB(243, 93, 18),
+		Color3.fromRGB(252, 179, 22),
+		Color3.fromRGB(5, 133, 104),
+		Color3.fromRGB(47, 122, 229),
+		Color3.fromRGB(126, 84, 217),
+		Color3.fromRGB(232, 96, 152)
+	}
+	local function finite(value)
+		return type(value) == 'number' and value == value and value > -math.huge and value < math.huge
+	end
+	local ok, color = pcall(function()
+		local path = 'pistonware/profiles/settings.json'
+		if not isfile(path) then return nil end
+		local saved = cloneref(game:GetService('HttpService')):JSONDecode(readfile(path))
+		local panes = type(saved) == 'table' and saved.settings
+		local pane = type(panes) == 'table' and panes.settings
+		local theme = type(pane) == 'table' and pane.gui_theme
+		if type(theme) ~= 'table' then return nil end
+		if finite(theme.r) and finite(theme.g) and finite(theme.b) then
+			return Color3.new(math.clamp(theme.r, 0, 1), math.clamp(theme.g, 0, 1), math.clamp(theme.b, 0, 1))
+		end
+		if finite(theme.preset) then
+			return presets[theme.preset] or presets[2]
+		end
+		return nil
+	end)
+	return ok and color or nil
+end
+
+--[[ Draws the console in the menu's GUI Theme colour when settings.json holds one, so the loader
+looks like the menu it opens: Accent and AccentHex become that colour. The face's coloured cells,
+the wooden head and the tongue, take its hue, and their saturation and brightness are scaled by its
+own over those of the console's orange, so the shading stays. The greys, black and the eye whites
+stay. Every ink is worked out before anything is replaced, so a failure leaves the orange whole. ]]
+pcall(function()
+	local accent = savedGuiColor()
+	if not accent then return end
+	local function hex(color)
+		return ('#%02X%02X%02X'):format(math.round(color.R * 255), math.round(color.G * 255), math.round(color.B * 255))
+	end
+	local hue, sat, value = accent:ToHSV()
+	local _, baseSat, baseValue = palette.Accent:ToHSV()
+	local inks = {}
+	for row, colors in pistonColors do
+		inks[row] = {}
+		for column, color in colors do
+			local _, cellSat, cellValue = Color3.fromHex(color):ToHSV()
+			local ink = color
+			if cellSat > 0 then
+				local inkSat = math.min(cellSat * sat / baseSat, 1)
+				local inkValue = math.min(cellValue * value / baseValue, 1)
+				ink = hex(Color3.fromHSV(hue, inkSat, inkValue))
+			end
+			inks[row][column] = ink
+		end
+	end
+	palette.Accent, palette.AccentHex = accent, hex(accent)
+	for row, colors in inks do
+		pistonColors[row] = colors
+	end
+end)
 
 --[[ Cancelling the loader has to leave nothing behind that THIS boot created, so on a fresh
 install the whole folder is wiped. On an install that already existed before this run the
@@ -1869,7 +1961,23 @@ local function deleteInstall()
 	end)
 end
 
-local function asciiRichText(line)
+--[[ The logo pixel a 1-based glyph column or row falls in, from how many glyphs each pixel is drawn
+across (pistonColumns or pistonRows). ]]
+local function pistonPixel(sizes, position)
+	for pixel, size in sizes do
+		if position <= size then
+			return pixel
+		end
+		position -= size
+	end
+	return #sizes
+end
+
+--[[ One row of the face as rich text: each run of glyphs in the colour of the logo pixel it falls in,
+the X of a failed eye in the eye white, and spaces left bare. index is the row's place in
+pistonFace. ]]
+local function asciiRichText(line, index)
+	local colors = pistonColors[pistonPixel(pistonRows, index)]
 	local out = {}
 	local runColor, runStart = nil, 1
 	local function flush(stop)
@@ -1878,7 +1986,13 @@ local function asciiRichText(line)
 		table.insert(out, runColor and ('<font color="'..runColor..'">'..chunk..'</font>') or chunk)
 	end
 	for i = 1, #line do
-		local color = asciiShades[line:sub(i, i)]
+		local glyph = line:sub(i, i)
+		local color = nil
+		if glyph == 'X' then
+			color = '#FFFFFF'
+		elseif glyph ~= ' ' then
+			color = colors[pistonPixel(pistonColumns, i)]
+		end
 		if i > 1 and color ~= runColor then
 			flush(i - 1)
 			runStart = i
@@ -2202,7 +2316,7 @@ local function createConsole()
 		label.Position = UDim2.fromOffset(0, (index - 1) * asciiLineHeight)
 		label.Size = UDim2.new(1, 0, 0, asciiLineHeight)
 		label.RichText = true
-		label.Text = asciiRichText(line)
+		label.Text = asciiRichText(line, index)
 		label.TextColor3 = Color3.new(1, 1, 1)
 		label.TextSize = asciiTextSize
 		label.TextXAlignment = Enum.TextXAlignment.Left
@@ -2409,7 +2523,7 @@ local function createConsole()
 	step of the boot itself, and backward ('<') for the key gate, which is the one phase that
 	is holding the boot up rather than advancing it. Escaped, since the label is RichText. ]]
 	function console:SetStatus(text, color, chevron)
-		status.Text = '<font color="#9E9E9E">'..(chevron == '<' and '&lt;' or '&gt;')..'</font> <font color="'..(color or '#F07A1F')..'">'..text..'</font>'
+		status.Text = '<font color="#9E9E9E">'..(chevron == '<' and '&lt;' or '&gt;')..'</font> <font color="'..(color or palette.AccentHex)..'">'..text..'</font>'
 	end
 
 	function console:SetLine(text, color)
@@ -2672,7 +2786,8 @@ local function createConsole()
 
 	--[[ Shows a failure on the status and output line and halts the console. The line wraps down into
 	the answer row's space, because executor errors carry absolute paths that run off a single line
-	and nothing is asked after a failure. ]]
+	and nothing is asked after a failure. The face is finished at once with X eyes, however far the
+	boot had drawn it: the reveal thread is halted, so the rows it had left are shown here. ]]
 	function console:Fail(err)
 		if closed then return end
 		self:SetStatus('FAILED', '#E15046')
@@ -2681,6 +2796,15 @@ local function createConsole()
 		line.Size = UDim2.new(1, -contentPadding * 2, 0, answersY + 34 - lineY)
 		self:SetLine(err, palette.Error)
 		self:Halt()
+		for index, text in pistonFailedEyes do
+			rows[index].Text = asciiRichText(text, index)
+		end
+		for index = revealed + 1, #rows do
+			local row = rows[index]
+			row.Visible = true
+			tweenService:Create(row, TweenInfo.new(0.18), {TextTransparency = 0}):Play()
+		end
+		revealed = #rows
 	end
 
 	--[[ Published so the next execution can tear this console down before building its own. ]]

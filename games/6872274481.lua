@@ -794,7 +794,8 @@ end
 and the AutoBank box): its orange, its light grey text and secondary grey labels, and its button
 fill and border for a button or slot inside a box. Boxes are the loader's near-black with a tenth of
 the orange through it, part see-through, with a soft orange border and rounded corners; text is the
-menu's Inter. ]]
+menu's Inter. What the loader draws in its orange is drawn in the GUI colour (loaderStyle.accent);
+Orange itself is for a menu without one, and Background stays on it as colour options' default. ]]
 local loaderStyle = {
 	Orange = Color3.fromRGB(240, 122, 31),
 	Text = Color3.fromRGB(230, 230, 230),
@@ -808,6 +809,30 @@ loaderStyle.Background = Color3.fromRGB(10, 10, 10):Lerp(loaderStyle.Orange, 0.1
 loaderStyle.Hue, loaderStyle.Sat, loaderStyle.Value = loaderStyle.Background:ToHSV()
 loaderStyle.SubHex = '#'..loaderStyle.SubText:ToHex()
 
+-- The GUI colour now (GUI Theme in the menu's settings), or the orange on a menu without it.
+function loaderStyle.accent()
+	if slinky.accentColor then
+		return slinky:accentColor()
+	end
+	return loaderStyle.Orange
+end
+
+-- The loader's near-black with a tenth of a colour through it, or the amount given.
+function loaderStyle.tint(accent, amount)
+	return Color3.fromRGB(10, 10, 10):Lerp(accent, amount or 0.1)
+end
+
+--[[ Calls paint(color) with the GUI colour now and again on every change of it, until owner is
+cleaned: a module as it turns off, slinky as the menu unloads. A menu without slinky:followAccent
+gets the orange once. ]]
+function loaderStyle.follow(owner, paint)
+	if slinky.followAccent then
+		owner:clean(slinky:followAccent(paint))
+	else
+		paint(loaderStyle.Orange)
+	end
+end
+
 function loaderStyle.corner(obj, radius)
 	local corner = Instance.new('UICorner')
 	corner.CornerRadius = typeof(radius) == 'UDim' and radius or UDim.new(0, radius or 8)
@@ -818,7 +843,7 @@ end
 function loaderStyle.stroke(obj, strokeColor, transparency, thickness)
 	local stroke = Instance.new('UIStroke')
 	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Color = strokeColor or loaderStyle.Orange
+	stroke.Color = strokeColor or loaderStyle.accent()
 	stroke.Thickness = thickness or 1
 	stroke.Transparency = transparency or 0.55
 	stroke.Parent = obj
@@ -826,11 +851,12 @@ function loaderStyle.stroke(obj, strokeColor, transparency, thickness)
 end
 
 function loaderStyle.box(obj, radius)
-	obj.BackgroundColor3 = loaderStyle.Background
+	local accent = loaderStyle.accent()
+	obj.BackgroundColor3 = loaderStyle.tint(accent)
 	obj.BackgroundTransparency = loaderStyle.Transparency
 	obj.BorderSizePixel = 0
 	loaderStyle.corner(obj, radius)
-	return loaderStyle.stroke(obj)
+	return loaderStyle.stroke(obj, accent)
 end
 
 --[[ The draggable overlays' look (Reach Display here; universal.lua draws the rest the same way):
@@ -4136,12 +4162,476 @@ function knitless.registryAnimation(ctx)
 	return AnimationUtil, GameAnimationUtil, types
 end
 
---[[ game-core's AudioManager, playing plain Sounds. The game's buses, pooled AudioPlayers and per-sound
-registered volumes are its own, so a Sound at its default volume stands in. The config keys are the
-game's: position (a hidden part there), parent, looped, volumeMultiplier, playbackSpeedMultiplier
-and the roll-off distances. playAudio goes through internalPlayAudio as the game's does, so a hook
-there sees these sounds too. A sound it made is removed when it ends, or 10 s on when it never
-loaded. ]]
+--[[ GameSoundMeta's registrations, for the knitless layer (the data file does not carry it): by
+GameSound name, the volume, category, bus, roll-off distances and playback speed range the game
+gives a sound's asset when it registers it. A name not listed under volume plays at 0.5, under
+category in Gameplay. A name listed under bus plays on that BedWarsAudioBuses bus, whose mixer
+category busCategory gives. ]]
+knitless.soundMeta = {
+	volume = {
+		{1.2, {'HALLOWEEN_BOSS_AMBIENT_LOOP', 'KALIYAH_EXPLOSION', 'NEW_BOW_FIRE',
+			'SPIDER_QUEEN_SPIDERLING_ATTACK_1', 'SPIDER_QUEEN_SPIDERLING_ATTACK_2',
+			'SPIDER_QUEEN_SPIDERLING_ATTACK_3', 'SPIDER_QUEEN_SPIDERLING_ATTACK_4',
+			'SPIDER_QUEEN_SPIDERLING_RUN_LOOP', 'SPIDER_QUEEN_SPIDERLING_SUMMON_1',
+			'SPIDER_QUEEN_SPIDERLING_SUMMON_2', 'SPIDER_QUEEN_SPIDERLING_SUMMON_3',
+			'SPIDER_QUEEN_SPIDERLING_SUMMON_4', 'WATER_HIT_1', 'WATER_HIT_2', 'WATER_HIT_3',
+			'WATER_HIT_4', 'WATER_SHOT_1', 'WATER_SHOT_2', 'WATER_SHOT_3', 'WATER_SHOT_4',
+			'ZOMBIE_GROWL_1', 'ZOMBIE_GROWL_2', 'ZOMBIE_GROWL_4', 'ZOMBIE_GROWL_6'}},
+		{0.3, {'BLOOD_HARVEST_GRIM_REAPER_CHANNEL', 'CAT_SCRATCH_1', 'CAT_SCRATCH_2',
+			'CAT_SCRATCH_3', 'CURSED_COFFIN_PLACE', 'DIAMOND_AGE_ANNOUNCEMENT',
+			'EMERALD_AGE_ANNOUNCEMENT', 'FISHERMAN_GAME_PULLING_LOOP', 'FOREST_AMBIENCE',
+			'GRIM_REAPER_CHANNEL', 'IRON_AGE_ANNOUNCEMENT', 'KEEPER_ATTACK', 'KEEPER_LOOP',
+			'PIRATE_EVENT_LOBBY_MUSIC', 'PVP_ARENA_INTERMISSION_TRACK', 'RECORD_PLAYER_LOOP',
+			'TESLA_SHORT_CIRCUIT_1', 'TESLA_SHORT_CIRCUIT_2', 'TESLA_SHORT_CIRCUIT_3',
+			'TESLA_SHORT_CIRCUIT_4', 'USE_SMOKE_CHARGE', 'VOICE_HONK'}},
+		{1.5, {'LIFE_STEAL_OVERHEAL', 'MILO_VAMPIRE_PICKPOCKET_1', 'MILO_VAMPIRE_PICKPOCKET_2',
+			'MILO_VAMPIRE_PICKPOCKET_3', 'MIMIC_HIDE', 'MIMIC_PICKPOCKET_1', 'MIMIC_PICKPOCKET_2',
+			'MIMIC_PICKPOCKET_3', 'MIMIC_REVEAL', 'ORB_SAT_ACTIVATE', 'ORB_SAT_LASER_CHARGE',
+			'ORB_SAT_LASER_IMPACT_LOOP', 'ORB_SAT_LASER_POWER_DOWN', 'RAGEBLADE_KILL_EFFECT',
+			'SILLY_LEGS_DANCE', 'SPIRITORB_PULL_1', 'SPIRIT_TITAN_ZAP', 'TITAN_ZAP', 'UI_CLOSE_2',
+			'UI_OPEN_2', 'VOID_TITAN_ZAP', 'WORMHOLE_USE'}},
+		{3.0, {'DARK_BOLT_HIT', 'SPIRIT_TITAN_DEATH_2', 'SPIRIT_TITAN_IDLE_1',
+			'SPIRIT_TITAN_IDLE_2', 'SPIRIT_TITAN_IDLE_3', 'SPIRIT_TITAN_IDLE_4',
+			'SPIRIT_TITAN_IDLE_SPAWN', 'SPIRIT_TITAN_SUMMON_PILLARS', 'TITAN_DEATH_2',
+			'TITAN_IDLE_1', 'TITAN_IDLE_2', 'TITAN_IDLE_3', 'TITAN_IDLE_4', 'TITAN_IDLE_SPAWN',
+			'TITAN_SUMMON_PILLARS', 'VOID_TITAN_DEATH_2', 'VOID_TITAN_IDLE_1', 'VOID_TITAN_IDLE_2',
+			'VOID_TITAN_IDLE_3', 'VOID_TITAN_IDLE_4', 'VOID_TITAN_IDLE_SPAWN',
+			'VOID_TITAN_SUMMON_PILLARS'}},
+		{0.2, {'GENERIC_BLOCK_HIT', 'LIFE_BOW_SHOT', 'LIFE_HEADHUNTER_SHOT', 'METAL_DETECTOR_BEEP',
+			'MINICOPTER_LOOP', 'PAINT_SHOTGUN_BLAST', 'PENGUIN_SURVIVAL_BOSS_TRACK',
+			'PENGUIN_SURVIVAL_INTERMISSION_TRACK', 'PENGUIN_SURVIVAL_WAVE_TRACK', 'SANTA_BELLS',
+			'SHEEP_TAME_1', 'SHEEP_TAME_2', 'SHEEP_TAME_3', 'STAR_FIRE', 'SWORD_SWING_1',
+			'SWORD_SWING_2', 'VOID_THEME_SONG', 'WHIM_CAST_BASE_3', 'WOOD_BREAK'}},
+		{0.8, {'BLOOD_HARVEST_GRIM_REAPER_CONSUME', 'CRAB_DANCE_EMOTE', 'CURSED_COFFIN_ACTIVATE',
+			'CURSED_COFFIN_DEACTIVATE', 'CURSED_COFFIN_HUNGRY', 'CURSED_COFFIN_LIFESTEAL_HIT',
+			'CURSED_COFFIN_OPEN_ANIMATION', 'DIAMOND_GENERATOR_AURA', 'EMERALD_GENERATOR_AURA',
+			'GRIM_REAPER_CONSUME', 'GUITAR_HEAL_1_SIREN', 'KALIYAH_PUNCH', 'LOBBY_MUSIC_FOREST',
+			'ROULETTE_TICK', 'WIZARD_LIGHTNING_LAND', 'WIZARD_ORB_CONTACT_LOOP'}},
+		{0.1, {'BLACKHOLE_BLOCKPULL_1', 'BLACKHOLE_BLOCKPULL_2', 'BLACKHOLE_BLOCKPULL_3',
+			'BLACKHOLE_BLOCKPULL_4', 'BURN_HIT', 'LIFE_ARROW_HIT_1', 'LIFE_ARROW_HIT_2',
+			'LOBBY_MUSIC_SUMMER', 'RAINBOW_BACKPACK_PRISM_HIT_1', 'RAINBOW_BACKPACK_PRISM_HIT_2',
+			'RAINBOW_BACKPACK_PRISM_HIT_3', 'RAINBOW_BACKPACK_PRISM_HIT_4', 'RAINBOW_BRIDGE_AURA',
+			'STAR_IDLE', 'VOID_PORTAL_LOOP'}},
+		{0.25, {'FISHERMAN_GAME_FISH_MOVE', 'GRAVEYARD_MUSIC_LOOP', 'GUITAR_HEAL_1',
+			'GUITAR_HEAL_1_ROCKSTAR', 'PENGUIN_SURVIVAL_VICTORY_TRACK', 'RAVEN_SPACE_AMBIENT',
+			'ROCKET_LAUNCHER_FIRE', 'SCISSOR_SWORD_CHARGE_UP',
+			'SCISSOR_SWORD_PROJECTILE_INTERCEPT', 'SCISSOR_SWORD_SLASH_FAST_HERO',
+			'SCISSOR_SWORD_SLASH_FAST_VILLAIN', 'SCISSOR_SWORD_SLASH_SLOW_HERO',
+			'SCISSOR_SWORD_SLASH_SLOW_VILLAIN'}},
+		{2.0, {'CHRISMAS_CAROL', 'METEOR_COSMIC_IMPACT', 'METEOR_COSMIC_LOOP', 'SLIME_SQUISH',
+			'SPIRIT_TITAN_FIST_SLAM', 'SPIRIT_TITAN_FORCEFIELD', 'SPIRIT_TITAN_HAMMER_SLAM',
+			'TITAN_FIST_SLAM', 'TITAN_FORCEFIELD', 'TITAN_HAMMER_SLAM', 'VOID_TITAN_FIST_SLAM',
+			'VOID_TITAN_FORCEFIELD', 'VOID_TITAN_HAMMER_SLAM'}},
+		{0.85, {'GRAVEYARD_AMBIENCE_LOOP', 'GRIM_REAPER_VICTORIOUS_DIAMOND_START',
+			'GRIM_REAPER_VICTORIOUS_EMERALD_START', 'GRIM_REAPER_VICTORIOUS_GOLD_START',
+			'GRIM_REAPER_VICTORIOUS_NIGHTMARE_START', 'GRIM_REAPER_VICTORIOUS_PLAT_START',
+			'VICTORIOUS_PROJECTILE_LAUNCHOVERLAY_DIAMOND',
+			'VICTORIOUS_PROJECTILE_LAUNCHOVERLAY_EMERALD',
+			'VICTORIOUS_PROJECTILE_LAUNCHOVERLAY_GOLD',
+			'VICTORIOUS_PROJECTILE_LAUNCHOVERLAY_NIGHTMARE',
+			'VICTORIOUS_PROJECTILE_LAUNCHOVERLAY_PLATINUM', 'WINTER_EVENT_INTRO_MUSIC'}},
+		{1.1, {'ANGRY_BEE', 'FROSTQUEEN_LYLA_ANGRYBEES', 'GUITAR_HEAL_1_HOLIDAY_COZY',
+			'GUITAR_LOOP_HOLIDAY_COZY', 'HEADHUNTER_GOLD_SHOT_1', 'HEADHUNTER_GOLD_SHOT_2',
+			'HEADHUNTER_GOLD_SHOT_3', 'HEADHUNTER_GOLD_SHOT_4', 'HEADHUNTER_SHOOT_1',
+			'HEADHUNTER_SHOOT_2', 'HEADHUNTER_SHOOT_3', 'HEADHUNTER_SHOOT_4'}},
+		{1.15, {'SPIDER_WEB', 'SPIDER_WEB_BLOCK_BROKEN', 'SPIDER_WEB_BLOCK_CREATED',
+			'SPIDER_WEB_BLOCK_SPAWN_1', 'SPIDER_WEB_BLOCK_SPAWN_2', 'SPIDER_WEB_BLOCK_SPAWN_3',
+			'SPIDER_WEB_BLOCK_SPAWN_4', 'SPIDER_WEB_BRIDGE_FIRE', 'SPIDER_WEB_BRIDGE_IMPACT',
+			'SPITTER_SPIDER_SHOOT', 'SPITTER_SPIDER_WEB_IMPACT', 'WOOL_BREAK'}},
+		{1.75, {'EMOTE_OPEN', 'EXECUTE_ENCHANT_APPLY', 'FIRE_ENCHANT_APPLY',
+			'FOREST_ENCHANT_APPLY', 'GRIM_REAPER_VICTORIOUS_DIAMOND_LOOP',
+			'GRIM_REAPER_VICTORIOUS_EMERALD_LOOP', 'GRIM_REAPER_VICTORIOUS_GOLD_LOOP',
+			'GRIM_REAPER_VICTORIOUS_NIGHTMARE_LOOP', 'GRIM_REAPER_VICTORIOUS_PLAT_LOOP',
+			'PLUNDER_ENCHANT_APPLY', 'STATIC_ENCHANT_APPLY', 'WIND_ENCHANT_APPLY'}},
+		{0.4, {'BED_BREAK', 'CLASSIC_CHEEZBURGER', 'CLASSIC_MMM_CHEEZBURGER',
+			'CLASSIC_ROBLOX_VICTORY_SOUND', 'HALLOWEEN_2022_BOSS_MUSIC', 'MINICOPTER_START',
+			'MINICOPTER_STOP', 'PICKUP_ITEM_DROP', 'WREN_PANFLUTE_SUMMON', 'WREN_PANFLUTE_UNSUMMON'}},
+		{1.0, {'DAMAGE_1', 'DAMAGE_2', 'DAMAGE_3', 'GLIDER_GLIDE', 'HEADSHOT',
+			'INVISIBLE_LANDMINE_EXPLOSION', 'NEW_DIAMOND_PICKUP', 'NEW_EMERALD_PICKUP',
+			'QUEST_COMPLETE', 'TASK_COMPLETE'}},
+		{0.7, {'ARROW_HIT', 'CACTUS_ABSORB_1', 'CACTUS_ABSORB_2', 'CACTUS_ABSORB_3',
+			'CACTUS_ABSORB_4', 'GLIDER_OPEN', 'GLOOP_TRIGGER', 'LOBBY_MUSIC_CRYSTALMOUNT',
+			'TRUMPET_PLAY'}},
+		{1.4, {'AERY_BUTTERFLY_SPAWN', 'ENCHANT_TABLE_REPAIRED', 'ENCHANT_TABLE_RESEARCH_IMPLODE',
+			'FIREWORK_EXPLODE_1', 'FIREWORK_EXPLODE_2', 'FIREWORK_EXPLODE_3', 'RARE_FIND',
+			'SNOW_CONE_MACHINE_REPAIRED'}},
+		{0.15, {'ATTACK_INDICATOR_1', 'ATTACK_INDICATOR_2', 'ATTACK_INDICATOR_3',
+			'COIN_FOUNTAIN_LOOP', 'FISHERMAN_GAME_LOOP', 'GUITAR_LOOP', 'GUITAR_LOOP_ROCKSTAR'}},
+		{0.35, {'BLASTING_OFF_JINGLE', 'CHRISTMAS_MUSIC', 'EMOTE_CLOSE', 'LASER_SWORD_DEEQUIP',
+			'SUSPENSE_MUSIC', 'TOAD_CROAK', 'VOID_SHIELD_BREAK'}},
+		{0.75, {'DESERT_ISLAND_MUSIC', 'WAND_BUBBLE_POP', 'WAND_BUBBLE_SPAWN', 'WAND_CAST_1',
+			'WAND_CAST_2', 'WAND_CAST_3', 'WAND_HEAL'}},
+		{0.6, {'DESERT_TRAILER_MUSIC', 'LOBBY_MUSIC_HEAVEN', 'TRINITY_LIGHT_ORB_CREATE',
+			'TRINITY_LIGHT_ORB_HEAL', 'TRINITY_VOID_ORB_CREATE', 'TRINITY_VOID_ORB_HEAL'}},
+		{1.3, {'CONGA_LINE', 'HOT_CHOCOLATE_SIP_1', 'HOT_CHOCOLATE_SIP_2', 'HOT_CHOCOLATE_SIP_3',
+			'INFERNAL_SWORD_CHARGE', 'KRAMPUS_EMBER_SWORD_CHARGE'}},
+		{2.5, {'GRINCH_MILO_DISGUISE', 'GRINCH_MILO_REVEAL', 'HALLOWEEN_BOSS_FOG_LOOP',
+			'MILO_VAMPIRE_DISGUISE', 'MILO_VAMPIRE_REVEAL', 'SATELLITE_INTERACT'}},
+		{0.12, {'AMBIENCE_SNOW', 'BRIDGE_DESTROY_1', 'BRIDGE_DESTROY_2', 'BRIDGE_DESTROY_3'}},
+		{0.9, {'ATTACK_SPIRIT_THROW', 'GLOOP_POP', 'HEAL_SPIRIT_THROW'}},
+		{0.09, {'VOICE_1', 'VOICE_2'}},
+		{0.38, {'EQUIP_SWORD', 'SKULL_DROP_SKULL_PICKUP'}},
+		{1.25, {'HALLOWEEN_LOBBY_MUSIC_S11', 'WINTER_BOSS_TRACK'}},
+		{0.025, {'CLASSIC_SWORD_LUNGE'}},
+		{0.035, {'MATCH_MUSIC_HALLOWEEN'}},
+		{0.04, {'VOICE_ARF'}},
+		{0.08, {'HALLOWEEN_2022_LOBBY_MUSIC'}},
+		{0.14, {'MATCH_MUSIC_FORGE'}},
+		{0.18, {'EQUIP_DEFAULT'}},
+		{0.225, {'MATCH_MUSIC_EARLY'}},
+		{0.24, {'GATE_OPENING'}},
+		{0.45, {'DESERT_LOBBY_MUSIC'}},
+		{0.65, {'SPIRIT_ISLAND'}},
+		{1.7, {'ORB_SAT_LASER_FIRE_LOOP'}},
+		{1.8, {'HOT_CHOCOLATE_SIGH'}},
+		{1.9, {'GROUNDED_EFFECT_APPLY'}},
+		{3.8, {'WIND_AMBIENCE'}},
+		{5.0, {'SLIME_SQUISH_2'}}
+	},
+	category = {
+		{'Effects', {'ABSORPTION_BUBBLE_POP', 'ABSORPTION_ENCHANT_APPLY', 'ACTIVE_VACUUM_LOOP',
+			'AMY_VICTORIOUS_BUFF_DIAMOND', 'AMY_VICTORIOUS_BUFF_EMERALD',
+			'AMY_VICTORIOUS_BUFF_GOLD', 'AMY_VICTORIOUS_BUFF_NIGHTMARE',
+			'AMY_VICTORIOUS_BUFF_PLATINUM', 'BANANARANG_FLYING_LOOP', 'BANANARANG_THROW',
+			'BEAR_CLAWS_FLURRY', 'BEAST_ROAR', 'BEEHIVE_GRENADE_EXPLODE', 'BEEHIVE_PRODUCE',
+			'BERSERKER_ENCHANT_APPLY', 'BERSERKER_KIT_ACTIVATE', 'BERSERKER_KIT_LOOP',
+			'BLACKHOLE_COLLAPSE', 'BLOCKING_ENCHANT_APPLY', 'BLOSSOM_SPIRIT_ATTACK_SUMMON',
+			'BLOSSOM_SPIRIT_DEFENSE_SUMMON', 'BLOSSOM_SPIRIT_HEAL', 'BLOSSOM_SPIRIT_HEAL_IDLE',
+			'BLOSSOM_SPIRIT_HEAL_SUMMON', 'BLOSSOM_SPIRIT_KNOCKBACK_SUMMON', 'BOUNTY_ASSIGNED',
+			'BOUNTY_CLAIMED', 'BURN_LOOP', 'CAITLYN_CONTRACT_ACCEPT', 'CAITLYN_CONTRACT_FINISH',
+			'CARD_TURN', 'CARD_UPGRADE_AVAILABLE', 'CARD_UPGRADE_SELECT', 'CHARGE_TRIPLE_SHOT',
+			'CHARGING_GLOOP_ALERT', 'CHARGING_GLOOP_LOOP', 'CHICKEN_ATTACK_1', 'CHICKEN_ATTACK_2',
+			'CHICKEN_ATTACK_3', 'CHICKEN_EGG_CRACK', 'CHOMP', 'CLEAVE_ENCHANT_APPLY',
+			'CLOUD_ENCHANT_APPLY', 'CLOUD_ENCHANT_DESPAWN', 'CLOUD_ENCHANT_LOOP',
+			'CLOUD_ENCHANT_SPAWN', 'COMET_VOLLEY_FIRED', 'COMET_VOLLEY_HERO_CONSUME',
+			'COMET_VOLLEY_HERO_ORE', 'COMET_VOLLEY_VILLAIN_CONSUME', 'COMET_VOLLEY_VILLAIN_ORE',
+			'CRIT_ENCHANT_APPLY', 'CRYPT_SUMMON_SKELETON', 'CRYPT_SUMMON_SKELETON_CRYPTWRECKED',
+			'CRYPT_SUMMON_SKELETON_XMAS', 'CURSE_ACTIVATE', 'CURSE_SUMMON_MOB_PORTAL_CLOSE',
+			'CURSE_SUMMON_MOB_PORTAL_LOOP', 'CURSE_SUMMON_MOB_PORTAL_SPAWN', 'DAGGER_READY',
+			'DAO_CHARGE_COMPLETE', 'DECAY_CARD_THROW_1', 'DECAY_CARD_THROW_2',
+			'DECAY_CARD_THROW_3', 'DECAY_CARD_THROW_4', 'DECAY_CARD_TURN',
+			'DECAY_CARD_UPGRADE_AVAILABLE', 'DECAY_CARD_UPGRADE_SELECT', 'DIAMOND_SHIELD',
+			'DIAMOND_VICTORIOUS_REBELLION_LEADER_HEAL', 'DINO_CHARGE_LOOP', 'DINO_CHARGE_START',
+			'DINO_CHARGE_STOP', 'DISCO_BEAT', 'DODO_OWL_CUTE_HOOT_1', 'DODO_OWL_CUTE_HOOT_2',
+			'DODO_OWL_FLAPPING_LOOP', 'DODO_OWL_HOOT_1', 'DODO_OWL_HOOT_2', 'DODO_OWL_HOOT_3',
+			'DODO_OWL_PROJECTILE_SHOT_1', 'DODO_OWL_PROJECTILE_SHOT_2',
+			'DODO_OWL_PROJECTILE_SHOT_3', 'DRAIN_HEALTH_LOOP', 'DRILL_ATTACK_1', 'DRILL_DEPLOY',
+			'DRILL_LOOP', 'DRONE_DEPLOY', 'DRONE_EXPLODE', 'DUCK_ATTACK_1', 'DUCK_ATTACK_2',
+			'EFFICIENCY_ENCHANT_APPLY', 'EFFICIENCY_TOOL_ENCHANT_HIT_1',
+			'EFFICIENCY_TOOL_ENCHANT_HIT_2', 'EFFICIENCY_TOOL_ENCHANT_HIT_3',
+			'EFFICIENCY_TOOL_ENCHANT_HIT_4', 'EGG_EXPLOSION', 'ELDRIC_CHRISTMAS_DRAIN_CAST',
+			'ELDRIC_CHRISTMAS_DRAIN_LOOP', 'ELECTRIC_DASH', 'ELECTRIC_DASH_READY', 'ELK_SUMMON',
+			'EMERALD_VICTORIOUS_REBELLION_LEADER_HEAL', 'ENCHANT_TABLE_REPAIRED',
+			'ENCHANT_TABLE_REPAIR_HAMMER_1', 'ENCHANT_TABLE_REPAIR_HAMMER_2',
+			'ENCHANT_TABLE_REPAIR_HAMMER_3', 'ENCHANT_TABLE_REPAIR_HAMMER_4',
+			'ENCHANT_TABLE_RESEARCH_CONSUME', 'ENCHANT_TABLE_RESEARCH_IMPLODE',
+			'ENCHANT_VOID_EXPLODE', 'ENDURANCE_ENCHANT_APPLY', 'ENDURANCE_ROCK_HIT_1',
+			'ENDURANCE_ROCK_HIT_2', 'ENDURANCE_ROCK_HIT_3', 'EQUIP_TURTLE_SHELL',
+			'EXECUTE_ENCHANT_APPLY', 'EXPLOSIVE_ENCHANT_APPLY', 'EXPLOSIVE_TRAP_SETUP',
+			'EXTINGUISH', 'FALCON_DESUMMON', 'FALCON_SUMMON', 'FIRE_ENCHANT_APPLY',
+			'FIRE_OWL_CUTE_1', 'FIRE_OWL_CUTE_2', 'FIRE_OWL_FLY', 'FIRE_OWL_HOOT',
+			'FIRE_OWL_HOOT_1', 'FIRE_OWL_HOOT_2', 'FIRE_OWL_HOOT_3', 'FIRE_OWL_HOOT_4',
+			'FIRE_OWL_SHOOT_1', 'FIRE_OWL_SHOOT_2', 'FIRE_OWL_SHOOT_3', 'FLAG_BUFF', 'FLAG_DROP',
+			'FLAMETHROWER_UPGRADE', 'FLYING_CLOUD_DISMOUNT', 'FLYING_CLOUD_MOUNT',
+			'FORK_TRIDENT_RETURN', 'FORTIFY_BLOCK', 'FORTUNE_ENCHANT_APPLY',
+			'FRANKEN_LIGHTNING_CHARGE', 'FROST_ARMOR_CD_OFF', 'FROST_ARMOR_ICY_BLAST',
+			'FROST_ENCHANT_APPLY', 'FROST_SHIELD_SUMMON', 'FROST_STORM_START', 'FRYING_PAN_CHARGE',
+			'GATHER_BOT_DEATH', 'GATHER_BOT_OVERCLOCK', 'GAUNTLETS_CHARGE_PUNCH_CHARGE',
+			'GAUNTLETS_CHARGE_PUNCH_IMPACT', 'GAUNTLETS_JAB_SWING_4', 'GHOST_VACUUM_CATCH',
+			'GHOST_VACUUM_SHOOT', 'GHOST_VACUUM_SUCKING_LOOP', 'GLIDER_OPEN', 'GLOOP_LANDED',
+			'GLOOP_LOOP', 'GLUE_ENCHANT_01', 'GLUE_ENCHANT_02',
+			'GOLD_VICTORIOUS_REBELLION_LEADER_HEAL', 'GOO_EAT', 'GOO_SPIT', 'GRAVESTONE_LOWER',
+			'GROVE_EASTER_BUFF', 'GROVE_ELYSIUM_BUFF', 'GUITAR_HEAL_1',
+			'GUITAR_HEAL_1_HOLIDAY_COZY', 'GUITAR_HEAL_1_ROCKSTAR', 'GUITAR_HEAL_1_SIREN',
+			'GUITAR_LOOP', 'GUITAR_LOOP_ROCKSTAR', 'HAIR_DRYER_END', 'HAIR_DRYER_LOOP',
+			'HAIR_DRYER_START', 'HALLOWEEN_BOSS_BEAM', 'HALLOWEEN_BOSS_CAST',
+			'HALLOWEEN_BOSS_FOG_LOOP', 'HALLOWEEN_BOSS_ROCK_CRUMBLE',
+			'HALLOWEEN_BOSS_RUNE_EXPLODE', 'HEALING_BACKPACK_USED', 'HEAL_SPIRIT_APPEAR',
+			'HEAL_SPIRIT_EASTER_APPEAR', 'HEAL_SPIRIT_EASTER_THROW', 'HEAL_SPIRIT_THROW',
+			'HEAVY_HITTER_ENCHANT_APPLY', 'HERO_SCEPTER_CHARGE', 'HOT_AIR_BALLOON_DISMOUNT',
+			'HOT_AIR_BALLOON_MOUNT', 'HOT_AIR_BALLOON_THRUSTER_LOOP',
+			'HOT_AIR_BALLOON_THRUSTER_START', 'ICICLE_IMPACT_1', 'ICICLE_IMPACT_2',
+			'INVISIBLE_CLOAK', 'JAILOR_SOUL_CONSUME', 'JELLYFISH_PULSE_1', 'JINGLE_BELLS',
+			'JUGGERNAUT_ATTACK_IMPACT_1', 'JUGGERNAUT_LEAP', 'JUGGERNAUT_SPIN',
+			'JUGGERNAUT_SPIN_LOOP', 'KALIYAH_EXPLOSION', 'KALIYAH_PUNCH', 'KALIYAH_WALL_HIT',
+			'KEEPER_SUMMON', 'KING_PENGUIN_SUMMON', 'KNIGHT_SHIELD_BROKEN', 'LANI_ASCEND',
+			'LANI_DASH', 'LANI_LANDING', 'LANI_SUMMON', 'LIFE_STEAL_HEAL', 'LIFE_STEAL_OVERHEAL',
+			'LUNAR_VENOM_INFECTION', 'MAGICAL_HERO_LB_BREAK', 'MAGICAL_HERO_LB_HIT_1',
+			'MAGICAL_HERO_LB_HIT_2', 'MAGICAL_HERO_LB_HIT_3', 'MAGICAL_HERO_LB_SPAWN',
+			'MAGICAL_VILLAIN_LB_SPAWN', 'MAGIC_CIRCLE_FLAME_ERUPT', 'MAGIC_CIRCLE_SPAWN',
+			'MIDNIGHT_ATTACK_3', 'MINICOPTER_BOUNCE_3', 'MINICOPTER_EXPLODE', 'MINICOPTER_LOOP',
+			'MINICOPTER_START', 'MINICOPTER_STOP', 'MULTI_BREAK_TOOL_DRILL_LOOP',
+			'MULTI_BREAK_TOOL_DRILL_STOP', 'NIGHTMARE_VICTORIOUS_REBELLION_LEADER_HEAL',
+			'NINJA_SMOKE_1', 'NINJA_SMOKE_2', 'NINJA_SMOKE_3', 'NYOKA_HEAL_APPLIED_0',
+			'NYOKA_HEAL_APPLIED_1', 'NYOKA_HEAL_APPLIED_2', 'NYOKA_HEAL_APPLIED_3',
+			'NYOKA_MENDING_RADIUS_LOOP', 'NYOKA_MENDING_STAFF_CHARGING',
+			'NYOKA_MENDING_STAFF_GLIDE_AVAILABLE', 'NYOKA_MENDING_STAFF_OVERCHARGE',
+			'OASIS_BUFF_PROJECTILE_1', 'OASIS_BUFF_PROJECTILE_2', 'OASIS_BUFF_PROJECTILE_3',
+			'OASIS_BUFF_PROJECTILE_4', 'OASIS_CANNOT_TARGET', 'OASIS_HEAL_PROJECTILE_1',
+			'OASIS_HEAL_PROJECTILE_2', 'OASIS_HEAL_PROJECTILE_3', 'OASIS_HEAL_PROJECTILE_4',
+			'OASIS_SWAP_BUFF', 'OASIS_SWAP_HEAL', 'OASIS_WATER_VEIL_APPLY',
+			'OASIS_WATER_VEIL_LOOP', 'ORB_SAT_ACTIVATE', 'ORB_SAT_LASER_CHARGE',
+			'ORB_SAT_LASER_FIRE_LOOP', 'ORB_SAT_LASER_IMPACT_LOOP', 'ORB_SAT_LASER_POWER_DOWN',
+			'OVERLOAD_BEEP', 'OVERLOAD_LOOP', 'OWL_CUTE_1', 'OWL_CUTE_2', 'OWL_FLY', 'OWL_HOOT',
+			'OWL_HOOT_1', 'OWL_HOOT_2', 'OWL_HOOT_3', 'OWL_HOOT_4', 'OWL_SHOOT_1', 'OWL_SHOOT_2',
+			'OWL_SHOOT_3', 'PEARLESCENT_EXPLOSIVE_TRAP_EXPLODE',
+			'PEARLESCENT_EXPLOSIVE_TRAP_SETUP', 'PEARLESCENT_SNAP_TRAP_CLOSE',
+			'PEARLESCENT_SNAP_TRAP_SETUP', 'PEARLESCENT_VENOM_TRAP_EXPLODE',
+			'PEARLESCENT_VENOM_TRAP_SETUP', 'PENGUIN_ATTACK_1', 'PINATA_DEPOSIT_CANDY',
+			'PINATA_STAGE_INCREASE', 'PIT_OPEN', 'PIT_PLACE',
+			'PLATNUM_VICTORIOUS_REBELLION_LEADER_HEAL', 'PLUNDER_ENCHANT_APPLY', 'QUEEN_BEE_GLIDE',
+			'RAINBOW_AXE_ABILITY', 'RAINBOW_BRIDGE_AURA', 'REBELLION_HEAL',
+			'ROCKET_LAUNCHER_FLYING_LOOP', 'SAND_SPEAR_BOUNCE', 'SAND_SPEAR_LOOP', 'SCARAB_ATTACK',
+			'SCARAB_FLY', 'SCARAB_SPAWN', 'SCYTHE_SPIRIT_STATE', 'SEAGULL_DESUMMON',
+			'SEAGULL_SUMMON', 'SEAHORSE_DAMAGE_BEAM', 'SEAHORSE_DAMAGE_SHOT_1',
+			'SEAHORSE_DAMAGE_SHOT_2', 'SEAHORSE_EVOLVE_1', 'SEAHORSE_EVOLVE_2',
+			'SEAHORSE_EVOLVE_3', 'SEAHORSE_FREEZE', 'SEAHORSE_HEAL_BEAM', 'SEAHORSE_HEAL_SHOT_1',
+			'SEAHORSE_HEAL_SHOT_2', 'SEAHORSE_SPEEDUP', 'SHATTER_STRIKE_ENCHANT_APPLY',
+			'SHIELD_BLOCKED', 'SILAS_HALLOWEEN_BUFF', 'SILAS_HALLOWEEN_HEX', 'SKELETON_ATTACK_1',
+			'SKELETON_ATTACK_2', 'SKELETON_ATTACK_3', 'SKELETON_DEATH', 'SKELETON_EMERGE',
+			'SKELETON_IDLE_1', 'SKELETON_IDLE_2', 'SKELETON_IDLE_3', 'SKELETON_IDLE_4',
+			'SKELETON_KIT_DISASSEMBLE', 'SKELETON_KIT_REASSEMBLE', 'SKELETON_KIT_SMOKE_LOOP',
+			'SLIME_RECALL', 'SMOKE_CHARGE_LOOP', 'SMOKE_GRENADE_EMIT_LOOP', 'SMOKE_GRENADE_POP',
+			'SNAKE_BUFF', 'SNAP_TRAP_CLOSE', 'SNAP_TRAP_CONSUME_MARK', 'SNAP_TRAP_SETUP',
+			'SNOWANGEL_SUMMONER_CLAW_ATTACK_1', 'SNOWANGEL_SUMMONER_CLAW_ATTACK_2',
+			'SNOWANGEL_SUMMONER_CLAW_ATTACK_3', 'SNOWANGEL_SUMMONER_CLAW_ATTACK_4',
+			'SNOWANGEL_SUMMONER_SUMMON_CHANNEL_LOOP', 'SNOWANGEL_SUMMONER_SUMMON_FINISH',
+			'SNOWBALL_LAUNCHER_SWITCH_MODE', 'SNOW_OWL_SKIN_ADETUNDE_SHIELD',
+			'SNOW_OWL_SKIN_ADETUNDE_SHIELD_BLAST', 'SNOW_OWL_SKIN_ADETUNDE_SLAM',
+			'SNOW_OWL_SKIN_ADETUNDE_STORM_END', 'SNOW_OWL_SKIN_ADETUNDE_STORM_LOOP',
+			'SNOW_OWL_SKIN_ADETUNDE_STORM_START', 'SOLAR_FLARE_EXPLOSION', 'SOLAR_PANEL_ENERGY',
+			'SORCERER_SPELL_CHARGING_LOOP', 'SORCERER_SPELL_UPGRADES', 'SOUL_REAVER_ENCHANT_APPLY',
+			'SOUL_REAVER_LOOP', 'SOUND_BARRIER_CD_OFF', 'SOUND_BARRIER_ENCHANT_APPLY',
+			'SOUND_BARRIER_PULSE', 'SPEAR_CHARGE', 'SPEAR_STAB_1', 'SPEAR_STAB_2', 'SPEAR_STAB_3',
+			'SPIDER_ATTACK_1', 'SPIDER_QUEEN_SPIDERLING_ATTACK_1',
+			'SPIDER_QUEEN_SPIDERLING_ATTACK_2', 'SPIDER_QUEEN_SPIDERLING_ATTACK_3',
+			'SPIDER_QUEEN_SPIDERLING_ATTACK_4', 'SPIDER_QUEEN_SPIDERLING_SUMMON_1',
+			'SPIDER_QUEEN_SPIDERLING_SUMMON_2', 'SPIDER_QUEEN_SPIDERLING_SUMMON_3',
+			'SPIDER_QUEEN_SPIDERLING_SUMMON_4', 'SPIDER_WEB', 'SPIRIT_BRIDGE_AOE_ACTIVATED',
+			'SPIRIT_BRIDGE_LOOP', 'SPIRIT_BRIDGE_SPIRIT_HEAL', 'SPIRIT_DAGGER_CHARGE',
+			'SPIRIT_DAGGER_SLASH', 'SPIRIT_DISPEL', 'SPIRIT_EASTER_SUMMON',
+			'SPIRIT_GARDENER_BUFF_APPLIED', 'SPIRIT_GARDENER_SPIRIT_ORB_COLLECTED',
+			'SPIRIT_SUMMONER_CHANGE_AFFINITY', 'SPIRIT_SUMMONING', 'SPIRIT_TITAN_SUMMON_PILLARS',
+			'STAR_CRUSH', 'STAR_IDLE', 'STATIC_ENCHANT_APPLY', 'STEAM_ENGINEER_OVERCLOCK_ACTIVATE',
+			'STOPWATCH_ACTIVATED', 'STOPWATCH_TICKING', 'SUMMONER_CLAW_ATTACK_1',
+			'SUMMONER_CLAW_ATTACK_2', 'SUMMONER_CLAW_ATTACK_3', 'SUMMONER_CLAW_ATTACK_4',
+			'SUMMONER_SUMMON_CHANNEL_LOOP', 'SUMMONER_SUMMON_FINISH', 'SWIFT_ENCHANT_APPLY',
+			'SWIFT_ENCHANT_PULSE_ACTIVATE', 'TARGET_DUMMY_DESTROYED', 'TELEPORT_ACTIVATION',
+			'TERRA_VOID_STOMP', 'TESLA_ZAP', 'TITAN_SUMMON_PILLARS', 'TORNADO_LOOP',
+			'TRACTOR_BEAM_LOOP', 'TRINITY_FALLEN_SKIN_DARK_ORB_HEAL',
+			'TRINITY_FALLEN_SKIN_LIGHT_ORB_HEAL', 'TRINITY_ICECREAM_SKIN_DARK_ORB_HEAL',
+			'TRINITY_ICECREAM_SKIN_LIGHT_ORB_HEAL', 'TRINITY_LIGHT_ORB_HEAL',
+			'TRINITY_VOID_ORB_HEAL', 'TRUMPET_PLAY', 'TV_STATIC', 'TWIRLBLADE_SPIN',
+			'UFO_EJECT_PLAYER', 'UFO_ENGINE_LOOP', 'UFO_ENTER', 'UFO_EXIT', 'UFO_HOLDING_ABDUCTEE',
+			'UMBRA_HAT_ATTACHED', 'UMBRA_HAT_THROW', 'UMBRA_HAT_THROW_LOOP',
+			'UMBRA_TELEPORT_ARRIVE', 'UMBRA_TELEPORT_DEPART', 'UMBRA_TELEPORT_LOOP',
+			'USE_SMOKE_CHARGE', 'VACUUM_CATCH', 'VENDING_ROLL_PRIZE', 'VENDING_ROLL_TICK',
+			'VENOM_TRAP_EXPLODE', 'VENOM_TRAP_SETUP', 'VILLAIN_SCEPTER_CHARGE', 'VOIDIFY_ARMOR',
+			'VOID_CRAB_BASIC_ATTACK', 'VOID_CRAB_BEAM_ATTACK', 'VOID_HEALTH_DECAY',
+			'VOID_HOUND_ATTACK_1', 'VOID_HOUND_ATTACK_2', 'VOID_HOUND_SLAM',
+			'VOID_HOUND_TAIL_ATTACK', 'VOID_KNIGHT_LEVEL_UP_1', 'VOID_KNIGHT_LEVEL_UP_2',
+			'VOID_KNIGHT_LEVEL_UP_3', 'VOID_KNIGHT_LEVEL_UP_4', 'VOID_PORTAL_EXIT',
+			'VOID_SHIELD_BREAK', 'VOID_TITAN_SUMMON_PILLARS', 'WAND_HEAL', 'WARLOCK_HEAL_LOOP',
+			'WARLOCK_HEAL_START', 'WARLOCK_SIPHON_LOOP', 'WARLOCK_SIPHON_START',
+			'WARRIOR_FINAL_STAND_KILL', 'WARRIOR_FINAL_STAND_LOOP', 'WEREWOLF_CHARGE',
+			'WEREWOLF_HOWL', 'WINTER_BOSS_DASH_ATTACK', 'WINTER_BOSS_ICICLE_IMPACT',
+			'WINTER_BOSS_SPIN_LOOP', 'WITCH_BROOM_CURSED_ITEM_EXPLOSION', 'WITCH_BROOM_DISMOUNT',
+			'WITCH_BROOM_MOUNT', 'WITCH_BROOM_SPAWN', 'WITCH_BROOM_TRAIL_LOOP',
+			'WIZARD_LIGHTNING_STRIKE_CAST', 'WOLF_REBELLION_HEAL', 'WREN_PANFLUTE_SUMMON',
+			'WREN_PANFLUTE_UNSUMMON', 'XUROT_BREATH', 'XUROT_TRANSFORM', 'YETI_ROAR',
+			'ZIPLINE_LATCH', 'ZIPLINE_TRAVEL', 'ZIPLINE_UNLATCH', 'ZOMBIE_GROWL_1',
+			'ZOMBIE_GROWL_2', 'ZOMBIE_GROWL_4', 'ZOMBIE_GROWL_6'}},
+		{'Cosmetics', {'AERY_BUTTERFLY_SOUND_EFFECT', 'ASCEND', 'ATOMIC_SHRINK', 'BALLOON_INFLATE',
+			'BAT_EXPLOSION', 'BED_INFLATE_SOUND', 'BED_POP_SOUND', 'BLASTING_OFF_JINGLE',
+			'BLASTING_OFF_SPARKLE', 'BLASTING_OFF_YELL', 'BOW_FIRE', 'BOXING_GLOVE_KILL_EFFECT',
+			'BUBBLE_KILL_EFFECT', 'BUTTERFLY_SWARM_BED_BREAK_FLUTTER', 'CENTIPEDE_LEG_POP_OUT',
+			'CENTIPEDE_STEP', 'CHICKEN_DEPLOY', 'COFFIN_KILL_EFFECT', 'CRYSTALLIZE_BED',
+			'CRYSTALLIZE_BED_BREAK', 'CRYSTAL_BED_IMPALE', 'DEER_SLEIGH_CRUSH', 'DEER_SLEIGH_LOOP',
+			'DUST_DEVIL_LOOP', 'DUST_DEVIL_PICKUP_LOOP', 'EGG_HUNT_EGG_DEPOSIT', 'EGG_LAUNCH',
+			'EQUIP_JET_PACK', 'EVIL_LAUGH', 'FIRE_START', 'FLOWER_BLOOM', 'FLYING_CARPET_IDLE',
+			'FORGE_CRYSTAL_EXPLODE', 'FROST_STAFF_FREEZE', 'FROST_STAFF_LOOP', 'FRYING_PAN_HIT',
+			'GENIE_LAMP_KILL_EFFECT', 'GIFT_KILL_EFFECT', 'GLITCH_KILL_EFFECT', 'GLOVE_FLICK',
+			'HEART', 'JETPACK_COOLDOWN_READY', 'JETPACK_LAUNCH', 'KILL_EFFECT_SLASH',
+			'KNIFE_RAIN_EFFECT', 'LASER_SWORD_DEEQUIP', 'LASER_SWORD_EQUIP', 'MIRROR_EFFECT',
+			'PENGUIN_SQUAWK_1', 'PILLOW_HIT_2', 'PILLOW_HIT_3', 'RAVEN_CAW', 'RAVE_MUSIC',
+			'ROCKET_KILL_EFFECT', 'SARCOPHAGUS_KILL_EFFECT', 'SCYTHE_SWING_1', 'SHARK_BITE',
+			'SHATTER_STRIKE_BREAK_1', 'SNAKE_BED_BREAK', 'SNOWBALL_CRUSH', 'SNOWBALL_FALL',
+			'SNOWBALL_KILL_EFFECT', 'SPEAR_THROW', 'SPIRIT_ASSASSIN_GHOST_DRAG', 'SPIRIT_EFFECT',
+			'SPLIT_BED_BREAK_FALL_APART', 'STAR_KILL_EFFECT', 'STATUE', 'STRING_KILL_EFFECT',
+			'SWORD_CHARGE_READY', 'SWORD_SPARKLE', 'TEAM_UPGRADE_PURCHASE', 'TOILET_FLUSH',
+			'TRAIN_MOVEMENT_LOOP', 'TRAIN_WHISTLE', 'TRIUMPH_WIN_EFFECT_LIGHT',
+			'TRIUMPH_WIN_EFFECT_PURIFY', 'TRIUMPH_WIN_EFFECT_STATUE', 'TUCK_IN_KILL_EFFECT_MUSIC',
+			'UFO_KILL_EFFECT', 'VOID_AXE_LEAP', 'VOID_KNIGHT_KILL_EFFECT', 'WEB_CAUGHT',
+			'WHITE_RAVEN_FLYING_LOOP', 'WHITE_RAVEN_SNATCH', 'WIND_TUNNEL_FLYING',
+			'WINTER_BOSS_FROST_LOOP', 'WINTER_BOSS_ICE_BREAK', 'WINTER_MINER_ICE_BREAK',
+			'WIZARD_LIGHTNING_CAST', 'WIZARD_ORB_TRAVEL_LOOP', 'WOOD_BLOCK_BREAK'}},
+		{'Ambience', {'CAVE_AMBIENCE', 'CELESTIAL_WIND_WALKER_DOUBLE_JUMP_1',
+			'CELESTIAL_WIND_WALKER_DOUBLE_JUMP_2', 'CELESTIAL_WIND_WALKER_ORB_GET',
+			'CELESTIAL_WIND_WALKER_ORB_SPAWN', 'ELDERREEF_AMBIENT', 'FOREST_AMBIENCE',
+			'FOREST_ENCHANT_ACTIVATE', 'FOREST_ENCHANT_APPLY', 'FORGE_AMBIENT',
+			'FORGE_AMBIENT_UPGRADE_AVAILABLE', 'GLITCH_AMBIENT_1', 'GLITCH_AMBIENT_2',
+			'GOLDEN_GOOSE_AMBIENT', 'GRAVEYARD_AMBIENCE_LOOP', 'HALLOWEEN_BOSS_AMBIENT_LOOP',
+			'KEEPER_AMBIENT_LOOP', 'LAVA_AMBIENT', 'ORB_SAT_LASER_AMBIENT_LOOP',
+			'PINATA_AMBIENT_LOOP', 'PIRATE_EVENT_RAIN_LOOP', 'RAINBOW_AMBIENT_LOOP',
+			'RAINBOW_BACKPACK_PRISM_HIT_1', 'RAINBOW_BACKPACK_PRISM_HIT_2',
+			'RAINBOW_BACKPACK_PRISM_HIT_3', 'RAINBOW_BACKPACK_PRISM_HIT_4',
+			'RAINBOW_BRIDGE_CREATE', 'RAINBOW_EXPLODE', 'RAINBOW_INIT', 'RAINBOW_LB_AMBIENT_LOOP',
+			'RAINBOW_LB_HIT_1', 'RAINBOW_LB_HIT_2', 'RAINBOW_LB_HIT_3', 'RAINBOW_OPEN_POT_OF_GOLD',
+			'RAIN_DANCE', 'RAVEN_SPACE_AMBIENT', 'STOPWATCH_REWINDING', 'TREE_ORB_AMBIENT',
+			'WIND_AMBIENCE', 'WIND_ENCHANT_APPLY', 'WIND_ENCHANT_LOOP_1', 'WIND_ENCHANT_LOOP_2',
+			'WIND_ENCHANT_LOOP_3', 'WIND_ENCHANT_LOOP_4', 'WIND_HIT_SHOUD_1', 'WIND_HIT_SHOUD_2',
+			'WIND_HIT_SHOUD_3', 'WIND_HIT_SHOUD_4', 'WIND_HIT_SHOUD_5', 'WIND_LOOP',
+			'WIND_ORB_GET', 'WIND_ORB_SPAWN'}},
+		{'UI', {'BATTLE_PASS_PROGRESS_EXP_GAIN', 'BATTLE_PASS_PROGRESS_LEVEL_UP',
+			'BEDWARS_PURCHASE_ITEM', 'ERROR_NOTIFICATION', 'FISHERMAN_GAME_PROGRESS_INCREASE',
+			'FISHERMAN_GAME_START', 'HALLOWEEN_BLACK_MARKET_SHOP_SUMMON',
+			'HALLOWEEN_BLACK_MARKET_SHOP_UPGRADE', 'HALLOWEEN_LTM_LOST',
+			'HOLIDAY_BLACK_MARKET_SHOP_SUMMON', 'HOLIDAY_BLACK_MARKET_SHOP_UPGRADE',
+			'INFO_NOTIFICATION', 'JAILOR_IMPRISON_SLAM', 'PARTY_INCOMING_INVITE',
+			'PREGAME_VOTE_WINNER_CHOSEN', 'PROMOTION_INDICATION', 'PROMOTION_RANKUP',
+			'PROMOTION_SHINE_LOOP', 'QUEUE_JOIN', 'ROULETTE_TICK',
+			'TIDAL_BLACK_MARKET_SHOP_SUMMON', 'TIDAL_BLACK_MARKET_SHOP_UPGRADE',
+			'TRAVELING_MERCHANT_PURCHASE_EPIC', 'TRAVELING_MERCHANT_PURCHASE_RARE',
+			'TRAVELING_MERCHANT_PURCHASE_UNIQUE', 'UI_CLICK', 'UI_CLICK_2', 'UI_CLOSE_2',
+			'UI_ERROR', 'UI_HOVER', 'UI_OPEN', 'UI_OPEN_2', 'UI_REWARD', 'USE_HALLOWEEN_KEY'}}
+	},
+	bus = {
+		{'MATCH_MUSIC', {'ANGEL_WING_WIN_EFFECT_MUSIC', 'CHRISTMAS_MUSIC', 'DESERT_BOSS_MUSIC',
+			'DESERT_ISLAND_MUSIC', 'DESERT_TRAILER_MUSIC', 'FUNKY_DANCE_MUSIC',
+			'GOODNIGHT_DANCE_MUSIC', 'GRAVEYARD_MUSIC_LOOP', 'HALLOWEEN_2022_BOSS_MUSIC',
+			'HALLOWEEN_MUSIC', 'INFECTED_HALLOWEEN_MUSIC', 'KINGDOM_MUSIC', 'MATCH_MUSIC_EARLY',
+			'MATCH_MUSIC_FORGE', 'MATCH_MUSIC_HALLOWEEN', 'MATCH_MUSIC_LATE', 'ORE_TRACK',
+			'PENGUIN_SURVIVAL_BOSS_TRACK', 'PENGUIN_SURVIVAL_INTERMISSION_TRACK',
+			'PENGUIN_SURVIVAL_VICTORY_TRACK', 'PENGUIN_SURVIVAL_WAVE_TRACK', 'PIRATE_EVENT_MUSIC',
+			'PVP_ARENA_INTERMISSION_TRACK', 'SKULL_DROP_ROUND_ENDING_MUSIC', 'SNOWBOARD_MUSIC',
+			'SPIDER_QUEEN_BOSS_MUSIC', 'SUSPENSE_MUSIC', 'THRILLER_DANCE_MUSIC',
+			'UNDERWORLD_BOSS_MUSIC', 'VOID_THEME_SONG', 'WINTER_BOSS_TRACK',
+			'WINTER_BOSS_VICTORY_TRACK', 'WINTER_EVENT_BOSS_MUSIC', 'WINTER_EVENT_INTRO_MUSIC',
+			'WINTER_EVENT_MINIGAME_MUSIC'}},
+		{'EMOTE_MUSIC', {'BAGUETTE_HIT', 'DUCK_WALK_EMOTE', 'EMOTE_CLOSE', 'GRIDDY_EMOTE',
+			'KIT_MASTERY_EMOTE_BRONZE', 'KIT_MASTERY_EMOTE_DIAMOND', 'KIT_MASTERY_EMOTE_EMERALD',
+			'KIT_MASTERY_EMOTE_GOLD', 'KIT_MASTERY_EMOTE_NIGHTMARE', 'KIT_MASTERY_EMOTE_PLATINUM',
+			'KIT_MASTERY_EMOTE_SILVER', 'LANTERN_RELEASE', 'POGO_BOUNCE', 'POPCORN_GRAB',
+			'RABBIT_HAT_EMOTE_DRUMROLL', 'RABBIT_HAT_EMOTE_TADA', 'ROTTEN_EGG_EMOTE_SOUND',
+			'SCYTHE_PULL_1', 'SCYTHE_PULL_2', 'TOP_ASSASSIN_EMOTE', 'TOURNAMENT_WINNER_EMOTE',
+			'TREASURE_PILE_EMOTE'}},
+		{'LOBBY_MUSIC', {'DESERT_LOBBY_MUSIC', 'HALLOWEEN_2022_LOBBY_MUSIC',
+			'HALLOWEEN_LOBBY_MUSIC_S11', 'LOBBY_MUSIC', 'LOBBY_MUSIC_CRYSTALMOUNT',
+			'LOBBY_MUSIC_DRUMS', 'LOBBY_MUSIC_FOREST', 'LOBBY_MUSIC_HEAVEN', 'LOBBY_MUSIC_SUMMER',
+			'METEOR_LOBBY_MUSIC', 'PIRATE_EVENT_LOBBY_MUSIC'}},
+		{'WINTER_AMBIENCE', {'AMBIENCE_SNOW'}},
+		{'WINTER_MUSIC', {'WINTER_EVENT_BACKGROUND_MUSIC'}}
+	},
+	busCategory = {
+		EMOTE_MUSIC = 'Cosmetics', LOBBY_MUSIC = 'Music', MATCH_MUSIC = 'Music',
+		WINTER_AMBIENCE = 'Ambience', WINTER_MUSIC = 'Music'
+	},
+	rollOffMax = {
+		{100.0, {'DARK_BOLT_HIT', 'KEEPER_ATTACK', 'KEEPER_LOOP', 'SPIRIT_TITAN_FIST_SLAM',
+			'SPIRIT_TITAN_HAMMER_SLAM', 'SPIRIT_TITAN_IDLE_1', 'SPIRIT_TITAN_IDLE_2',
+			'SPIRIT_TITAN_IDLE_3', 'SPIRIT_TITAN_IDLE_4', 'SPIRIT_TITAN_SUMMON_PILLARS',
+			'TITAN_FIST_SLAM', 'TITAN_HAMMER_SLAM', 'TITAN_IDLE_2', 'TITAN_IDLE_3', 'TITAN_IDLE_4',
+			'TITAN_SUMMON_PILLARS', 'VOID_TITAN_FIST_SLAM', 'VOID_TITAN_HAMMER_SLAM',
+			'VOID_TITAN_IDLE_1', 'VOID_TITAN_IDLE_2', 'VOID_TITAN_IDLE_3', 'VOID_TITAN_IDLE_4',
+			'VOID_TITAN_SUMMON_PILLARS'}},
+		{300.0, {'SPIRIT_TITAN_DEATH_2', 'SPIRIT_TITAN_IDLE_SPAWN', 'TITAN_DEATH_2',
+			'TITAN_IDLE_1', 'TITAN_IDLE_SPAWN', 'VOID_TITAN_DEATH_2', 'VOID_TITAN_IDLE_SPAWN'}},
+		{60.0, {'SPIRIT_TITAN_FORCEFIELD', 'SPIRIT_TITAN_ZAP', 'TITAN_FORCEFIELD', 'TITAN_ZAP',
+			'VOID_TITAN_FORCEFIELD', 'VOID_TITAN_ZAP'}},
+		{80.0, {'AXOLOTL_SWITCH_TARGETS', 'CONFETTI', 'SLIME_SQUISH_2'}},
+		{200.0, {'TURRET_SHOOT'}},
+		{250.0, {'SMOKE_GRENADE_POP'}},
+		{70.0, {'RECORD_PLAYER_LOOP'}}
+	},
+	rollOffMin = {
+
+	},
+	speed = {
+		{{1.3, 1.5}, {'WREN_PANFLUTE_SUMMON', 'WREN_PANFLUTE_UNSUMMON'}},
+		{{1.2, 1.3}, {'TOAD_CROAK'}}
+	}
+}
+
+--[[ The registration of a sound asset, from knitless.soundMeta through GameSound, built into a
+lookup by asset the first time; an asset without one gets an empty table. Names that share an
+asset fold as registerGameSounds folds them: their category and bus stay only when every one of
+them has the same pair, else the asset plays in Gameplay. A bus that stays gives the asset its
+category, as assignAudioRouting puts a registered bus ahead of a registered category. The volume,
+roll-off and speed are those of one of the names that has any (the game keeps the ones of the name
+it registers first, in an order this layer cannot see). ]]
+function knitless.soundMetaOf(ctx, asset)
+	local meta = knitless.soundMeta
+	if not meta.byAsset then
+		local ok, names = pcall(ctx.data, 'GameSound')
+		if not (ok and type(names) == 'table') then return {} end
+		local byName = {}
+		for key, field in {volume = 'volume', category = 'category', bus = 'bus', rollOffMax = 'rollOffMax',
+			rollOffMin = 'rollOffMin', speed = 'speed'} do
+			for _, group in meta[key] do
+				for _, name in group[2] do
+					byName[name] = byName[name] or {}
+					byName[name][field] = group[1]
+				end
+			end
+		end
+		local byAsset, routes = {}, {}
+		for name, id in names do
+			if type(id) == 'string' and id ~= '' then
+				local own = byName[name] or {}
+				local route = (own.category or 'Gameplay')..'/'..(own.bus or '')
+				if routes[id] == nil or routes[id] == route then
+					routes[id] = route
+				else
+					routes[id] = false
+				end
+				if next(own) and not byAsset[id] then
+					byAsset[id] = table.clone(own)
+				end
+			end
+		end
+		for id, entry in byAsset do
+			entry.category = routes[id] and (meta.busCategory[entry.bus] or entry.category) or nil
+		end
+		meta.byAsset = byAsset
+	end
+	return meta.byAsset[asset] or {}
+end
+
+--[[ The mixer category assignAudioRouting gives a sound played with config whose asset has the
+registration meta (knitless.soundMetaOf): config.category when it is one of AudioCategory's six
+values, else the registered one, else Gameplay. A caller's bus, and an AudioCategory attribute up
+the ancestry of the sound's parent, come before both in the game; they are left out here. ]]
+function knitless.audioCategory(config, meta)
+	local category = type(config) == 'table' and config.category or nil
+	if category == 'Gameplay' or category == 'Effects' or category == 'UI' or category == 'Cosmetics'
+		or category == 'Ambience' or category == 'Music' then
+		return category
+	end
+	return meta.category or 'Gameplay'
+end
+
+--[[ The gain the game's mixer puts on a category: the Volume of its fader times the master fader's,
+in SoundService.GameAudioGraph, where the in-game volume settings land. 1 while the graph is not
+there. ]]
+function knitless.busGain(soundService, category)
+	local graph = soundService:FindFirstChild('GameAudioGraph')
+	if not graph then return 1 end
+	local master = graph:FindFirstChild('Master')
+	local fader = graph:FindFirstChild('Category_'..category..'Fader')
+	local gain = 1
+	if master and master:IsA('AudioFader') then gain *= master.Volume end
+	if fader and fader:IsA('AudioFader') then gain *= fader.Volume end
+	return gain
+end
+
+--[[ game-core's AudioManager, playing plain Sounds. The game plays an AudioPlayer at the volume its
+asset was registered with through its mixer (knitless.busGain); a Sound stands in at that volume
+times the gain, when it starts, of the category the game would route it to
+(knitless.audioCategory), with the registered roll-off distances and playback speed range. The
+config keys are the game's: position (a hidden part there), parent, looped, category,
+volumeMultiplier, playbackSpeedMultiplier and the roll-off distances. playAudio goes through
+internalPlayAudio as the game's does, so a hook there sees these sounds too. A sound it made is
+removed when it ends, or 10 s on when it never loaded. ]]
 function knitless.registryAudio(ctx)
 	local workspace = ctx.services.Workspace
 	local soundService = ctx.services.SoundService or game:GetService('SoundService')
@@ -4156,10 +4646,15 @@ function knitless.registryAudio(ctx)
 		elseif type(asset) == 'string' and asset ~= '' then
 			sound, owned = Instance.new('Sound'), true
 			sound.SoundId = asset
+			local meta = knitless.soundMetaOf(ctx, asset)
+			sound.Volume = (meta.volume or 0.5) * knitless.busGain(soundService, knitless.audioCategory(config, meta))
+			if meta.speed then
+				sound.PlaybackSpeed = meta.speed[1] + math.random() * (meta.speed[2] - meta.speed[1])
+			end
 			if type(config.volumeMultiplier) == 'number' then sound.Volume *= config.volumeMultiplier end
 			if type(config.playbackSpeedMultiplier) == 'number' then sound.PlaybackSpeed *= config.playbackSpeedMultiplier end
-			sound.RollOffMaxDistance = tonumber(config.rollOffMaxDistance) or 60
-			sound.RollOffMinDistance = tonumber(config.rollOffMinDistance) or 10
+			sound.RollOffMaxDistance = tonumber(config.rollOffMaxDistance) or meta.rollOffMax or 60
+			sound.RollOffMinDistance = tonumber(config.rollOffMinDistance) or meta.rollOffMin or 10
 		else
 			return nil
 		end
@@ -6504,7 +6999,7 @@ the rest place on the root cell only. The bed's second cell follows its yaw. The
 read their footprint from their parts and count as their root cell here. A greedy block holds every
 cell in its box, cached until its size changes. Until the source folder has replicated every other
 block counts as a prefab, and a miss is remembered only once that folder exists. Handler:place
-returns an unparented copy for previews such as Schematica's, which the server never hears of. ]]
+returns an unparented copy for previews, which the server never hears of. ]]
 function knitless.newBlockRegistry(ctx, itemMeta)
 	local replicatedStorage = ctx.services.ReplicatedStorage
 	local up = Vector3.new(0, 1, 0)
@@ -7293,58 +7788,184 @@ function knitless.newBlockSelector(ctx, engine)
 	return selector
 end
 
---[[ Builds the place sound of block-placement-audio-controller's playPlaceAudio(blockRef, blockType):
-one of the block's place sounds at its world position, only within 50 studs of your character. The
-server sends you everyone else's placements but never your own, so for a block this layer places
-nothing else plays it. The data file cannot carry item meta's createPlaceAudioPlayers, so the blocks
-whose sounds differ from GENERIC_BLOCK_PLACE are listed here from item-meta. Names resolve through
-GameSound (a failed read is tried again on the next placement) and play through the AudioManager
-stand-in. ]]
-function knitless.newPlaceAudio(ctx, engine)
-	local stone = {'STONE_BREAK'}
-	local crop = {'CROP_PLANT_1', 'CROP_PLANT_2', 'CROP_PLANT_3'}
-	local snow = {'SNOW_FOOTSTEP_1', 'SNOW_FOOTSTEP_2', 'SNOW_FOOTSTEP_3', 'SNOW_FOOTSTEP_4'}
-	local egg = {'CHICKEN_EGG_CRACK'}
-	local sounds = {
-		snow = snow, snow_pile = snow, chicken_egg_block = egg, egg_block = egg,
-		cursed_coffin = {'CURSED_COFFIN_PLACE'}, slime_block = {'SLIME_BLOCK_PLACE'},
-		magic_glass = {'MAGIC_GLASS_PLACE_1', 'MAGIC_GLASS_PLACE_2', 'MAGIC_GLASS_PLACE_3'},
-		pinata = {'PINATA_HIT_1', 'PINATA_HIT_2', 'PINATA_HIT_3'}
+--[[ The sounds item meta gives a block when it is placed, hit and broken, for the knitless layer:
+the data file cannot carry item meta's createPlaceAudioPlayers, createHitAudioPlayers and
+createBreakAudioPlayers. A block that names none of its own gets the sound of its breakType, as
+item-meta-hit-sounds sets them on every item: stone STONE_BREAK, wood WOOD_BREAK, wool WOOL_BREAK,
+grass (dirt) GENERIC_BLOCK_PLACE and GENERIC_BLOCK_HIT. place and hit list the blocks whose own
+sound differs from that, as {GameSound names, block types}; breaking lists the few with a break
+sound of their own (break-effect plays the hit sound otherwise). The coloured wools come from one
+template that places with GENERIC_BLOCK_PLACE. ]]
+knitless.blockSounds = {
+	place = {
+		{{'GENERIC_BLOCK_PLACE'}, {'barrel', 'cotton_candy_block', 'cotton_candy_block_blue',
+			'cotton_candy_block_orange', 'cotton_candy_block_pink', 'cotton_candy_block_yellow',
+			'ladder', 'limestone', 'pumpkin_block', 'vine_ladder', 'wool_black', 'wool_blue',
+			'wool_brown', 'wool_builder', 'wool_cyan', 'wool_gray', 'wool_green', 'wool_orange',
+			'wool_pink', 'wool_purple', 'wool_red', 'wool_white', 'wool_yellow'}},
+		{{'CROP_PLANT_1', 'CROP_PLANT_2', 'CROP_PLANT_3'}, {'carrot', 'crystalheart_flower',
+			'melon', 'pumpkin', 'soulvine_flower', 'tearbloom_flower'}},
+		{{'CHICKEN_EGG_CRACK'}, {'chicken_egg_block', 'egg_block'}},
+		{{'SNOW_FOOTSTEP_1', 'SNOW_FOOTSTEP_2', 'SNOW_FOOTSTEP_3', 'SNOW_FOOTSTEP_4'}, {'snow',
+			'snow_pile'}},
+		{{'CURSED_COFFIN_PLACE'}, {'cursed_coffin'}},
+		{{'MAGIC_GLASS_PLACE_1', 'MAGIC_GLASS_PLACE_2', 'MAGIC_GLASS_PLACE_3'}, {'magic_glass'}},
+		{{'PINATA_HIT_1', 'PINATA_HIT_2', 'PINATA_HIT_3'}, {'pinata'}},
+		{{'SLIME_BLOCK_PLACE'}, {'slime_block'}}
+	},
+	hit = {
+		{{'GENERIC_BLOCK_HIT'}, {'ballista', 'beehive', 'brewing_cauldron', 'camera_turret',
+			'cannon', 'classic_auto_turret', 'classic_shock_wave_turret', 'cotton_candy_machine',
+			'cursed_coffin', 'damage_banner', 'defense_banner', 'excalibur', 'fire_sheep_statue',
+			'heal_banner', 'invisible_landmine', 'iron_ore_mesh_block', 'lightning_coil',
+			'lucky_block_trap', 'pirate_flag', 'radioactive_plant', 'solar_panel', 'spike_trap',
+			'target_dummy_block_tier_1', 'target_dummy_block_tier_2', 'target_dummy_block_tier_3',
+			'target_dummy_block_tier_4', 'team_door', 'tesla_trap', 'vending_machine',
+			'void_portal', 'void_turret', 'zipline_base'}},
+		{{'GRASS_BREAK'}, {'amber_leaves', 'cherry_foliage', 'frozen_foliage', 'ruby_leaves',
+			'spirit_foliage', 'spirit_grass', 'void_dirt', 'void_grass', 'void_growth',
+			'wilted_foliage'}},
+		{{'LUCKY_BLOCK_BREAK'}, {'dragon_egg', 'flying_lucky_block', 'food_lucky_block',
+			'glitched_lucky_block', 'huge_lucky_block', 'lucky_block', 'new_years_lucky_block',
+			'new_years_lucky_block_2024', 'purple_lucky_block'}},
+		{{'ORE_HIT_1', 'ORE_HIT_2', 'ORE_HIT_3'}, {'diamond_ore', 'emerald_ore', 'iron_ore'}},
+		{{'COSMIC_LUCKY_BLOCK_HIT'}, {'cosmic_lucky_block'}},
+		{{'FORGE_HAMMER_1', 'FORGE_HAMMER_2'}, {'forge_lucky_block'}},
+		{{'GUMBALL_LAUNCHER_SPLATTER_1'}, {'gum_block'}},
+		{{'HALLOWEEN_LUCKY_BLOCK_HIT_1', 'HALLOWEEN_LUCKY_BLOCK_HIT_2', 'HALLOWEEN_LUCKY_BLOCK_HIT_3'}, {
+			'halloween_lucky_block'}},
+		{{'MAGICAL_HERO_LB_HIT_1', 'MAGICAL_HERO_LB_HIT_2', 'MAGICAL_HERO_LB_HIT_3'}, {
+			'magical_hero_lucky_block'}},
+		{{'MAGIC_GLASS_HIT_1', 'MAGIC_GLASS_HIT_2', 'MAGIC_GLASS_HIT_3', 'MAGIC_GLASS_HIT_4'}, {
+			'magic_glass'}},
+		{{'MINER_STONE_HIT_1'}, {'halloween_crystal_block'}},
+		{{'PINATA_HIT_1', 'PINATA_HIT_2', 'PINATA_HIT_3'}, {'pinata'}},
+		{{'RAINBOW_LB_HIT_1', 'RAINBOW_LB_HIT_2', 'RAINBOW_LB_HIT_3'}, {'rainbow_lucky_block'}},
+		{{'RAINBOW_OPEN_POT_OF_GOLD'}, {'rainbow_pot_of_gold'}},
+		{{'SLIME_BLOCK_BREAK'}, {'slime_block'}},
+		{{'SNOW_FOOTSTEP_1', 'SNOW_FOOTSTEP_2', 'SNOW_FOOTSTEP_3', 'SNOW_FOOTSTEP_4'}, {'snow_pile'}},
+		{{'SPIDER_WEB_BLOCK_BROKEN'}, {'spider_queen_web'}}
+	},
+	breaking = {
+		{{'COSMIC_LUCKY_BLOCK_BREAK'}, {'cosmic_lucky_block'}},
+		{{'GUMBALL_LAUNCHER_SPLATTER_1'}, {'grave_trap_block'}},
+		{{'MAGIC_GLASS_BREAK'}, {'magic_glass'}},
+		{{'STONE_BREAK'}, {'grave_trap'}}
+	},
+	defaults = {
+		place = {stone = {'STONE_BREAK'}, wood = {'WOOD_BREAK'}, wool = {'WOOL_BREAK'},
+			grass = {'GENERIC_BLOCK_PLACE'}},
+		hit = {stone = {'STONE_BREAK'}, wood = {'WOOD_BREAK'}, wool = {'WOOL_BREAK'},
+			grass = {'GENERIC_BLOCK_HIT'}}
 	}
-	for _, blockType in {'andesite', 'andesite_polished', 'big_gargoyle_statue', 'brick', 'ceramic', 'clay', 'clay_black',
-		'clay_blue', 'clay_dark_brown', 'clay_dark_green', 'clay_gray', 'clay_green', 'clay_light_brown', 'clay_light_green',
-		'clay_orange', 'clay_pink', 'clay_purple', 'clay_red', 'clay_tan', 'clay_white', 'clay_yellow', 'concrete_green',
-		'cotton_candy_machine', 'damage_banner', 'defense_banner', 'diorite', 'diorite_polished', 'gargoyle_statue',
-		'gargoyle_statue_breaker', 'gargoyle_statue_fighter', 'gargoyle_statue_swift', 'granite', 'granite_polished', 'gravel',
-		'halloween_crystal_block', 'heal_banner', 'ice', 'ice_bricks', 'iron_ore_mesh_block', 'marble', 'marble_pillar',
-		'pirate_flag', 'red_sand', 'red_sandstone', 'red_sandstone_polished', 'red_sandstone_smooth', 'sacrophagus', 'sand',
-		'sandstone', 'sandstone_polished', 'sandstone_smooth', 'slate_brick', 'slate_tiles', 'teleport_block', 'tuff_bricks',
-		'void_teleport_portal'} do
-		sounds[blockType] = stone
-	end
-	for _, blockType in {'carrot', 'crystalheart_flower', 'melon', 'pumpkin', 'soulvine_flower', 'tearbloom_flower'} do
-		sounds[blockType] = crop
-	end
-	local fallback = {'GENERIC_BLOCK_PLACE'}
-	local assets
+}
 
+--[[ The GameSound names of a block's sound of one kind ('place', 'hit' or 'breaking'). The lists
+above become a lookup on first use. Without a sound of its own a block takes its breakType's, from
+item meta, a break sound being its hit sound; an unknown block gets the generic place or hit. ]]
+function knitless.blockSoundNames(ctx, blockType, kind)
+	local sounds = knitless.blockSounds
+	if not sounds.byBlock then
+		local byBlock = {}
+		for _, name in {'place', 'hit', 'breaking'} do
+			byBlock[name] = {}
+			for _, group in sounds[name] do
+				for _, block in group[2] do
+					byBlock[name][block] = group[1]
+				end
+			end
+		end
+		sounds.byBlock = byBlock
+	end
+	local own = sounds.byBlock[kind] and sounds.byBlock[kind][blockType]
+	if own then return own end
+	if kind == 'breaking' then
+		return knitless.blockSoundNames(ctx, blockType, 'hit')
+	end
+	local meta = ctx.modules['ReplicatedStorage.TS.item.item-meta']
+	local items = type(meta) == 'table' and meta.items
+	local item = type(items) == 'table' and items[blockType]
+	local block = type(item) == 'table' and item.block
+	local breakType = type(block) == 'table' and block.breakType
+	return sounds.defaults[kind][breakType] or (kind == 'place' and {'GENERIC_BLOCK_PLACE'} or {'GENERIC_BLOCK_HIT'})
+end
+
+--[[ The sound break-effect plays in place of a block's own hit or break sound once the listeners
+of BlockEngineClientEvents.DamageBlockEffect have run, for a hit at cell by player: an asset from
+assets (GameSound), or nil to keep the block's own. bed-plating-controller's BED_PLATING_HIT is not
+played: it needs the plating model addBedPlatingModel makes, and nothing in this build calls it,
+so a plated bed sounds like any bed. For a
+block that breaks as stone, wood or wool, the hitter holding the laser pickaxe or the multi-break
+tool gives that tool's sound for the breakType (laser-pickaxe-controller,
+multi-break-tool-controller); else the skin of the item in your own hand gives its
+blockHitSoundOverride for the breakType (block-damage-audio-controller reads your hand, whoever
+hit). The game runs those listeners in no set order, so where two apply either may win; here the
+tools do. ]]
+function knitless.blockEffectAsset(ctx, assets, blockType, cell, player)
+	local meta = ctx.modules['ReplicatedStorage.TS.item.item-meta']
+	local items = type(meta) == 'table' and meta.items
+	local item = type(items) == 'table' and items[blockType]
+	local block = type(item) == 'table' and item.block
+	local breakType = type(block) == 'table' and block.breakType
+	if breakType ~= 'stone' and breakType ~= 'wood' and breakType ~= 'wool' then return nil end
+	local function held(who)
+		local character = typeof(who) == 'Instance' and who:IsA('Player') and who.Character
+		local hand = character and character:FindFirstChild('HandInvItem')
+		return hand and hand:IsA('ObjectValue') and hand.Value or nil
+	end
+	local tool = held(player)
+	local prefix = tool and ({laser_pickaxe = 'LASER_PICKAXE_', multi_break_tool = 'MULTI_BREAK_TOOL_'})[tool.Name]
+	if prefix then
+		return assets[prefix..string.upper(breakType)..'_BREAK_'..math.random(4)]
+	end
+	local own = held(ctx.lplr)
+	local skin = own and own:GetAttribute('ItemSkin')
+	local skins = ctx.modules['ReplicatedStorage.TS.games.bedwars.item-skin.item-skin-meta']
+	if type(skin) ~= 'string' or skin == '' or type(skins) ~= 'table' or type(skins.getItemSkinMeta) ~= 'function' then
+		return nil
+	end
+	local skinMeta = skins.getItemSkinMeta(skin)
+	local override = type(skinMeta) == 'table' and skinMeta.blockHitSoundOverride
+	local list = type(override) == 'table' and override[breakType]
+	if type(list) ~= 'table' or #list == 0 then return nil end
+	return list[math.random(#list)]
+end
+
+--[[ Plays one of a block's sounds of a kind through the AudioManager stand-in, in the Gameplay
+category as the game plays its block sounds, at position, or flat when position is nil. For a hit
+or a break at cell by player, knitless.blockEffectAsset's sound plays instead when it gives one.
+Names resolve through GameSound; a failed read is tried again next time. ]]
+function knitless.playBlockSound(ctx, blockType, kind, position, cell, player)
+	if not knitless.blockSoundAssets then
+		local ok, data = pcall(ctx.data, 'GameSound')
+		if ok and type(data) == 'table' then knitless.blockSoundAssets = data end
+	end
+	local assets = knitless.blockSoundAssets
+	local core = ctx.modules['ReplicatedStorage.rbxts_include.node_modules.@easy-games.game-core.out']
+	local audio = type(core) == 'table' and core.AudioManager
+	if not (assets and type(audio) == 'table' and type(audio.playAudio) == 'function') then return end
+	local asset = kind ~= 'place' and typeof(cell) == 'Vector3'
+		and knitless.blockEffectAsset(ctx, assets, blockType, cell, player)
+	if not asset then
+		local list = knitless.blockSoundNames(ctx, blockType, kind)
+		asset = assets[list[math.random(#list)]]
+	end
+	if type(asset) == 'string' then
+		audio:playAudio(asset, {position = position, category = 'Gameplay'})
+	end
+end
+
+--[[ Builds the place sound of block-placement-audio-controller's playPlaceAudio(blockRef,
+blockType): the block's place sound at its world position, only within 50 studs of your character.
+The server sends you everyone else's placements but never your own, so for a block this layer
+places nothing else plays it. ]]
+function knitless.newPlaceAudio(ctx, engine)
 	return function(blockRef, blockType)
 		local cell = type(blockRef) == 'table' and blockRef.blockPosition
 		if typeof(cell) ~= 'Vector3' or type(blockType) ~= 'string' then return end
 		local position = engine:getWorldPosition(cell)
 		if engine:distanceFromCharacter(ctx.lplr, position) >= 50 then return end
-		if not assets then
-			local ok, data = pcall(ctx.data, 'GameSound')
-			if ok and type(data) == 'table' then assets = data end
-		end
-		local core = ctx.modules['ReplicatedStorage.rbxts_include.node_modules.@easy-games.game-core.out']
-		local audio = type(core) == 'table' and core.AudioManager
-		if not (assets and type(audio) == 'table' and type(audio.playAudio) == 'function') then return end
-		local list = sounds[blockType] or fallback
-		local asset = assets[list[math.random(#list)]]
-		if type(asset) == 'string' then
-			audio:playAudio(asset, {position = position})
-		end
+		knitless.playBlockSound(ctx, blockType, 'place', position)
 	end
 end
 
@@ -9486,7 +10107,11 @@ the item the game has selected (HandInvItem with no tiles to read); auto-pickup 
 getLastKnockbackTime is stamped, at most once per 50 ms, by EntityDamageEventZap with the game's
 filter (not fall damage, knockback not disabled) and by every drop in your Humanoid's health, fall
 damage included: the health watch runs whether or not Zap events arrive. Speed writes
-StatefulEntityKnockbackController.lastImpulseTime every frame. ]]
+StatefulEntityKnockbackController.lastImpulseTime every frame. The BlockBreaker stand-in's
+breakEffect plays break-effect's sounds: playHit(blockType, cell, player) the block's hit sound,
+playBreak its break sound, or what DamageBlockEffect's listeners would put in their place
+(knitless.blockEffectAsset), with a character and within 100 studs of it, flat for your own hits
+and at the block for anyone else's. Its pixel particles are not made. ]]
 function knitless.ctrlCore(h)
 	local lplr = h.lplr
 
@@ -9529,9 +10154,24 @@ function knitless.ctrlCore(h)
 		}
 		knitless.ctrlLog(h, 'no ClientBlockEngine from the blocks slice; the breaker selects nothing')
 	end
+	local function blockHitSound(blockType, cell, player, kind)
+		local engine = knitless.blockEngine
+		if type(blockType) ~= 'string' or typeof(cell) ~= 'Vector3' or type(engine) ~= 'table' then return end
+		local ok, position, distance = pcall(function()
+			if not engine:getCharacter(lplr) then return nil end
+			local at = engine:getWorldPosition(cell)
+			return at, engine:distanceFromCharacter(lplr, at)
+		end)
+		if not ok or typeof(position) ~= 'Vector3' or type(distance) ~= 'number' or distance >= 100 then return end
+		pcall(knitless.playBlockSound, h.ctx, blockType, kind, player ~= lplr and position or nil, cell, player)
+	end
 	local breakEffect = {}
-	function breakEffect:playHit() end
-	function breakEffect:playBreak() end
+	function breakEffect:playHit(blockType, cell, player)
+		blockHitSound(blockType, cell, player, 'hit')
+	end
+	function breakEffect:playBreak(blockType, cell, player)
+		blockHitSound(blockType, cell, player, 'breaking')
+	end
 	local breaker = {
 		clientManager = clientEngine,
 		cooldown = 0.3,
@@ -11166,13 +11806,15 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 
 	--[[ Wraps the remotes client's Get, the path every remote request in the game goes through.
 	AttackEntity records the hit's reach in store.attackReach and, with Reach or HitBoxes on, moves
-	selfPosition toward the target to at most 14.399 studs from it. A trap remote gets a send that
+	selfPosition toward the target to at most 14.399 studs from it and gives a hit sent without a ray
+	(a region swing) a real one, from the camera to the target: the server refuses an empty raycast and
+	takes a ray hit about a stud and a half further than a rayless one. A trap remote gets a send that
 	does nothing while TrapDisabler and that trap's toggle are on; trapDisabler is nil until its own
 	run() block registers it, and stays nil if that block fails. SwordSwingMiss sends nothing with
 	NoClickDelay on. Knitless with no namecall hook (Xeno), SetInvItem goes through
-	knitless.jadeEquipGate while a jade slam hold is up; where the hook is in, it does this itself.
-	In developer mode EquipItem sends that bypass switchItem are traced. Knitless, ConsumeItem
-	becomes knitless.consumeRemote; the Knit path leaves it to bedwars.getConsumeRemote. ]]
+	knitless.jadeEquipGate while a jade slam hold is up; where the hook is in, it does this itself. In
+	developer mode EquipItem sends that bypass switchItem are traced. Knitless, ConsumeItem becomes
+	knitless.consumeRemote; the Knit path leaves it to bedwars.getConsumeRemote. ]]
 	client.Get = function(self, remoteName)
 		local call = oldGet(self, remoteName)
 
@@ -11186,7 +11828,16 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 					store.attackReachUpdate = os.clock() + 1
 
 					if reach.enabled or hitBoxes.enabled then
-						attackTable.validate.raycast = attackTable.validate.raycast or {}
+						if not attackTable.validate.raycast then
+							local camera = workspace.CurrentCamera or gameCamera
+							local origin = camera and camera.CFrame.Position
+							if origin and (targetpos - origin).Magnitude > 1e-3 then
+								attackTable.validate.raycast = {
+									cameraPosition = {value = origin},
+									cursorDirection = {value = (targetpos - origin).Unit}
+								}
+							end
+						end
 						attackTable.validate.selfPosition.value += CFrame.lookAt(selfpos, targetpos).LookVector * math.max((selfpos - targetpos).Magnitude - 14.399, 0)
 					end
 
@@ -11314,7 +11965,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	bed in every case. The per-team attribute is not always there (a Team attribute that has
 	not replicated yet reads as Team-1 and matches nothing), and breakBlock hits the DIG SPOT,
 	which is routinely not the block the caller asked for: the path can route through a cell
-	of our own bed, and Block Check redirects onto whatever is first on the eye line. That is
+	of our own bed, and blockcheck redirects onto whatever is first on the eye line. That is
 	the rare own-bed break.
 
 	So a bed also asks the game, over its whole footprint, the same question isOwnBed in
@@ -11354,8 +12005,8 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	float noise, as two routes through the same blocks can add up in different orders. A cell can
 	sit in the heap more than once from before its distance improved; the first pop is the good one.
 	Ties are the normal case: every cell of a one-layer cover costs the same one block, and which
-	one is named decides where the break lands, so the nearest to the player wins. A spot on the
-	wrong side of a structure is one Block Check then has to walk all the way back. Nothing is
+	one is named decides where the break lands, so the nearest to the player wins. Only a break
+	without blockcheck asks this; with it the eye line picks the block (breakBlock). Nothing is
 	cached: the cost is block health, which falls with every hit and fires no event. ]]
 	local function calculatePath(target, blockpos, hitResolver, originOverride)
 		local origin = originOverride
@@ -11452,7 +12103,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		The code now marches cell by cell along the whole line. It used to hop one cell at a time along
 	whichever axis dominated, which is blind in exactly the case that matters: a dig spot up
 	on a mound has air beside it on that axis, so the very first hop found nothing, the walk
-	stopped, and the spot reported itself as the thing in the way -- Block Check waving
+	stopped, and the spot reported itself as the thing in the way -- blockcheck waving
 	through a break into the middle of a structure with the wall in front of the player
 	untouched. A march cannot miss it: the wall is on the line whether or not it happens to
 	lie along the dominant axis.
@@ -11476,19 +12127,37 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		return step, ((((index + (step * 0.5)) * 3) - component) / delta), (3 / math.abs(delta))
 	end
 
-	--[[ Marches cell by cell along the line from your head to a dig spot and returns the first block on
-	it (or the spot), whether the line is sealed, and the hits every block on it will take. From the
-	head, not the root: the eye line decides what is reachable, and a root at foot height reads a
-	floor block as cover. An unbreakable block anywhere on the line returns the spot, true and
-	math.huge, so a sealed line is not mistaken for a clear one. A block with no health to read
-	costs one hit. 30 studs of reach is ten cells, so the 40 steps cannot run out first. ]]
-	local function frontOf(worldpos)
+	--[[ Where the lines to a block start: the head, then the root. The head decides what is in view.
+	Alone it missed what is open at the legs: caged beside a cover with your own block at head height,
+	every line from the head crossed that block first and it was broken before the cover at your
+	feet, and right at an opening under an overhang it cannot see the bed the body stands next to. A
+	root at foot height reads a floor block as cover, which costs nothing here: clearShot keeps the
+	cheapest line of both, and of lines that tie there the head's, which come first. breakBlock's aim
+	argument can leave either out (aimHead, aimTorso); without a head the root is used. ]]
+	local aimHead, aimTorso = true, true
+	local function eyes()
+		local head = entitylib.character.Head
+		local root = entitylib.character.RootPart.Position
+		if head and aimHead then
+			return aimTorso and {head.Position, root} or {head.Position}
+		end
+		return {root}
+	end
+
+	--[[ Marches cell by cell along the line from origin (one of eyes()) to a dig spot and returns the
+	first block on it (or the spot), whether the line is sealed, and the hits every block on it will
+	take. An unbreakable block anywhere on the line returns the spot, true and math.huge, so a
+	sealed line is not mistaken for a clear one. A block with no health to read costs one hit. 30
+	studs of reach is ten cells, so the 40 steps cannot run out first. The march ends where it meets
+	the block the spot belongs to, at whichever of its cells: a line that reaches a bed's other half
+	has reached the bed, and that half is named as the first block so the half in view is the one
+	struck. ]]
+	local function frontOf(worldpos, origin)
 		if not entitylib.isAlive then return worldpos, false, 0 end
 
-		local head = entitylib.character.Head
-		local origin = (head and head.Position) or entitylib.character.RootPart.Position
 		local direction = worldpos - origin
 		local start, finish = bedwars.BlockController:getBlockPosition(origin), bedwars.BlockController:getBlockPosition(worldpos)
+		local goal = getPlacedBlock(worldpos)
 		local x, y, z = start.X, start.Y, start.Z
 
 		local stepx, nextx, deltax = boundary(x, origin.X, direction.X)
@@ -11511,6 +12180,10 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 			if cell == finish then break end
 
 			local block = getPlacedBlock(cell * 3)
+			if block and block == goal then
+				first = first or cell * 3
+				break
+			end
 			if block then
 				if isProtectedBlock(block, cell * 3) then return worldpos, true, math.huge end
 				first = first or cell * 3
@@ -11523,89 +12196,125 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 	end
 
 	--[[ The points inside a cell a line from the player is tried against, as clearShot below
-	describes. ]]
+	describes: the centre, then a 3 x 3 grid on every face turned to the eye (the eye is past that
+	face's plane), 1.45 studs out from the centre and 1.3 across, so every point lies inside the
+	cell. Nearer the middle of the face they missed a bed seen at a slant past the block beside it.
+	The centre comes first: of lines that tie in clearShot the earlier one is kept. For that
+	ranking FLAT drops the height from a distance, and TIE is how far two hit counts may be apart
+	and still count as equal, each being a sum of health / damage. ]]
+	local AXES = {'X', 'Y', 'Z'}
+	local SPREAD = {0, 1.3, -1.3}
+	local FLAT = Vector3.new(1, 0, 1)
+	local TIE = 0.0001
 	local function aimOffsets(origin, pos)
 		local toward = origin - pos
-		local offsets = {Vector3.zero, Vector3.new(0, 1.4, 0)}
-		if math.abs(toward.X) > 0.01 then
-			table.insert(offsets, Vector3.new(math.sign(toward.X) * 1.4, 0, 0))
-		end
-		if math.abs(toward.Z) > 0.01 then
-			table.insert(offsets, Vector3.new(0, 0, math.sign(toward.Z) * 1.4))
-		end
-		if toward.Y < 0 then
-			table.insert(offsets, Vector3.new(0, -1.4, 0))
+		local offsets = {Vector3.zero}
+		for _, axis in AXES do
+			local side = toward[axis]
+			if math.abs(side) > 1.5 then
+				local depth = math.sign(side) * 1.45
+				for _, a in SPREAD do
+					for _, b in SPREAD do
+						table.insert(offsets, axis == 'X' and Vector3.new(depth, a, b)
+							or axis == 'Y' and Vector3.new(a, depth, b) or Vector3.new(a, b, depth))
+					end
+				end
+			end
 		end
 		return offsets
 	end
 
 	--[[ Is there a clear line onto this cell from ANY of its visible faces?
 
-	frontOf aims at the cell's centre, and a line to the centre clips whatever sits beside the
-	target even when a face of the target is in plain view -- a line down onto a bed grazes the
-	ore block next to it, so Block Check sent the break into the ore and the bed waited. That
-	is the ores-before-bed report. The centre, the top face and the faces turned toward the
-	player are each tried, kept 1.4 studs in so every point still lies inside the same cell;
-	any one of them with nothing in the way means the target itself can be hit.
+	frontOf aims at one point, and a line to the centre clips whatever sits beside the target
+	even when a face of the target is in plain view -- a line down onto a bed grazes the ore
+	block next to it, so the break went into the ore and the bed waited. That is the
+	ores-before-bed report. Four or five lines were not enough either: with one side of a bed
+	open, the centre and the middle of each face all clipped the cover beside the opening from
+	most places the bed could be seen from, and the cover was mined with the bed in view. So the
+	centre and a grid on every face turned to the eye are tried (aimOffsets), from the head and
+	then from the root (eyes); any one of them with nothing in the way means the target itself
+	can be hit.
 
-	Returns the spot to strike and whether the way is sealed. When every line is blocked, the
-	way in is the line that takes the fewest hits to clear, and its first block is what gets
-	struck. The centre line used to decide alone: grazing the end stone over a hole it sent
-	six hits there while the line onto the near face had one wool block left in it, and with
-	a map wall on it it called the spot sealed though the top was only behind wool. Fewest
-	hits also keeps a block that is part-way broken in front, it being the cheaper one. A
-	line with anything unbreakable on it never clears and does not count; only when that is
-	every line is the way sealed. ]]
-	local function clearShot(pos)
-		if not entitylib.isAlive then return pos, false end
-		local head = entitylib.character.Head
-		local origin = (head and head.Position) or entitylib.character.RootPart.Position
-		local offsets = aimOffsets(origin, pos)
+	Returns the spot to strike, whether the way is sealed, the hits the chosen line takes to
+	clear (0 when the cell can be struck) and the rank breakBlock orders equally cheap cells
+	by, lower first. When every line is blocked, the way in is the line
+	that takes the fewest hits to clear, and its first block is what gets struck. The centre
+	line used to decide alone: grazing the end stone over a hole it sent six hits there while
+	the line onto the near face had one wool block left in it, and with a map wall on it it
+	called the spot sealed though the top was only behind wool. Fewest hits also keeps a block
+	that is part-way broken in front, it being the cheaper one. A line with anything
+	unbreakable on it never clears and does not count; only when that is every line is the way
+	sealed, at a cost of math.huge. A line whose first block allowHit refuses does not count
+	either: stopping at the refusal left a bed standing from spots where another line began
+	with a block that could be struck.
 
-		local front, sealed, best
-		for i, offset in offsets do
-			local point = pos + offset
-			local first, blocked, cost = frontOf(point)
-			if first == point and not blocked then
-				return pos, false
-			end
-			if i == 1 then
-				front, sealed = first, blocked
-			end
-			if not blocked and (not best or cost < best) then
-				front, sealed, best = first, false, cost
+	Of lines that take equally many hits, the one whose first block is nearest to the player
+	across the ground is kept, and that distance is the rank. The first line tried used to be
+	kept: caged beside a cover, a line that clipped the top edge of the cover block one over
+	came before the lines through the block right beside the player, each block stood alone
+	on its line, and the one further off was broken. Height is left out so that the block
+	under the feet does not lose to one at the side. The head's lines are not put before the
+	root's here: through an opening at the side of a cage the head's line met a cover block
+	two cells off while the root's ran through the one beside the player. ]]
+	local function clearShot(pos, allowHit)
+		if not entitylib.isAlive then return pos, false, 0, 0 end
+
+		local root = entitylib.character.RootPart.Position
+		local front, sealed, best, reach
+		for _, origin in eyes() do
+			for _, offset in aimOffsets(origin, pos) do
+				local point = pos + offset
+				local first, blocked, cost = frontOf(point, origin)
+				if first == point and not blocked then
+					return pos, false, 0, ((pos - root) * FLAT).Magnitude
+				end
+				if allowHit and not blocked then
+					local struck, struckCell = getPlacedBlock(first)
+					if struck and not allowHit(struck, struckCell) then
+						first, blocked, cost = point, true, math.huge
+					end
+				end
+				if front == nil then
+					front, sealed = first, blocked
+				end
+				if not blocked then
+					local range = ((first - root) * FLAT).Magnitude
+					if not best or cost < best - TIE or (cost <= best + TIE and range < reach) then
+						front, sealed, best, reach = first, false, cost, range
+					end
+				end
 			end
 		end
-		return front, sealed
+		return front, sealed, best or math.huge, reach or math.huge
 	end
 
 	--[[ Does any of the lines clearShot tries onto pos pass through this cell, or within
 	`margin` studs of it? A slab test against the cell's cube grown by the margin; the margin
 	is what lets a line that wobbles off the cell's edge with the head still count. ]]
-	local AXES = {'X', 'Y', 'Z'}
 	local function inTheWay(cell, pos, margin)
-		local head = entitylib.character.Head
-		local origin = (head and head.Position) or entitylib.character.RootPart.Position
 		local center, half = cell * 3, 1.5 + margin
-		for _, offset in aimOffsets(origin, pos) do
-			local point = pos + offset
-			local tmin, tmax = 0, 1
-			for _, axis in AXES do
-				local from, delta = origin[axis], point[axis] - origin[axis]
-				local lo, hi = center[axis] - half, center[axis] + half
-				if math.abs(delta) < 1e-6 then
-					if from < lo or from > hi then
-						tmin = math.huge
-						break
+		for _, origin in eyes() do
+			for _, offset in aimOffsets(origin, pos) do
+				local point = pos + offset
+				local tmin, tmax = 0, 1
+				for _, axis in AXES do
+					local from, delta = origin[axis], point[axis] - origin[axis]
+					local lo, hi = center[axis] - half, center[axis] + half
+					if math.abs(delta) < 1e-6 then
+						if from < lo or from > hi then
+							tmin = math.huge
+							break
+						end
+					else
+						local t1, t2 = (lo - from) / delta, (hi - from) / delta
+						if t1 > t2 then t1, t2 = t2, t1 end
+						tmin, tmax = math.max(tmin, t1), math.min(tmax, t2)
+						if tmin > tmax then break end
 					end
-				else
-					local t1, t2 = (lo - from) / delta, (hi - from) / delta
-					if t1 > t2 then t1, t2 = t2, t1 end
-					tmin, tmax = math.max(tmin, t1), math.min(tmax, t2)
-					if tmin > tmax then break end
 				end
+				if tmin <= tmax then return true end
 			end
-			if tmin <= tmax then return true end
 		end
 		return false
 	end
@@ -11673,56 +12382,117 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		return result
 	end
 
+	--[[ The sounds the game's own controllers add to a hit on some blocks, from the
+	ClientSyncEvents.DamageBlock only its BlockBreaker fires: the iron ore's ORE_HIT
+	(ore-mining-controller), the glitched lucky block's damage sound over quiet TV static (the
+	game's math.random(0.5, 1.5) speed truncates to 0 or 1: silent half the time, else normal
+	speed, so it plays on a coin flip at speed 1), the magical hero lucky block's hit at the block.
+	breakBlock never fires that event, so with effects
+	on it plays them itself, through the SoundManager adapter on every executor. ]]
+	local blockHitExtras = {
+		iron_ore_mesh_block = {sounds = {'ORE_HIT_1', 'ORE_HIT_2', 'ORE_HIT_3'}},
+		glitched_lucky_block = {sounds = {'GLITCHED_LUCKY_BLOCK_DAMAGE'}, static = true},
+		magical_hero_lucky_block = {
+			sounds = {'MAGICAL_HERO_LB_HIT_1', 'MAGICAL_HERO_LB_HIT_2', 'MAGICAL_HERO_LB_HIT_3'},
+			atBlock = true
+		}
+	}
+
+	--[[ Plays what that event's listeners add to a hit at cell: blockHitExtras' sound for the block
+	type, the magical hero's at the block in the Gameplay category as its controller plays it, and
+	efficiency-tool-enchant-controller's EFFICIENCY_TOOL_ENCHANT_HIT_1..4 at volumeMultiplier 0.2
+	while the item in your hand has breakBlock and your character has the TOOL_ENCHANT_EFFICIENCY
+	status effect (its StatusEffect_tool_enchant_efficiency attribute). ]]
+	local function playBlockHitExtra(blockType, cell)
+		local sounds = bedwars.SoundList
+		local manager = bedwars.SoundManager
+		if not (type(sounds) == 'table' and manager) then return end
+		local extra = blockHitExtras[blockType]
+		local id = extra and sounds[extra.sounds[math.random(#extra.sounds)]]
+		if id then
+			pcall(manager.playSound, manager, id, extra.atBlock and {position = cell * 3, category = 'Gameplay'} or nil)
+			if extra.static and sounds.TV_STATIC and math.random(0, 1) == 1 then
+				pcall(manager.playSound, manager, sounds.TV_STATIC, {volumeMultiplier = 0.05})
+			end
+		end
+		local character = lplr.Character
+		local hand = character and character:FindFirstChild('HandInvItem')
+		local tool = hand and hand:IsA('ObjectValue') and hand.Value
+		local toolMeta = tool and bedwars.ItemMeta[tool.Name]
+		local enchant = sounds['EFFICIENCY_TOOL_ENCHANT_HIT_'..math.random(4)]
+		if toolMeta and toolMeta.breakBlock and enchant
+			and character:GetAttribute('StatusEffect_tool_enchant_efficiency') ~= nil then
+			pcall(manager.playSound, manager, enchant, {volumeMultiplier = 0.2})
+		end
+	end
+
 	--[[ Sends one hit at a block through DamageBlock. Returns pos, path, target when effects is set, and
 	a fourth value, true, whenever a hit was sent.
 
-	The dig spot is ranked over every cell the block covers: a spot Block Check can strike directly
-	first, then one on the block itself, then method ('Distance' ranks by distance from the player,
-	anything else by fewest hits). blockcheck walks the chosen spot back to the first block the eye
-	line meets, so cover comes off from the player's side; when a protected block (your own bed, a
-	NoBreak block) seals every line nothing is sent. pin is a table the caller keeps between calls:
+	Without blockcheck the dig spot is calculatePath's, ranked over every cell the block covers: one
+	on the block itself first, then method ('Distance' ranks by distance from the player, anything
+	else by fewest hits). That spot only has to touch air, any air: a pocket inside the cover counts,
+	so a bed with a gap beside it is struck through its cover. With blockcheck the block's own cells
+	are aimed at instead and calculatePath is not asked: the cell whose eye line takes the fewest
+	hits to clear is chosen (none when it can be struck), and the first block on that line is what
+	gets struck, so cover comes off from the player's side, the block under you when you stand on
+	top, and a block in view is never passed over for one that is not. Equally cheap ways in are
+	ordered by clearShot's rank: the nearest block across the ground. When a protected block (your
+	own bed, a NoBreak block) seals every line nothing is sent. pin is a table the caller keeps
+	between calls:
 	the last struck cell is hit again while it stands, is in reach and is still in the way.
 	allowHit(block, blockPosition) can turn down the block about to be hit. Nothing past 30 studs is
 	hit, and never a block the game marks unbreakable for your team. autotool selects the tool's
 	hotbar slot and equips it as well, since block damage is worked out from what the character
 	actually holds (BlockEngine.calculateBlockDamage takes the player). Without autotool the tool is
 	swapped in only when the last sword attack is more than 0.4 s back, which keeps the sword in
-	hand mid-fight; with autotool it always is. ]]
-	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method, autotool, pin, allowHit)
+	hand mid-fight; with autotool it always is. aim ({head = bool, torso = bool}, nil for both) picks
+	where blockcheck's lines start; with neither on the head is used. ]]
+	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method, autotool, pin, allowHit, aim)
 		if lplr:GetAttribute('DenyBlockBreak') or not entitylib.isAlive then return end
+		aimHead, aimTorso = aim == nil or aim.head ~= false, aim == nil or aim.torso ~= false
+		if not aimHead and not aimTorso then
+			aimHead = true
+		end
 		local handler = bedwars.BlockController:getHandlerRegistry():getHandler(block.Name)
 		local cost, pos, target, path = math.huge
 		local selfpos = entitylib.character.RootPart.Position
 		local positions = (handler and handler:getContainedPositions(block)) or {block.Position / 3}
 		local direct = false
-		local open = false
+		local line, front, sealed = 0, nil, false
 
 		for _, v in positions do
 			local cell = v * 3
-			local dpos, dcost, dpath = calculatePath(block, cell)
+			local dpos, dcost, dpath
+			if blockcheck then
+				dpos, dcost = cell, 0
+			else
+				dpos, dcost, dpath = calculatePath(block, cell)
+			end
 			if dpos then
 				local ddirect = dpos == cell
 				local score = method == 'Distance' and (selfpos - dpos).Magnitude or dcost
-				local dopen = true
+				local dfront, dsealed, dline = dpos, false, 0
 				if blockcheck then
-					local front, sealed = clearShot(dpos)
-					dopen = (not sealed) and front == dpos
+					dfront, dsealed, dline, score = clearShot(dpos, allowHit)
 				end
 				local better
 				if pos == nil then
 					better = true
-				elseif dopen ~= open then
-					better = dopen
+				elseif math.abs(dline - line) > TIE then
+					better = dline < line
 				elseif ddirect ~= direct then
 					better = ddirect
 				else
 					better = score < cost
 				end
 				if better then
-					cost, pos, target, path, direct, open = score, dpos, cell, dpath, ddirect, dopen
+					cost, pos, target, path, direct = score, dpos, cell, dpath, ddirect
+					line, front, sealed = dline, dfront, dsealed
 				end
 			end
 		end
+		local open = line == 0
 
 		local pinned = false
 		if pin then
@@ -11733,11 +12503,11 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 					and (not allowHit or allowHit(part, pin.cell))
 					and (entitylib.character.RootPart.Position - spot).Magnitude <= 30
 					and (spot == pos or (not open and inTheWay(pin.cell, pos, 0.75))) then
-					local front, sealed = spot, false
+					local pinFront, pinSealed = spot, false
 					if blockcheck then
-						front, sealed = clearShot(spot)
+						pinFront, pinSealed = clearShot(spot)
 					end
-					if not sealed and front == spot then
+					if not pinSealed and pinFront == spot then
 						pos, path, pinned = spot, nil, true
 					end
 				end
@@ -11748,7 +12518,6 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 		end
 
 		if blockcheck and pos and not pinned then
-			local front, sealed = clearShot(pos)
 			if sealed then return end
 			if front ~= pos then
 				pos, path = front, nil
@@ -11828,6 +12597,7 @@ local bootstrapOk, bootstrapError = callWithThreadFix(function()
 						else
 							bedwars.BlockBreaker.breakEffect:playHit(dblock.Name, dpos, lplr)
 						end
+						playBlockHitExtra(dblock.Name, dpos)
 					end
 
 					if anim then
@@ -12407,7 +13177,7 @@ stand-ins, never to the executor's require, which re-runs the module (on Solara 
 the thread it runs on) or has none (Xeno). ]]
 local require = exec.Knitless and exec.knitlessRequire or require
 
-for _, v in {'AntiRagdoll', 'TriggerBot', 'SilentAim', 'AutoRejoin', 'Rejoin', 'Disabler', 'Timer', 'ServerHop', 'MouseTP', 'MurderMystery', 'Swim', 'Jesus', 'Invisible', 'Desync', 'Waypoints', 'PlayerModel', 'Schematica'} do
+for _, v in {'AntiRagdoll', 'TriggerBot', 'SilentAim', 'AutoRejoin', 'Rejoin', 'Disabler', 'Timer', 'ServerHop', 'MouseTP', 'MurderMystery', 'Swim', 'Jesus', 'Invisible', 'Desync', 'Waypoints', 'PlayerModel'} do
 	slinky:remove(v)
 end
 --[[ AimAssist
@@ -12904,7 +13674,7 @@ run(function()
 		label = 'Distance',
 		min = 0,
 		max = 18,
-		default = 18,
+		default = 16,
 		changed = function(val)
 			if reach.enabled then
 				bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = val + 2
@@ -15097,7 +15867,15 @@ welds a larger invisible part (3 x 6 x 3 plus Expand / 5) to each player's root.
 debug.setconstant the swing's 3.8 constant becomes Expand / 3. Without it (Solara, Xeno)
 swingSwordInRegion is wrapped, and only inside its own call, told apart by its thread because it can
 wait, a getTargetInRegion range of 3.8 * 3 becomes Expand. A sword's own attackRange and every other
-caller, TriggerBot among them, keep the range they asked for. ]]
+caller, TriggerBot among them, keep the range they asked for. On mobile controls the swing reads
+CombatConstant.REGION_SWORD_CHARACTER_DISTANCE instead of the 3.8 constant (nothing else in the game
+reads it), so Sword mode sets that to Expand too and puts the game's value back on disable. The
+slider writes either value only once Sword mode's start has run: a profile can apply Expand while
+the module's start is still queued, and the disable would then have nothing to restore. Player mode
+boxes follow EntityUpdated, as BedWars sets a player's Team after the entity is built: a player who
+turns Targetable gets one and one who becomes a teammate loses it. They go on EntityRemoved, the
+event the library fires. EntityUpdated also fires inside the health signals, so that work is
+deferred. ]]
 run(function()
 	if exec.skip('HitBoxes') then return end
 	if exec.Knitless then
@@ -15107,9 +15885,23 @@ run(function()
 	local mode
 	local expand
 	local objects, set = {}
+	local originalRegion
+
+	local function setMobileRegion(value)
+		local combat = bedwars.CombatConstant
+		if type(combat) ~= 'table' then return end
+		if value then
+			originalRegion = originalRegion or combat.REGION_SWORD_CHARACTER_DISTANCE
+			combat.REGION_SWORD_CHARACTER_DISTANCE = value
+		elseif originalRegion then
+			combat.REGION_SWORD_CHARACTER_DISTANCE = originalRegion
+			originalRegion = nil
+		end
+	end
 	
 	local function createHitbox(ent)
-		if ent.Targetable and ent.Player then
+		if objects[ent] then return end
+		if ent.Targetable and ent.Player and ent.Character and ent.RootPart then
 			local hitbox = Instance.new('Part')
 			hitbox.Size = Vector3.new(3, 6, 3) + Vector3.one * (expand.value / 5)
 			hitbox.Position = ent.RootPart.Position
@@ -15123,6 +15915,27 @@ run(function()
 			weld.Parent = hitbox
 			objects[ent] = hitbox
 		end
+	end
+
+	local function removeHitbox(ent)
+		local hitbox = objects[ent]
+		if hitbox then
+			objects[ent] = nil
+			pcall(function() hitbox:Destroy() end)
+		end
+	end
+
+	local function syncHitbox(ent)
+		local want = ent.Targetable and ent.Player and true or false
+		if want == (objects[ent] ~= nil) then return end
+		task.defer(function()
+			if not (hitBoxes.enabled and mode.value == 'Player') then return end
+			if ent.Targetable and ent.Player and table.find(entitylib.List, ent) then
+				createHitbox(ent)
+			else
+				removeHitbox(ent)
+			end
+		end)
 	end
 
 	local swingThreads = setmetatable({}, {__mode = 'k'})
@@ -15180,15 +15993,14 @@ run(function()
 					else
 						wrapSword()
 					end
+					setMobileRegion(expand.value)
 					set = true
 				else
 					hitBoxes:clean(entitylib.Events.EntityAdded:Connect(createHitbox))
-					hitBoxes:clean(entitylib.Events.EntityRemoving:Connect(function(ent)
-						if objects[ent] then
-							objects[ent]:Destroy()
-							objects[ent] = nil
-						end
+					hitBoxes:clean(entitylib.Events.EntityRemoved:Connect(function(ent)
+						task.defer(removeHitbox, ent)
 					end))
+					hitBoxes:clean(entitylib.Events.EntityUpdated:Connect(syncHitbox))
 					for _, ent in entitylib.List do
 						createHitbox(ent)
 					end
@@ -15202,6 +16014,7 @@ run(function()
 					end
 					set = nil
 				end
+				setMobileRegion(nil)
 				for _, part in objects do
 					part:Destroy()
 				end
@@ -15219,8 +16032,11 @@ run(function()
 		changed = function(val)
 			if hitBoxes.enabled then
 				if mode.value == 'Sword' then
-					if fieldPatch.constants then
-						debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, (val / 3))
+					if set then
+						if fieldPatch.constants then
+							debug.setconstant(bedwars.SwordController.swingSwordInRegion, 6, (val / 3))
+						end
+						setMobileRegion(val)
 					end
 				else
 					for _, part in objects do
@@ -16194,7 +17010,8 @@ at identity 2, and a billboard parented to slinky.gui (CoreGui or gethui where t
 set) from that thread fails, so the tag signals only note what came and went and the module's own
 loop builds and removes. The identity is raised to 8, or 7 on an executor whose ceiling is lower,
 where setthreadidentity(8) throws. A sweep once a second picks up models whose parts had not
-streamed in and failed builds. ]]
+streamed in and failed builds. The icons' borders are in the GUI colour and follow its changes
+while the module is on. ]]
 run(function()
 	local kitESP
 	local background
@@ -16292,6 +17109,14 @@ run(function()
 		toggled = function(on)
 			raiseIdentity()
 			if on then
+				loaderStyle.follow(kitESP, function(accent)
+					raiseIdentity()
+					for _, billboard in reference do
+						pcall(function()
+							billboard.Plate.UIStroke.Color = accent
+						end)
+					end
+				end)
 				local current, lastHidden
 				local nextSweep = 0
 				repeat
@@ -17638,7 +18463,12 @@ end)
 --[[ StorageESP
 Shows over each chest an icon for every item on your list that it holds, with the stack total.
 Amount is the attribute the game's own chest display reads, and a chest can hold one item in several
-stacks.
+stacks. A team crate carries the chest tag as well as team-crate, so it shows like a chest; with
+Show Crates on it shows everything it holds instead, as a crate mostly holds iron and diamonds,
+which are rarely on the list. Its folder also holds a ChestOwner ObjectValue, so only Accessory
+children count as items, as in the game's own crate display. Every crate then keeps its box, an
+empty one too; Priority Only skips empty crates and your own team's. Team is a string attribute,
+compared raw and through tonumber.
 
 The billboards live in Pistonware's GUI, and every way in (the module's thread, the chest tag,
 contents and Amount changes) arrives without the identity that building there needs, so each path
@@ -17646,10 +18476,13 @@ raises it first. Tag, contents, Amount, layout and menu Visible signals run thei
 write that fired them: builds, refreshes, resizes, removals and folder moves run a frame later, once
 per billboard. Each chest's contents listeners go with its billboard. A chest whose contents value
 has not streamed in, or whose build failed, is retried by a sweep every second. The folder leaves
-the GUI while the menu is open. ]]
+the GUI while the menu is open. The boxes' borders are in the GUI colour and follow its changes
+while the module is on. ]]
 run(function()
 	local storageESP
 	local list
+	local crates
+	local priorityOnly
 	local showAmount
 	local background
 	local color = {}
@@ -17662,6 +18495,17 @@ run(function()
 		for _, v in list.active do
 			if item:find(v) then return v end
 		end
+	end
+
+	local function showsAll(block)
+		return crates ~= nil and crates.enabled and block ~= nil
+			and (block.Name == 'team_crate' or collectionService:HasTag(block, 'team-crate'))
+	end
+
+	local function ownCrate(block)
+		local mine, theirs = lplr:GetAttribute('Team'), block:GetAttribute('Team')
+		if mine == nil or theirs == nil then return false end
+		return mine == theirs or (tonumber(mine) ~= nil and tonumber(mine) == tonumber(theirs))
 	end
 
 	local pending = {}
@@ -17697,9 +18541,14 @@ run(function()
 		end
 
 		v.Enabled = false
+		local everything = showsAll(v.Adornee)
+		local priority = everything and priorityOnly ~= nil and priorityOnly.enabled
+		if priority and ownCrate(v.Adornee) then return end
 		local alreadygot = {}
 		for _, item in chestitems do
-			if not alreadygot[item.Name] and (table.find(list.active, item.Name) or nearStorageItem(item.Name)) then
+			local wanted = if everything then item:IsA('Accessory')
+				else (table.find(list.active, item.Name) or nearStorageItem(item.Name))
+			if not alreadygot[item.Name] and wanted then
 				alreadygot[item.Name] = true
 				v.Enabled = true
 				local blockimage = Instance.new('ImageLabel')
@@ -17723,6 +18572,9 @@ run(function()
 					amount.Parent = blockimage
 				end
 			end
+		end
+		if everything and not priority then
+			v.Enabled = true
 		end
 		if showAmount.enabled then
 			for _, item in chestitems do
@@ -17806,12 +18658,12 @@ run(function()
 		reference[v] = billboard
 		chestWatch[v] = {
 			chest.ChildAdded:Connect(function(item)
-				if table.find(list.active, item.Name) or nearStorageItem(item.Name) then
+				if showsAll(v) or table.find(list.active, item.Name) or nearStorageItem(item.Name) then
 					queueRefresh(billboard)
 				end
 			end),
 			chest.ChildRemoved:Connect(function(item)
-				if table.find(list.active, item.Name) or nearStorageItem(item.Name) then
+				if showsAll(v) or table.find(list.active, item.Name) or nearStorageItem(item.Name) then
 					queueRefresh(billboard)
 				end
 			end)
@@ -17826,6 +18678,16 @@ run(function()
 				setthreadidentity(8)
 			end
 			if on then
+				loaderStyle.follow(storageESP, function(accent)
+					if slinky.threadFix then
+						setthreadidentity(8)
+					end
+					for _, v in reference do
+						pcall(function()
+							v.Frame.UIStroke.Color = accent
+						end)
+					end
+				end)
 				local scaledGui = slinky.gui:FindFirstChild('ScaledGui')
 				local clickGui = scaledGui and scaledGui:FindFirstChild('ClickGui')
 				if clickGui then
@@ -17846,6 +18708,11 @@ run(function()
 				end
 				storageESP:clean(collectionService:GetInstanceAddedSignal('chest'):Connect(function(v)
 					task.defer(added, v)
+				end))
+				storageESP:clean(lplr:GetAttributeChangedSignal('Team'):Connect(function()
+					for _, v in reference do
+						queueRefresh(v)
+					end
 				end))
 				storageESP:clean(collectionService:GetInstanceRemovedSignal('chest'):Connect(function(v)
 					local billboard = reference[v]
@@ -17909,6 +18776,29 @@ run(function()
 			end
 		end
 	})
+	crates = storageESP:toggle('Show Crates', {
+		changed = function(on)
+			if priorityOnly and priorityOnly.row then
+				priorityOnly.row.Visible = on
+			end
+			for _, v in reference do
+				task.spawn(refreshAdornee, v)
+			end
+		end,
+		about = 'Shows everything in each team crate, not only the items on your list.'
+	})
+	priorityOnly = storageESP:toggle('Priority Only', {
+		sub = true,
+		changed = function()
+			for _, v in reference do
+				task.spawn(refreshAdornee, v)
+			end
+		end,
+		about = "Skips empty crates and your own team's crate."
+	})
+	if priorityOnly.row then
+		priorityOnly.row.Visible = crates.enabled
+	end
 	showAmount = storageESP:toggle('Show amount', {
 		default = true,
 		changed = function()
@@ -17951,6 +18841,213 @@ run(function()
 		end,
 		sub = true
 	})
+end)
+
+--[[ Transparency
+Makes parts of your own character see-through: each body part, your hair, the kit skin's 3DClothing
+parts and each armor piece. Armor is worn as accessories named after its tier and piece:
+<tier>_helmet, <tier>_chestplate_vest with <tier>_chestplate_left_shoulder and _right_shoulder, and
+<tier>_boots_left and _right; leather, iron and diamond share one model. An accessory goes by the
+piece its name holds, and every part, decal and texture under it is faded. Accessory, kit-skin and
+armor parts blend from the value the game gave them and are never made more opaque, so parts it keeps
+hidden at 1 stay hidden. The game only rarely resets transparency, so the values are applied again
+every 0.1 s rather than each frame, and everything goes back on disable. The restore is registered on
+every enable because the module's cleanup list is emptied on each disable. A profile saved with the
+old Hide Armor toggle on and no armor sliders yet loads with all three at 1. ]]
+run(function()
+	local transparency
+	local sliders = {}
+	local armor = {}
+	local connection
+	local restoreTransparency
+	local originalTransparency = {}
+
+	local parts = {
+		'Head',
+		'UpperTorso', 'LowerTorso',
+		'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
+		'RightUpperArm', 'RightLowerArm', 'RightHand',
+		'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot',
+		'RightUpperLeg', 'RightLowerLeg', 'RightFoot'
+	}
+	local pieces = {'Helmet', 'Chestplate', 'Boots'}
+
+	local function getCharacter()
+		return entitylib.isAlive and entitylib.character.Character or nil
+	end
+
+	local function fade(instance, value)
+		if originalTransparency[instance] == nil then
+			originalTransparency[instance] = instance.Transparency
+		end
+		local original = originalTransparency[instance]
+		if original < 1 then
+			instance.Transparency = original + (1 - original) * value
+		end
+	end
+
+	local function fadeAll(root, value)
+		if root:IsA('BasePart') or root:IsA('Decal') then
+			fade(root, value)
+		end
+		for _, child in root:GetDescendants() do
+			if child:IsA('BasePart') or child:IsA('Decal') then
+				fade(child, value)
+			end
+		end
+	end
+
+	local function armorPiece(name)
+		local lowered = name:lower()
+		for _, piece in pieces do
+			if lowered:find(piece:lower(), 1, true) then
+				return piece
+			end
+		end
+		return nil
+	end
+
+	local function setTransparency()
+		if not transparency.enabled then return end
+		local character = getCharacter()
+		if not character then return end
+
+		for _, partName in parts do
+			local part = character:FindFirstChild(partName)
+			local slider = sliders[partName]
+			if part and slider and part:IsA('BasePart') then
+				if originalTransparency[part] == nil then
+					originalTransparency[part] = part.Transparency
+				end
+				part.Transparency = slider.value
+
+				if partName == 'Head' then
+					local face = part:FindFirstChild('face')
+					if face and face:IsA('Decal') then
+						if originalTransparency[face] == nil then
+							originalTransparency[face] = face.Transparency
+						end
+						face.Transparency = slider.value
+					end
+				end
+			end
+		end
+
+		local kitSkin = character:FindFirstChild('3DClothing')
+		if kitSkin then
+			for _, partName in parts do
+				local part = kitSkin:FindFirstChild(partName)
+				if part then
+					fadeAll(part, sliders[partName].value)
+				end
+			end
+		end
+
+		for _, child in character:GetChildren() do
+			if child:IsA('Accessory') then
+				local piece = armorPiece(child.Name)
+				if piece then
+					fadeAll(child, armor[piece].value)
+				elseif child.Name:lower():find('hair', 1, true) then
+					fadeAll(child, sliders.Hair.value)
+				end
+			end
+		end
+	end
+
+	transparency = render:module('Transparency', {
+		toggled = function(on)
+			if on then
+				local nextApply = 0
+				connection = runService.RenderStepped:Connect(function()
+					if os.clock() < nextApply then return end
+					nextApply = os.clock() + 0.1
+					setTransparency()
+				end)
+
+				transparency:clean(restoreTransparency)
+			end
+		end,
+		about = 'Makes parts of your character see-through for you.\nSet each body part, your hair and each armor piece.'
+	})
+
+	restoreTransparency = function()
+		if connection then
+			connection:Disconnect()
+			connection = nil
+		end
+
+		for instance, original in originalTransparency do
+			if instance.Parent then
+				instance.Transparency = original
+			end
+		end
+
+		local character = getCharacter()
+		if character then
+			for _, partName in parts do
+				local part = character:FindFirstChild(partName)
+				if part and part:IsA('BasePart') then
+					part.Transparency = 0
+				end
+			end
+
+			local head = character:FindFirstChild('Head')
+			local face = head and head:FindFirstChild('face')
+			if face and face:IsA('Decal') then
+				face.Transparency = 0
+			end
+		end
+
+		table.clear(originalTransparency)
+	end
+
+	sliders.Hair = transparency:slider('Hair', {
+		min = 0,
+		max = 1,
+		default = 0,
+		decimal = 10,
+		changed = setTransparency
+	})
+
+	for _, partName in parts do
+		sliders[partName] = transparency:slider(partName, {
+			min = 0,
+			max = 1,
+			default = 0,
+			decimal = 10,
+			changed = setTransparency
+		})
+	end
+
+	for _, piece in pieces do
+		armor[piece] = transparency:slider(piece, {
+			min = 0,
+			max = 1,
+			default = 0,
+			decimal = 10,
+			changed = setTransparency
+		})
+	end
+
+	local loadTransparency = transparency.load
+	transparency.load = function(self, data, ...)
+		if type(data) == 'table' and data[slinky:optionKey(self, 'Hide Armor')] == true then
+			local untouched = true
+			for _, piece in pieces do
+				if data[slinky:optionKey(self, piece)] ~= nil then
+					untouched = false
+				end
+			end
+			if untouched then
+				data = table.clone(data)
+				for _, piece in pieces do
+					data[slinky:optionKey(self, piece)] = 1
+				end
+			end
+		end
+		return loadTransparency(self, data, ...)
+	end
 end)
 
 --[[ AutoBalloon
@@ -20424,231 +21521,6 @@ run(function()
 	})
 end)
 	
---[[ Schematica
-Saves your builds to a file and rebuilds them for you. Shows a see-through preview while it places
-the blocks. ]]
-run(function()
-	local schematica
-	local file
-	local mode
-	local transparency
-	local parts, guidata, poschecklist = {}, {}, {}
-	local point1, point2
-	
-	for x = -3, 3, 3 do
-		for y = -3, 3, 3 do
-			for z = -3, 3, 3 do
-				if Vector3.new(x, y, z) ~= Vector3.zero then
-					table.insert(poschecklist, Vector3.new(x, y, z))
-				end
-			end
-		end
-	end
-	
-	local function checkAdjacent(pos)
-		for _, v in poschecklist do
-			if getPlacedBlock(pos + v) then return true end
-		end
-		return false
-	end
-	
-	local function getPlacedBlocksInPoints(s, e)
-		local list, blocks = {}, bedwars.BlockController:getStore()
-		for x = (e.X > s.X and s.X or e.X), (e.X > s.X and e.X or s.X) do
-			for y = (e.Y > s.Y and s.Y or e.Y), (e.Y > s.Y and e.Y or s.Y) do
-				for z = (e.Z > s.Z and s.Z or e.Z), (e.Z > s.Z and e.Z or s.Z) do
-					local vec = Vector3.new(x, y, z)
-					local block = blocks:getBlockAt(vec)
-					if block and block:GetAttribute('PlacedByUserId') == lplr.UserId then
-						list[vec] = block
-					end
-				end
-			end
-		end
-		return list
-	end
-	
-	local function loadMaterials()
-		for _, v in guidata do 
-			v:Destroy() 
-		end
-		local suc, read = pcall(function() 
-			return isfile(file.value) and httpService:JSONDecode(readfile(file.value)) 
-		end)
-	
-		if suc and read then
-			local items = {}
-			for _, v in read do 
-				items[v[2]] = (items[v[2]] or 0) + 1 
-			end
-			
-			for i, v in items do
-				local holder = Instance.new('Frame')
-				holder.Size = UDim2.new(1, 0, 0, 32)
-				holder.BackgroundTransparency = 1
-				holder.Parent = schematica.frame
-				local icon = Instance.new('ImageLabel')
-				icon.Size = UDim2.fromOffset(24, 24)
-				icon.Position = UDim2.fromOffset(4, 4)
-				icon.BackgroundTransparency = 1
-				icon.Image = bedwars.getIcon({itemType = i}, true)
-				icon.Parent = holder
-				local text = Instance.new('TextLabel')
-				text.Size = UDim2.fromOffset(100, 32)
-				text.Position = UDim2.fromOffset(32, 0)
-				text.BackgroundTransparency = 1
-				text.Text = (bedwars.ItemMeta[i] and bedwars.ItemMeta[i].displayName or i)..': '..v
-				text.TextXAlignment = Enum.TextXAlignment.Left
-				text.TextColor3 = uipallet.Text
-				text.TextSize = 14
-				text.FontFace = uipallet.Font
-				text.Parent = holder
-				table.insert(guidata, holder)
-			end
-			table.clear(read)
-			table.clear(items)
-		end
-	end
-	
-	local function save()
-		if point1 and point2 then
-			local tab = getPlacedBlocksInPoints(point1, point2)
-			local savetab = {}
-			point1 = point1 * 3
-			for i, v in tab do
-				i = bedwars.BlockController:getBlockPosition(CFrame.lookAlong(point1, entitylib.character.RootPart.CFrame.LookVector):PointToObjectSpace(i * 3)) * 3
-				table.insert(savetab, {
-					{
-						x = i.X, 
-						y = i.Y, 
-						z = i.Z
-					}, 
-					v.Name
-				})
-			end
-			point1, point2 = nil, nil
-			writefile(file.value, httpService:JSONEncode(savetab))
-			notif('Schematica', 'Saved '..getTableSize(tab)..' blocks', 5)
-			loadMaterials()
-			table.clear(tab)
-			table.clear(savetab)
-		else
-			local mouseinfo = bedwars.BlockBreaker.clientManager:getBlockSelector():getMouseInfo(0)
-			if mouseinfo and mouseinfo.target then
-				if point1 then
-					point2 = mouseinfo.target.blockRef.blockPosition
-					notif('Schematica', 'Selected position 2, toggle again near position 1 to save it', 3)
-				else
-					point1 = mouseinfo.target.blockRef.blockPosition
-					notif('Schematica', 'Selected position 1', 3)
-				end
-			end
-		end
-	end
-	
-	local function load(read)
-		local mouseinfo = bedwars.BlockBreaker.clientManager:getBlockSelector():getMouseInfo(0)
-		if mouseinfo and mouseinfo.target then
-			local position = CFrame.new(mouseinfo.placementPosition * 3) * CFrame.Angles(0, math.rad(math.round(math.deg(math.atan2(-entitylib.character.RootPart.CFrame.LookVector.X, -entitylib.character.RootPart.CFrame.LookVector.Z)) / 45) * 45), 0)
-	
-			for _, v in read do
-				local blockpos = bedwars.BlockController:getBlockPosition((position * CFrame.new(v[1].x, v[1].y, v[1].z)).p) * 3
-				if parts[blockpos] then continue end
-				local handler = bedwars.BlockController:getHandlerRegistry():getHandler(v[2]:find('wool') and getWool() or v[2])
-				if handler then
-					local part = handler:place(blockpos / 3, 0)
-					part.Transparency = transparency.value
-					part.CanCollide = false
-					part.Anchored = true
-					part.Parent = workspace
-					parts[blockpos] = part
-				end
-			end
-			table.clear(read)
-	
-			repeat
-				if entitylib.isAlive then
-					local localPosition = entitylib.character.RootPart.Position
-					for i, v in parts do
-						if (i - localPosition).Magnitude < 60 and checkAdjacent(i) then
-							if not schematica.enabled then break end
-							if not getItem(v.Name) then continue end
-							bedwars.placeBlock(i, v.Name, false)
-							task.delay(0.1, function()
-								local block = getPlacedBlock(i)
-								if block then
-									v:Destroy()
-									parts[i] = nil
-								end
-							end)
-						end
-					end
-				end
-				task.wait(0.1)
-			until getTableSize(parts) <= 0
-	
-			if getTableSize(parts) <= 0 and schematica.enabled then
-				notif('Schematica', 'Finished building', 5)
-				schematica:flip()
-			end
-		end
-	end
-	
-	schematica = world:module('Schematica', {
-		toggled = function(on)
-			if on then
-				if not file.value:find('.json') then
-					notif('Schematica', 'Invalid file', 3)
-					schematica:flip()
-					return
-				end
-	
-				if mode.value == 'Save' then
-					save()
-					schematica:flip(nil, true)
-				else
-					local suc, read = pcall(function() 
-						return isfile(file.value) and httpService:JSONDecode(readfile(file.value)) 
-					end)
-	
-					if suc and read then
-						load(read)
-					else
-						notif('Schematica', 'Missing / corrupted file', 3)
-						schematica:flip()
-					end
-				end
-			else
-				for _, v in parts do 
-					v:Destroy() 
-				end
-				table.clear(parts)
-			end
-		end,
-		about = 'Saves your builds to a file and rebuilds them for you.\nShows a see-through preview while it places the blocks.'
-	})
-	file = schematica:textbox('File', {
-		changed = function()
-			loadMaterials()
-			point1, point2 = nil, nil
-		end
-	})
-	mode = schematica:dropdown('Mode', {
-		choices = {'Load', 'Save'}
-	})
-	transparency = schematica:slider('Transparency', {
-		min = 0,
-		max = 1,
-		default = 0.7,
-		decimal = 10,
-		changed = function(val)
-			for _, v in parts do 
-				v.Transparency = val 
-			end
-		end
-	})
-end)
-	
 --[[ ArmorSwitch
 Swaps your armor on and off for baiting. Wears it only near enemies, or flips it with a keybind. ]]
 run(function()
@@ -21313,7 +22185,9 @@ The editor and the list are built in the loader's look. At the HUD's scale a pho
 editor over a third of the screen with 5 px text, so it is sized like the menu window instead, to
 fit the screen under the top bar, up to 0.85 of full size and never below the HUD's scale, and it is
 fitted a frame later: its handlers run inside the write that fired them, and fitting needs the
-thread identity raised.
+thread identity raised. Both are in the GUI colour where the loader has its orange. The list
+repaints when it changes, its + through ui.paintIcon so nothing is written inside a property
+signal; the editor is painted as it opens and repaints only while it is open.
 
 The inventory is the server's: every slot lives in Inventory.slotSnapshot, numbered by revision, and
 the reducer turns away the old store actions once a snapshot exists. The hotbar is laid out the way
@@ -21344,11 +22218,11 @@ run(function()
 		return loaderStyle.stroke(obj, loaderStyle.ButtonBorder, 0)
 	end
 
-	local function icon(parent, name, size, glyph, isButton, props)
+	local function icon(parent, name, size, glyph, isButton, props, noMirror)
 		local ui = slinky.libraries.ui
 		local holder
 		if ui and ui.icon then
-			holder = ui.icon(nil, name, size, {Class = isButton and 'TextButton' or nil, Color = loaderStyle.SubText})
+			holder = ui.icon(nil, name, size, {Class = isButton and 'TextButton' or nil, Color = loaderStyle.SubText, NoMirror = noMirror})
 		else
 			holder = Instance.new(isButton and 'TextButton' or 'TextLabel')
 			holder.BackgroundTransparency = 1
@@ -21382,6 +22256,8 @@ run(function()
 	local function createWindow(self)
 		local selectedslot = 1
 		local hovered = {}
+		local accent = loaderStyle.accent()
+		local clearHovered, hoveredItem = false, nil
 		local window = Instance.new('Frame')
 		window.Name = 'HotbarGUI'
 		window.Size = UDim2.fromOffset(600, 322)
@@ -21389,7 +22265,7 @@ run(function()
 		window.AnchorPoint = Vector2.new(0.5, 0.5)
 		window.Visible = false
 		window.Parent = slinky.gui.ScaledGui
-		loaderStyle.box(window)
+		local windowStroke = loaderStyle.box(window)
 		window.BackgroundTransparency = 0.1
 		local zoom = Instance.new('UIScale')
 		zoom.Parent = window
@@ -21423,7 +22299,7 @@ run(function()
 		divider.Name = 'Divider'
 		divider.Size = UDim2.new(1, -28, 0, 1)
 		divider.Position = UDim2.fromOffset(14, 54)
-		divider.BackgroundColor3 = loaderStyle.Orange
+		divider.BackgroundColor3 = accent
 		divider.BackgroundTransparency = 0.8
 		divider.BorderSizePixel = 0
 		divider.Parent = window
@@ -21476,10 +22352,12 @@ run(function()
 		local clearstroke = slotBox(clear, UDim.new(1, 0))
 		clear.Parent = window
 		clear.MouseEnter:Connect(function()
-			clearstroke.Color = loaderStyle.Orange
+			clearHovered = true
+			clearstroke.Color = accent
 			clear.TextColor3 = loaderStyle.Text
 		end)
 		clear.MouseLeave:Connect(function()
+			clearHovered = false
 			clearstroke.Color = loaderStyle.ButtonBorder
 			clear.TextColor3 = loaderStyle.SubText
 		end)
@@ -21489,13 +22367,13 @@ run(function()
 			local stroke = slot and slot:FindFirstChildOfClass('UIStroke')
 			if not stroke then return end
 			local selected = i == selectedslot
-			stroke.Color = (selected or hovered[i]) and loaderStyle.Orange or loaderStyle.ButtonBorder
+			stroke.Color = (selected or hovered[i]) and accent or loaderStyle.ButtonBorder
 			stroke.Thickness = selected and 2 or 1
 			stroke.Transparency = (hovered[i] and not selected) and 0.3 or 0
 		end
 
 		local function refreshSelected()
-			slotnum.Text = 'SLOT <font color="#'..loaderStyle.Orange:ToHex()..'">'..selectedslot..'</font>'
+			slotnum.Text = 'SLOT <font color="#'..accent:ToHex()..'">'..selectedslot..'</font>'
 			bigimage.Image = window['Slot'..selectedslot].ImageLabel.Image
 		end
 
@@ -21585,7 +22463,7 @@ run(function()
 		})
 		searchicon.TextTransparency = 1
 		search.Focused:Connect(function()
-			searchstroke.Color = loaderStyle.Orange
+			searchstroke.Color = accent
 		end)
 		search.FocusLost:Connect(function()
 			searchstroke.Color = loaderStyle.ButtonBorder
@@ -21597,7 +22475,7 @@ run(function()
 		children.BackgroundTransparency = 1
 		children.BorderSizePixel = 0
 		children.ScrollBarThickness = 3
-		children.ScrollBarImageColor3 = loaderStyle.Orange
+		children.ScrollBarImageColor3 = accent
 		children.ScrollBarImageTransparency = 0.4
 		children.ScrollingDirection = Enum.ScrollingDirection.Y
 		children.CanvasSize = UDim2.new()
@@ -21669,10 +22547,14 @@ run(function()
 			slotimage.Image = image
 			slotimage.Parent = slotbkg
 			slotbkg.MouseEnter:Connect(function()
-				stroke.Color = loaderStyle.Orange
+				hoveredItem = stroke
+				stroke.Color = accent
 				stroke.Transparency = 0.3
 			end)
 			slotbkg.MouseLeave:Connect(function()
+				if hoveredItem == stroke then
+					hoveredItem = nil
+				end
 				stroke.Color = loaderStyle.ButtonBorder
 				stroke.Transparency = 0
 			end)
@@ -21721,6 +22603,28 @@ run(function()
 			for i = 1, 9 do
 				window['Slot'..i].ImageLabel.Image = itemIcon(obj and obj.Hotbar[tostring(i)])
 			end
+			refreshSelected()
+		end
+
+		function self:paintWindow(color)
+			accent = color
+			window.BackgroundColor3 = loaderStyle.tint(color)
+			windowStroke.Color = color
+			divider.BackgroundColor3 = color
+			children.ScrollBarImageColor3 = color
+			if clearHovered then
+				clearstroke.Color = color
+			end
+			if search:IsFocused() then
+				searchstroke.Color = color
+			end
+			if hoveredItem and hoveredItem.Parent then
+				hoveredItem.Color = color
+			end
+			for i in hovered do
+				paintSlot(i)
+			end
+			paintSlot(selectedslot)
 			refreshSelected()
 		end
 		refreshSelected()
@@ -21774,7 +22678,16 @@ run(function()
 		addlayout.SortOrder = Enum.SortOrder.LayoutOrder
 		addlayout.Padding = UDim.new(0, 4)
 		addlayout.Parent = addrow
-		icon(addrow, 'plus', 14, '+', false, {LayoutOrder = 1, TextColor3 = loaderStyle.Orange})
+		local plus = icon(addrow, 'plus', 14, '+', false, {LayoutOrder = 1}, true)
+		local function paintPlus(color)
+			local ui = slinky.libraries.ui
+			if ui and ui.paintIcon then
+				ui.paintIcon(plus, color)
+			else
+				plus.TextColor3 = color
+			end
+		end
+		paintPlus(loaderStyle.accent())
 		local addlabel = Instance.new('TextLabel')
 		addlabel.LayoutOrder = 2
 		addlabel.AutomaticSize = Enum.AutomaticSize.X
@@ -21820,18 +22733,21 @@ run(function()
 		optionapi.window = createWindow(optionapi)
 
 		function optionapi:repaint()
+			local accent = loaderStyle.accent()
 			for index, entry in self.hotbars do
 				local selected = index == self.selected
 				local object = entry.Object
 				object.LayoutOrder = index
-				object.BackgroundColor3 = selected and Color3.fromRGB(10, 10, 10):Lerp(loaderStyle.Orange, 0.22) or loaderStyle.Background
+				object.BackgroundColor3 = loaderStyle.tint(accent, selected and 0.22 or 0.1)
 				local stroke = object:FindFirstChildOfClass('UIStroke')
 				if stroke then
+					stroke.Color = accent
 					stroke.Transparency = selected and 0 or 0.55
 				end
 				local active = object:FindFirstChild('Active')
 				if active then
 					active.Visible = selected
+					active.TextColor3 = accent
 				end
 			end
 			hint.Visible = #self.hotbars > 0
@@ -21895,12 +22811,13 @@ run(function()
 			active.TextSize = 11
 			active.TextXAlignment = Enum.TextXAlignment.Right
 			active.Visible = false
-			loaderStyle.text(active, 'Bold', loaderStyle.Orange)
+			loaderStyle.text(active, 'Bold', loaderStyle.accent())
 			active.Parent = hotbar
 			hotbar.MouseButton1Click:Connect(function()
 				local ind = table.find(optionapi.hotbars, hotbardata)
 				if ind == optionapi.selected then
 					slinky.gui.ScaledGui.ClickGui.Visible = false
+					optionapi:paintWindow(loaderStyle.accent())
 					optionapi.window.Visible = true
 					optionapi:refreshWindow()
 				elseif ind then
@@ -21933,6 +22850,16 @@ run(function()
 			end)
 			self:repaint()
 		end
+
+		loaderStyle.follow(slinky, function(accent)
+			add.BackgroundColor3 = loaderStyle.tint(accent)
+			addstroke.Color = accent
+			paintPlus(accent)
+			optionapi:repaint()
+			if optionapi.window.Visible then
+				optionapi:paintWindow(accent)
+			end
+		end)
 
 		api.options.HotbarList = optionapi
 
@@ -23313,123 +24240,6 @@ run(function()
 	label.Text = unit('0.00')
 	loaderStyle.text(label, 'SemiBold', loaderStyle.Card.Text)
 	label.Parent = reachDisplay.frame
-end)
-	
---[[ Song Beats
-Plays your own music files while you play. Can pulse your FOV to the beat; set the volume and pulse
-size. ]]
-run(function()
-	local songBeats
-	local list
-	local fov
-	local fovValue = {}
-	local volume
-	local alreadypicked = {}
-	local beattick = os.clock()
-	local oldfov, songobj, songbpm, songtween
-	
-	local function choosesong()
-		local list = list.active
-		if #alreadypicked >= #list then 
-			table.clear(alreadypicked) 
-		end
-	
-		if #list <= 0 then
-			notif('SongBeats', 'no songs', 10)
-			songBeats:flip()
-			return
-		end
-	
-		local chosensong = list[math.random(1, #list)]
-		if #list > 1 and table.find(alreadypicked, chosensong) then
-			repeat 
-				task.wait(0.1) 
-				chosensong = list[math.random(1, #list)] 
-			until not table.find(alreadypicked, chosensong) or not songBeats.enabled
-		end
-		if not songBeats.enabled then return end
-	
-		local split = chosensong:split('/')
-		if not isfile(split[1]) then
-			notif('SongBeats', 'Missing song ('..split[1]..')', 10)
-			songBeats:flip()
-			return
-		end
-	
-		songobj.SoundId = assetfunction(split[1])
-		repeat task.wait(0.1) until songobj.IsLoaded or not songBeats.enabled
-		if songBeats.enabled then
-			beattick = os.clock() + (tonumber(split[3]) or 0)
-			songbpm = 60 / (tonumber(split[2]) or 50)
-			songobj:Play()
-		end
-	end
-	
-	songBeats = legit:module('Song Beats', {
-		tab = 'Utility',
-		toggled = function(on)
-			if on then
-				songobj = Instance.new('Sound')
-				songobj.Volume = volume.value / 100
-				songobj.Parent = workspace
-				repeat
-					if not songobj.Playing then choosesong() end
-					if beattick < os.clock() and songBeats.enabled and fov.enabled then
-						beattick = os.clock() + songbpm
-						oldfov = math.min(bedwars.FovController:getFOV() * (bedwars.SprintController.sprinting and 1.1 or 1), 120)
-						gameCamera.FieldOfView = oldfov - fovValue.value
-						songtween = tweenService:Create(gameCamera, TweenInfo.new(math.min(songbpm, 0.2), Enum.EasingStyle.Linear), {FieldOfView = oldfov})
-						songtween:Play()
-					end
-					task.wait(0.1)
-				until not songBeats.enabled
-			else
-				if songobj then
-					songobj:Destroy()
-				end
-				if songtween then
-					songtween:Cancel()
-				end
-				if oldfov then
-					gameCamera.FieldOfView = oldfov
-				end
-				table.clear(alreadypicked)
-			end
-		end,
-		about = 'Plays your own music files while you play.\nCan pulse your FOV to the beat; set the volume and pulse size.'
-	})
-	list = songBeats:list('Songs', {
-		placeholder = 'filepath/bpm/start'
-	})
-	volume = songBeats:slider('Volume', {
-		changed = function(val)
-			if songobj then 
-				songobj.Volume = val / 100 
-			end
-		end,
-		min = 1,
-		max = 100,
-		default = 100,
-		suffix = function(val) return '%' end
-	})
-	fov = songBeats:toggle('Beat FOV', {
-		changed = function(callback)
-			if fovValue.row then
-				fovValue.row.Visible = callback
-			end
-			if songBeats.enabled then
-				songBeats:flip(nil, true)
-				songBeats:flip(nil, true)
-			end
-		end,
-		default = true
-	})
-	fovValue = songBeats:slider('Adjustment', {
-		min = 1,
-		max = 30,
-		default = 5,
-		sub = true
-	})
 end)
 
 --[[ SoundChanger

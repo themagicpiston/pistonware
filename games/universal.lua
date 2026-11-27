@@ -744,7 +744,8 @@ local phase = {enabled = false}
 
 --[[ The overlays' look, for the boxes this file draws on the HUD: Target Info's card. A near-black
 card, mostly opaque, with a faint white edge and rounded corners; text in the Mod Overlay's Inter,
-values bright and labels in a muted grey. The orange is kept only for what is lit (a pressed key). ]]
+values bright and labels in a muted grey. What is lit (a pressed key) is in the GUI colour
+(loaderStyle.accent). Orange is the loader's, for a menu without one and the old look's colours. ]]
 local loaderStyle = {
 	Orange = Color3.fromRGB(240, 122, 31),
 	Text = Color3.fromRGB(240, 240, 240),
@@ -759,6 +760,25 @@ local loaderStyle = {
 loaderStyle.Hue, loaderStyle.Sat, loaderStyle.Value = loaderStyle.Background:ToHSV()
 loaderStyle.EdgeHue, loaderStyle.EdgeSat, loaderStyle.EdgeValue = loaderStyle.Edge:ToHSV()
 loaderStyle.SubHex = '#'..loaderStyle.SubText:ToHex()
+
+-- The GUI colour now (GUI Theme in the menu's settings), or the orange on a menu without it.
+function loaderStyle.accent()
+	if slinky.accentColor then
+		return slinky:accentColor()
+	end
+	return loaderStyle.Orange
+end
+
+--[[ Calls paint(color) with the GUI colour now and again on every change of it, until owner (a
+module or an overlay) is cleaned as it turns off. A menu without slinky:followAccent gets the
+orange once. ]]
+function loaderStyle.follow(owner, paint)
+	if slinky.followAccent then
+		owner:clean(slinky:followAccent(paint))
+	else
+		paint(loaderStyle.Orange)
+	end
+end
 
 --[[ The look before this one: the loader's near-black with a tenth of its orange, at 70%, and a soft
 orange edge at 45%. A profile saves every option, so a new default never reaches anyone who saved
@@ -5979,236 +5999,6 @@ run(function()
 	})
 end)
 	
---[[ GamingChair
-Seats your character in a gaming chair that rolls along with you and hovers while you fly.
-Uninjecting clears entitylib while the loop waits for a respawn, and a stale loop must not unanchor
-the new chair, so the loop stops in both cases; switching off destroys the chair. A generation
-counter stops a loop left over from a quick off and on. ]]
-run(function()
-	local gamingChair = {enabled = false}
-	local color
-	local wheelpositions = {
-		Vector3.new(-0.8, -0.6, -0.18),
-		Vector3.new(0.1, -0.6, -0.88),
-		Vector3.new(0, -0.6, 0.7)
-	}
-	local chairhighlight
-	local currenttween
-	local movingsound
-	local flyingsound
-	local chairanim
-	local chair
-	local generation = 0
-
-	gamingChair = render:module('GamingChair', {
-		toggled = function(on)
-			generation += 1
-			if on then
-				if slinky.threadFix then
-					setthreadidentity(8)
-				end
-				chair = Instance.new('MeshPart')
-				chair.Color = Color3.fromRGB(21, 21, 21)
-				chair.Size = Vector3.new(2.16, 3.6, 2.3) / Vector3.new(12.37, 20.636, 13.071)
-				chair.CanCollide = false
-				chair.Massless = true
-				chair.MeshId = 'rbxassetid://12972961089'
-				chair.Material = Enum.Material.SmoothPlastic
-				chair.Parent = workspace
-				movingsound = Instance.new('Sound')
-				movingsound.Volume = 0.4
-				movingsound.Looped = true
-				movingsound.Parent = workspace
-				flyingsound = Instance.new('Sound')
-				flyingsound.Volume = 0.4
-				flyingsound.Looped = true
-				flyingsound.Parent = workspace
-				local chairweld = Instance.new('WeldConstraint')
-				chairweld.Part0 = chair
-				chairweld.Parent = chair
-				if entitylib.isAlive then
-					chair.CFrame = entitylib.character.RootPart.CFrame * CFrame.Angles(0, math.rad(-90), 0)
-					chairweld.Part1 = entitylib.character.RootPart
-				end
-				chairhighlight = Instance.new('Highlight')
-				chairhighlight.FillTransparency = 1
-				chairhighlight.OutlineColor = Color3.fromHSV(color.hue, color.sat, color.value)
-				chairhighlight.DepthMode = Enum.HighlightDepthMode.Occluded
-				chairhighlight.OutlineTransparency = 0.2
-				chairhighlight.Parent = chair
-				local chairarms = Instance.new('MeshPart')
-				chairarms.Color = chair.Color
-				chairarms.Size = Vector3.new(1.39, 1.345, 2.75) / Vector3.new(97.13, 136.216, 234.031)
-				chairarms.CFrame = chair.CFrame * CFrame.new(-0.169, -1.129, -0.013)
-				chairarms.MeshId = 'rbxassetid://12972673898'
-				chairarms.CanCollide = false
-				chairarms.Parent = chair
-				local chairarmsweld = Instance.new('WeldConstraint')
-				chairarmsweld.Part0 = chairarms
-				chairarmsweld.Part1 = chair
-				chairarmsweld.Parent = chair
-				local chairlegs = Instance.new('MeshPart')
-				chairlegs.Color = chair.Color
-				chairlegs.Name = 'Legs'
-				chairlegs.Size = Vector3.new(1.8, 1.2, 1.8) / Vector3.new(10.432, 8.105, 9.488)
-				chairlegs.CFrame = chair.CFrame * CFrame.new(0.047, -2.324, 0)
-				chairlegs.MeshId = 'rbxassetid://13003181606'
-				chairlegs.CanCollide = false
-				chairlegs.Parent = chair
-				local chairfan = Instance.new('MeshPart')
-				chairfan.Color = chair.Color
-				chairfan.Name = 'Fan'
-				chairfan.Size = Vector3.zero
-				chairfan.CFrame = chair.CFrame * CFrame.new(0, -1.873, 0)
-				chairfan.MeshId = 'rbxassetid://13004977292'
-				chairfan.CanCollide = false
-				chairfan.Parent = chair
-				local trails = {}
-				for _, v in wheelpositions do
-					local attachment = Instance.new('Attachment')
-					attachment.Position = v
-					attachment.Parent = chairlegs
-					local attachment2 = Instance.new('Attachment')
-					attachment2.Position = v + Vector3.new(0, 0, 0.18)
-					attachment2.Parent = chairlegs
-					local trail = Instance.new('Trail')
-					trail.Texture = 'http://www.roblox.com/asset/?id=13005168530'
-					trail.TextureMode = Enum.TextureMode.Static
-					trail.Transparency = NumberSequence.new(0.5)
-					trail.Color = ColorSequence.new(Color3.new(0.5, 0.5, 0.5))
-					trail.Attachment0 = attachment
-					trail.Attachment1 = attachment2
-					trail.Lifetime = 20
-					trail.MaxLength = 60
-					trail.MinLength = 0.1
-					trail.Parent = chairlegs
-					table.insert(trails, trail)
-				end
-				gamingChair:clean(chair)
-				gamingChair:clean(movingsound)
-				gamingChair:clean(flyingsound)
-				chairanim = {Stop = function() end}
-				local oldmoving = false
-				local oldflying = false
-				local gen = generation
-				repeat
-					if entitylib.isAlive and entitylib.character.Humanoid.Health > 0 then
-						if not chairanim.IsPlaying then
-							local temp2 = Instance.new('Animation')
-							temp2.AnimationId = entitylib.character.Humanoid.RigType == Enum.HumanoidRigType.R15 and 'http://www.roblox.com/asset/?id=2506281703' or 'http://www.roblox.com/asset/?id=178130996'
-							chairanim = entitylib.character.Humanoid:LoadAnimation(temp2)
-							chairanim.Priority = Enum.AnimationPriority.Movement
-							chairanim.Looped = true
-							chairanim:Play()
-						end
-						chair.CFrame = entitylib.character.RootPart.CFrame * CFrame.Angles(0, math.rad(-90), 0)
-						chairweld.Part1 = entitylib.character.RootPart
-						chairlegs.Velocity = Vector3.zero
-						chairlegs.CFrame = chair.CFrame * CFrame.new(0.047, -2.324, 0)
-						chairfan.Velocity = Vector3.zero
-						chairfan.CFrame = chair.CFrame * CFrame.new(0.047, -1.873, 0) * CFrame.Angles(0, math.rad(tick() * 180 % 360), math.rad(180))
-						local moving = entitylib.character.Humanoid:GetState() == Enum.HumanoidStateType.Running and entitylib.character.Humanoid.MoveDirection ~= Vector3.zero
-						local flying = slinky.modules.Fly and slinky.modules.Fly.enabled or slinky.modules.LongJump and slinky.modules.LongJump.enabled or slinky.modules.InfiniteFly and slinky.modules.InfiniteFly.enabled
-						if movingsound.TimePosition > 1.9 then
-							movingsound.TimePosition = 0.2
-						end
-						movingsound.PlaybackSpeed = (entitylib.character.RootPart.Velocity * Vector3.new(1, 0, 1)).Magnitude / 16
-						for _, v in trails do
-							v.Enabled = not flying and moving
-							v.Color = ColorSequence.new(movingsound.PlaybackSpeed > 1.5 and Color3.new(1, 0.5, 0) or Color3.new())
-						end
-						if moving ~= oldmoving then
-							if movingsound.IsPlaying then
-								if not moving then
-									movingsound:Stop()
-								end
-							else
-								if not flying and moving then
-									movingsound:Play()
-								end
-							end
-							oldmoving = moving
-						end
-						if flying ~= oldflying then
-							if flying then
-								if movingsound.IsPlaying then
-									movingsound:Stop()
-								end
-								if not flyingsound.IsPlaying then
-									flyingsound:Play()
-								end
-								if currenttween then
-									currenttween:Cancel()
-								end
-								currenttween = tweenService:Create(chairlegs, TweenInfo.new(0.15), {
-									Size = Vector3.zero
-								})
-								currenttween.Completed:Connect(function(state)
-									if state == Enum.PlaybackState.Completed then
-										chairfan.Transparency = 0
-										chairlegs.Transparency = 1
-										currenttween = tweenService:Create(chairfan, TweenInfo.new(0.15), {
-											Size = Vector3.new(1.534, 0.328, 1.537) / Vector3.new(791.138, 168.824, 792.027)
-										})
-										currenttween:Play()
-									end
-								end)
-								currenttween:Play()
-							else
-								if flyingsound.IsPlaying then
-									flyingsound:Stop()
-								end
-								if not movingsound.IsPlaying and moving then
-									movingsound:Play()
-								end
-								if currenttween then currenttween:Cancel() end
-								currenttween = tweenService:Create(chairfan, TweenInfo.new(0.15), {
-									Size = Vector3.zero
-								})
-								currenttween.Completed:Connect(function(state)
-									if state == Enum.PlaybackState.Completed then
-										chairfan.Transparency = 1
-										chairlegs.Transparency = 0
-										currenttween = tweenService:Create(chairlegs, TweenInfo.new(0.15), {
-											Size = Vector3.new(1.8, 1.2, 1.8) / Vector3.new(10.432, 8.105, 9.488)
-										})
-										currenttween:Play()
-									end
-								end)
-								currenttween:Play()
-							end
-							oldflying = flying
-						end
-					else
-						chair.Anchored = true
-						chairlegs.Anchored = true
-						chairfan.Anchored = true
-						repeat task.wait() until not (gamingChair.enabled and generation == gen and entitylib) or entitylib.isAlive and entitylib.character.Humanoid.Health > 0
-						if not (gamingChair.enabled and generation == gen and entitylib) then break end
-						chair.Anchored = false
-						chairlegs.Anchored = false
-						chairfan.Anchored = false
-						chairanim:Stop()
-					end
-					task.wait()
-				until not gamingChair.enabled or generation ~= gen
-			else
-				if chairanim then
-					chairanim:Stop()
-				end
-			end
-		end,
-		about = 'Sit in the best gaming chair known to mankind.\nIt rolls along with you and hovers while you fly.'
-	})
-	color = gamingChair:color('Color', {
-		changed = function(h, s, v)
-			if chairhighlight then
-				chairhighlight.OutlineColor = Color3.fromHSV(h, s, v)
-			end
-		end
-	})
-end)
-	
 --[[ Health
 Shows your health with a heart below the middle of the screen, coloured from green to red by the
 share left, and hidden while the menu is open. ]]
@@ -7377,7 +7167,8 @@ attempts, confirmed, pending and dropped hits, hit and swing rates and gaps, and
 diagnostics sampler runs, frame and heartbeat times, ping, spikes, correction signals and memory,
 plus targeting and cache rates. Turning it on enables Performance with its Killaura telemetry and
 diagnostics; turning it off, or starting a new run, puts back whether Performance was enabled
-before. The overlay keeps the name 'Killaura Info' so existing developer profiles still load. ]]
+before. The overlay keeps the name 'Killaura Info' so existing developer profiles still load. Its
+border follows the GUI colour while Border Color is left at its default, the menu's orange. ]]
 if shared.PistonwareDeveloper == true then
 	run(function()
 		local killauraInfo
@@ -7391,6 +7182,18 @@ if shared.PistonwareDeveloper == true then
 		local infostroke
 		local lifecycle = 0
 		local activeRun
+		local borderDefault = {Color3.fromRGB(243, 93, 18):ToHSV()}
+
+		local function paintBorder(accent)
+			if not (infostroke and borderColor) then return end
+			local h, s, v = borderColor.hue, borderColor.sat, borderColor.value
+			if not borderColor.rainbow and math.abs(h - borderDefault[1]) < 1e-3
+				and math.abs(s - borderDefault[2]) < 1e-3 and math.abs(v - borderDefault[3]) < 1e-3 then
+				infostroke.Color = accent
+			else
+				infostroke.Color = Color3.fromHSV(h, s, v)
+			end
+		end
 
 		local function stopRun(run)
 			if not run or run.Cleaned then return end
@@ -7494,6 +7297,7 @@ if shared.PistonwareDeveloper == true then
 				killauraInfo:clean(function()
 					stopRun(run)
 				end)
+				loaderStyle.follow(killauraInfo, paintBorder)
 
 					performance:SetEnabled(true)
 					performance:SetKillauraTelemetry(true)
@@ -7587,7 +7391,7 @@ if shared.PistonwareDeveloper == true then
 		borderColor = killauraInfo:color('Border Color', {
 			changed = function(hue, sat, val, opacity)
 				if infostroke then
-					infostroke.Color = Color3.fromHSV(hue, sat, val)
+					paintBorder(loaderStyle.accent())
 					infostroke.Transparency = 1 - opacity
 				end
 			end,
@@ -7647,7 +7451,7 @@ if shared.PistonwareDeveloper == true then
 		infolabel.Parent = infoholder
 		infostroke = Instance.new('UIStroke')
 		infostroke.Enabled = false
-		infostroke.Color = Color3.fromRGB(243, 93, 18)
+		infostroke.Color = loaderStyle.accent()
 		infostroke.Parent = infoholder
 	end)
 end
@@ -10157,11 +9961,11 @@ run(function()
 end)
 	
 --[[ Keystrokes
-Shows your movement keys and the spacebar on screen as loader boxes, in the loader's orange with
-dark text while pressed. A phone has no movement keys: its thumbstick and jump button drive the
+Shows your movement keys and the spacebar on screen as loader boxes, in the GUI colour with dark
+text while pressed. A phone has no movement keys: its thumbstick and jump button drive the
 humanoid, so on a touch-only device the keys follow which way the humanoid walks relative to the
 camera, and whether it jumps. The spacebar outlives a restart, so it is set released on enable like
-the rest. ]]
+the rest. A key held while the GUI colour changes takes the new one. ]]
 run(function()
 	local keystrokes
 	local style
@@ -10220,7 +10024,7 @@ run(function()
 		local colour, opacity = loaderStyle.colorOf(color)
 		key.Tweens = {
 			tweenService:Create(key.Key, TweenInfo.new(0.1), {
-				BackgroundColor3 = pressed and loaderStyle.Orange or colour,
+				BackgroundColor3 = pressed and loaderStyle.accent() or colour,
 				BackgroundTransparency = pressed and 0 or 1 - opacity
 			}),
 			tweenService:Create(key.Text, TweenInfo.new(0.1), {TextColor3 = textColor})
@@ -10232,7 +10036,19 @@ run(function()
 			tween:Play()
 		end
 	end
-	
+
+	local function paintHeld(accent)
+		for _, key in keys do
+			if key.Pressed then
+				if key.Tweens then
+					key.Tweens[1]:Cancel()
+				end
+				key.Key.BackgroundColor3 = accent
+				key.Key.BackgroundTransparency = 0
+			end
+		end
+	end
+
 	local function updateKey(inputType)
 		setPressed(inputType.KeyCode, inputType.UserInputState == Enum.UserInputState.Begin)
 	end
@@ -10264,7 +10080,8 @@ run(function()
 				createKeystroke(Enum.KeyCode.A, UDim2.new(0, 0, 0, 42), style.value == 'Arrow' and '←' or nil)
 				createKeystroke(Enum.KeyCode.D, UDim2.new(0, 76, 0, 42), style.value == 'Arrow' and '→' or nil)
 				setPressed(Enum.KeyCode.Space, false)
-	
+				loaderStyle.follow(keystrokes, paintHeld)
+
 				if inputService.TouchEnabled and not inputService.KeyboardEnabled then
 					keystrokes:clean(runService.RenderStepped:Connect(touchKeys))
 				else
@@ -10377,142 +10194,6 @@ run(function()
 		end
 	}))
 	label = loaderStyle.reading(ping.frame, loaderStyle.unit('0', 'ms'))
-end)
-	
---[[ Song Beats
-Plays your own music files in random order and can pulse the field of view on each beat. A list
-entry is filepath/bpm/start: the bpm (50 when missing) sets the beat interval and start delays the
-first beat by that many seconds. generation stops the loop left from a Beat FOV restart or a quick
-off and on. ]]
-run(function()
-	local songBeats
-	local list
-	local fov
-	local fovValue = {}
-	local volume
-	local alreadypicked = {}
-	local beattick = tick()
-	local oldfov, songobj, songbpm, songtween
-	local generation = 0
-
-	local function choosesong()
-		local list = list.active
-		if #alreadypicked >= #list then
-			table.clear(alreadypicked)
-		end
-	
-		if #list <= 0 then
-			notif('SongBeats', 'no songs', 10)
-			songBeats:flip()
-			return
-		end
-	
-		local chosensong = list[math.random(1, #list)]
-		if #list > 1 and table.find(alreadypicked, chosensong) then
-			repeat
-				task.wait()
-				chosensong = list[math.random(1, #list)]
-			until not table.find(alreadypicked, chosensong) or not songBeats.enabled
-		end
-		if not songBeats.enabled then return end
-	
-		local split = chosensong:split('/')
-		if not isfile(split[1]) then
-			notif('SongBeats', 'Missing song ('..split[1]..')', 10)
-			songBeats:flip()
-			return
-		end
-	
-		songobj.SoundId = assetfunction(split[1])
-		repeat
-			task.wait()
-		until songobj.IsLoaded or not songBeats.enabled
-	
-		if songBeats.enabled then
-			beattick = tick() + (tonumber(split[3]) or 0)
-			songbpm = 60 / (tonumber(split[2]) or 50)
-			songobj:Play()
-		end
-	end
-	
-	songBeats = legit:module('Song Beats', {
-		tab = 'Utility',
-		toggled = function(on)
-			generation += 1
-			if on then
-				songobj = Instance.new('Sound')
-				songobj.Volume = volume.value / 100
-				songobj.Parent = workspace
-				oldfov = gameCamera.FieldOfView
-
-				local gen = generation
-				repeat
-					if not songobj.Playing then
-						choosesong()
-					end
-	
-					if beattick < tick() and songBeats.enabled and fov.enabled then
-						beattick = tick() + songbpm
-						gameCamera.FieldOfView = oldfov - fovValue.value
-						songtween = tweenService:Create(gameCamera, TweenInfo.new(math.min(songbpm, 0.2), Enum.EasingStyle.Linear), {
-							FieldOfView = oldfov
-						})
-						songtween:Play()
-					end
-	
-					task.wait()
-				until not songBeats.enabled or generation ~= gen
-			else
-				if songobj then
-					songobj:Destroy()
-				end
-	
-				if songtween then
-					songtween:Cancel()
-				end
-	
-				if oldfov then
-					gameCamera.FieldOfView = oldfov
-				end
-	
-				table.clear(alreadypicked)
-			end
-		end,
-		about = 'Plays your own music files while you play.\nCan pulse your FOV to the beat; set the volume and pulse size.'
-	})
-	list = songBeats:list('Songs', {
-		placeholder = 'filepath/bpm/start'
-	})
-	fov = songBeats:toggle('Beat FOV', {
-		changed = function(callback)
-			if fovValue.row then
-				fovValue.row.Visible = callback
-			end
-	
-			if songBeats.enabled then
-				songBeats:flip()
-				songBeats:flip()
-			end
-		end,
-		default = true
-	})
-	fovValue = songBeats:slider('Adjustment', {
-		min = 1,
-		max = 30,
-		default = 5,
-		sub = true
-	})
-	volume = songBeats:slider('Volume', {
-		changed = function(val)
-			if songobj then
-				songobj.Volume = val / 100
-			end
-		end,
-		min = 1,
-		max = 100,
-		default = 100,
-		suffix = '%'
-	})
 end)
 	
 --[[ Speedmeter

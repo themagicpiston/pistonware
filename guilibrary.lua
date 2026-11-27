@@ -30,7 +30,6 @@ local slinky = {
 	settingToggleNotifications = {},
 	threadFix = setthreadidentity and true or false,
 	toggleNotifications = {},
-	version = '4.22',
 	windows = {}
 }
 
@@ -797,6 +796,85 @@ end
 -- The TextSize that draws a size given in em px, the unit Slinky's sizes are measured in: 16 is 19.
 function theme.em(size)
 	return math.floor(size * theme.TextScale + 0.5)
+end
+
+--[[ The paints that follow the accent, added by slinky:followAccent. The list is replaced, never
+changed in place, so a paint that stops itself or another during a pass cannot make the pass skip
+one. slinky:unload empties it. ]]
+local accentPaints = {}
+
+--[[ How those paints keep up with a running rainbow: the newest colour (hue, sat, val), the clock
+of the last pass, whether a delayed pass is waiting, and serial, which every pass moves on, so a
+waiting pass that a later one has covered stands down. gap is the least time between two rainbow
+passes. ]]
+local accentQueue = {gap = 0.05, last = 0, serial = 0, queued = false}
+
+-- One pass: every paint with the newest colour, each under pcall.
+local function runAccentPass()
+	accentQueue.queued = false
+	accentQueue.last = os.clock()
+	accentQueue.serial += 1
+	local color = Color3.fromHSV(accentQueue.hue, accentQueue.sat, accentQueue.val)
+	for _, entry in accentPaints do
+		if entry.paint then
+			pcall(entry.paint, color)
+		end
+	end
+end
+
+--[[ Paints the colour the GUI Theme slider has just taken. The slider calls it on every change: a
+preset, a custom colour, a rainbow step, a load. Outside the rainbow the pass runs at once. The
+rainbow steps at its update rate, up to 144 Hz, so while it runs a pass is made at most once per
+accentQueue.gap: a step sooner than that leaves one delayed pass waiting, which takes the newest
+colour when it runs. Turning the rainbow off sets the colour, and that pass runs at once. ]]
+local function paintAccent(hue, sat, val)
+	accentQueue.hue, accentQueue.sat, accentQueue.val = hue, sat, val
+	if #accentPaints == 0 then return end
+	if not (slinky.accent and slinky.accent.rainbow) then
+		runAccentPass()
+		return
+	end
+	if accentQueue.queued then return end
+	local remaining = accentQueue.last + accentQueue.gap - os.clock()
+	if remaining <= 0 then
+		runAccentPass()
+		return
+	end
+	accentQueue.queued = true
+	local serial = accentQueue.serial
+	task.delay(remaining, function()
+		if accentQueue.serial == serial then
+			runAccentPass()
+		end
+	end)
+end
+
+-- The accent now, as a Color3: what the menu's switches and highlights are drawn in.
+function slinky:accentColor()
+	return theme.Accent()
+end
+
+--[[ Calls paint(color) with the accent at once and again after every change of it, each call under
+pcall; while the rainbow runs, at most once per accentQueue.gap, with the newest colour. Returns the
+function that stops it. After an unload it does nothing. ]]
+function slinky:followAccent(paint)
+	if type(paint) ~= 'function' or self.loaded == nil then
+		return function() end
+	end
+	local entry = {paint = paint}
+	local list = table.clone(accentPaints)
+	table.insert(list, entry)
+	accentPaints = list
+	pcall(paint, theme.Accent())
+	return function()
+		entry.paint = nil
+		local index = table.find(accentPaints, entry)
+		if index then
+			local rest = table.clone(accentPaints)
+			table.remove(rest, index)
+			accentPaints = rest
+		end
+	end
 end
 
 do
@@ -5887,7 +5965,11 @@ it early), and a phone without the button has no way into the menu. A button sti
 The piston face is 8 by 8 cells, not an image: on a touch device this GUI draws uploaded ids and
 never files. The CanvasGroup's UICorner clips the cells, and each reaches one pixel into the next so
 no seam shows. Hide Pistonware Mobile Button works through transparency rather than Visible, and the
-Mod Overlay is placed again to keep clear of the button. ]]
+Mod Overlay is placed again to keep clear of the button.
+
+The orange cells follow the accent: they take its hue, and their saturation and brightness are
+scaled by the accent's over those of #F07A1F, the orange the face was drawn in, so the shading
+stays. The greys stay as they are. A face whose button has been replaced stops following. ]]
 function slinky:ensureMenuButton()
 	if not (isMobile() and gui) then return end
 	if self.menuButton and self.menuButton.Parent then return end
@@ -5919,15 +6001,23 @@ function slinky:ensureMenuButton()
 	face.Size = UDim2.fromScale(1, 1)
 	face.Parent = button
 	addCorner(face, UDim.new(0, 8))
+	local baseSat, baseValue = select(2, Color3.fromRGB(240, 122, 31):ToHSV())
+	local shades = {}
 	for row, line in PISTON_FACE do
 		local column = 0
 		for hex in line:gmatch('%x+') do
 			local cell = Instance.new('Frame')
-			cell.BackgroundColor3 = Color3.fromHex(hex)
+			local color = Color3.fromHex(hex)
+			cell.BackgroundColor3 = color
 			cell.BorderSizePixel = 0
 			cell.Position = UDim2.fromScale(column / 8, (row - 1) / 8)
 			cell.Size = UDim2.new(1 / 8, 1, 1 / 8, 1)
 			cell.Parent = face
+			local _, sat, value = color:ToHSV()
+			if sat > 0 then
+				shades[hex] = shades[hex] or {sat = sat / baseSat, value = value / baseValue, cells = {}}
+				table.insert(shades[hex].cells, cell)
+			end
 			column += 1
 		end
 	end
@@ -5947,6 +6037,22 @@ function slinky:ensureMenuButton()
 		face.GroupTransparency = 1
 		stroke.Transparency = 1
 	end
+	local stopFace
+	stopFace = self:followAccent(function(accent)
+		if self.menuButton ~= button then
+			if stopFace then
+				stopFace()
+			end
+			return
+		end
+		local hue, sat, value = accent:ToHSV()
+		for _, shade in shades do
+			local color = Color3.fromHSV(hue, math.min(shade.sat * sat, 1), math.min(shade.value * value, 1))
+			for _, cell in shade.cells do
+				cell.BackgroundColor3 = color
+			end
+		end
+	end)
 	pcall(ui.applyHudZoom)
 
 	button.MouseButton1Click:Connect(function()
@@ -8111,30 +8217,41 @@ end
 phone the open menu covers most of them, so it hides the window, the key footer and the dim but
 leaves the menu open; the Done pill or the menu key brings the window back. A menu shut another way
 (Unload, a module's hold gesture) stops it through a shut hook, run by the deferred Visible watcher,
-never inside the property change. ]]
+never inside the property change.
+
+The pill's tint, its ring and the word Done are in the accent. It is painted as it shows, and again
+on each change of the accent while it shows. ]]
 function build.moveHud(pane)
-	local LOADER_ORANGE = Color3.fromRGB(240, 122, 31)
 	local done = ui.new('TextButton', {
 		Name = 'MoveHudDone',
 		AnchorPoint = Vector2.new(0.5, 0),
 		AutoButtonColor = false,
 		AutomaticSize = Enum.AutomaticSize.X,
-		BackgroundColor3 = Color3.fromRGB(10, 10, 10):Lerp(LOADER_ORANGE, 0.1),
 		BackgroundTransparency = 0.3,
 		BorderSizePixel = 0,
 		FontFace = Font.fromEnum(Enum.Font.Code),
 		RichText = true,
 		Size = UDim2.fromOffset(0, 32),
-		Text = '<font color="#9E9E9E">&gt;</font> <font color="#F07A1F">Done</font>  <font color="#A3A19D">drag your HUD into place</font>',
 		TextColor3 = Color3.fromRGB(230, 230, 230),
 		TextSize = 15,
 		Visible = false,
 		ZIndex = 30
 	}, clickgui)
 	ui.corner(done, UDim.new(1, 0))
-	ui.stroke(done, LOADER_ORANGE, 1, 0.55)
+	local stroke = ui.stroke(done, nil, 1, 0.55)
 	ui.padding(done, 16, 16, 0, 0)
 	ui.hudScale(done)
+	local function paint(accent)
+		done.BackgroundColor3 = Color3.fromRGB(10, 10, 10):Lerp(accent, 0.1)
+		done.Text = '<font color="#9E9E9E">&gt;</font> <font color="'..ui.hex(accent)..'">Done</font>  <font color="#A3A19D">drag your HUD into place</font>'
+		stroke.Color = accent
+	end
+	paint(theme.Accent())
+	slinky:followAccent(function(accent)
+		if layout.MovingHud then
+			paint(accent)
+		end
+	end)
 
 	local function stop()
 		if not layout.MovingHud then return end
@@ -8162,6 +8279,7 @@ function build.moveHud(pane)
 			layout.Dim.Visible = false
 		end
 		done.Position = UDim2.new(0.5, 0, 0, ui.insetUnits() + 12)
+		paint(theme.Accent())
 		done.Visible = true
 		slinky:blurCheck()
 	end
@@ -8538,8 +8656,12 @@ function build.settings()
 		sub = true
 	})
 	
+	--[[ The accent. Every change of it comes through changed, the rainbow's steps and a profile's
+	load among them, so slinky:followAccent's paints are handed it here (paintAccent paces them
+	while the rainbow runs) before the menu repaints. ]]
 	slinky.accent = slinky.categories.Main.settings:guiSlider('GUI Theme', {
 		changed = function(h, s, v)
+			paintAccent(h, s, v)
 			slinky:recolor(h, s, v, true)
 		end
 	})
@@ -8703,7 +8825,7 @@ function build.settings()
 	})
 end
 
---[[ Builds the key footer: the loader-style bottom row with the time left on the key, the version and a
+--[[ Builds the key footer: the loader-style bottom row with the time left on the key and a
 [discord] link, in the loader's palette rather than the menu theme. It sits in a place of its own at
 the screen's foot in the window's width and zoom (components.gui), as the window scrolls and has no
 foot; layout.FooterClear leaves room for it at the scroll's end.
@@ -8713,6 +8835,10 @@ drawn width; a window too narrow for the long line gets the short form. The coun
 hours, or hours and minutes under a day, from the expiry the loader stores; a developer run with no
 expiry is a lifetime key. It refreshes when the menu opens, when the window resizes and every 30 s
 while open; the open refresh is deferred so it does not run inside the write that opened the menu.
+
+The >_ badge and the LIFETIME or KEY word are in the accent, which state leaves to the caller by
+giving them no colour; EXPIRED stays red. On a change of the accent the badge is repainted, and with
+the menu open the line is written again from the parts the last refresh chose, measuring nothing.
 
 [discord] copies the invite and, on a computer, asks Discord's local RPC to open it. Only a real
 answer counts as opened: some request functions return a failure on a closed port instead of
@@ -8726,7 +8852,6 @@ function build.keyFooter()
 	local CODE = Font.fromEnum(Enum.Font.Code)
 	local INTER = fonts.face('Medium')
 	local INTER_MEASURE = 1.2
-	local ORANGE = Color3.fromRGB(240, 122, 31)
 	local GREY = Color3.fromRGB(110, 110, 110)
 	local LINE = Color3.fromRGB(237, 237, 237)
 	local FOOTER_HEIGHT, FOOTER_GAP, TEXT_LEFT = 32, 8, 39
@@ -8756,7 +8881,7 @@ function build.keyFooter()
 		Position = UDim2.fromOffset(7, 6),
 		Size = UDim2.fromOffset(24, 20),
 		Text = '>_',
-		TextColor3 = ORANGE,
+		TextColor3 = theme.Accent(),
 		TextSize = 12,
 		ZIndex = 2
 	}, bar)
@@ -8785,18 +8910,6 @@ function build.keyFooter()
 		ZIndex = 2
 	}, bar)
 	ui.list(corner, 14, true, Enum.HorizontalAlignment.Right)
-	ui.new('TextLabel', {
-		Name = 'Version',
-		AutomaticSize = Enum.AutomaticSize.X,
-		BackgroundTransparency = 1,
-		FontFace = INTER,
-		LayoutOrder = 2,
-		Size = UDim2.fromOffset(0, 22),
-		Text = 'v'..slinky.version,
-		TextColor3 = GREY,
-		TextSize = 14,
-		ZIndex = 2
-	}, corner)
 	local discord = ui.new('TextButton', {
 		Name = 'Discord',
 		AutoButtonColor = false,
@@ -8810,7 +8923,7 @@ function build.keyFooter()
 		TextSize = 14,
 		ZIndex = 2
 	}, corner)
-	for _, object in {label, discord, corner:FindFirstChild('Version')} do
+	for _, object in {label, discord} do
 		fonts.Registry[object] = {Role = 'Medium'}
 	end
 	ui.hover(discord, function()
@@ -8832,7 +8945,7 @@ function build.keyFooter()
 			return nil, nil, '>', thanks, '', thanks
 		end
 		if expire < 0 then
-			return 'LIFETIME', '#F07A1F', '>', thanks, '', 'Lifetime key'
+			return 'LIFETIME', nil, '>', thanks, '', 'Lifetime key'
 		end
 		local left = math.max(expire - os.time(), 0)
 		if left == 0 then
@@ -8844,7 +8957,13 @@ function build.keyFooter()
 		if hours > 0 then table.insert(parts, unit(hours, 'hour')) end
 		if days == 0 and (minutes > 0 or hours == 0) then table.insert(parts, unit(math.max(minutes, 1), 'minute')) end
 		local value = table.concat(parts, ', ')
-		return 'KEY', '#F07A1F', '>', thanks..' Remaining Key Duration: ', value, value..' left'
+		return 'KEY', nil, '>', thanks..' Remaining Key Duration: ', value, value..' left'
+	end
+
+	local drawn = {}
+	local function draw(accent)
+		label.Text = '<font color="#9E9E9E">'..drawn.chevron..'</font> '
+			..(drawn.word and '<font color="'..(drawn.hex or ui.hex(accent))..'">'..drawn.word..'</font>  ' or '')..drawn.body
 	end
 
 	local function refresh()
@@ -8854,7 +8973,7 @@ function build.keyFooter()
 		local word, hex, chevron, lead, value, short = state()
 		local cornerWidth = 120
 		pcall(function()
-			cornerWidth = (getfontbounds('v'..slinky.version, 14, INTER).X + getfontbounds('[discord]', 14, INTER).X) * INTER_MEASURE + 14
+			cornerWidth = getfontbounds('[discord]', 14, INTER).X * INTER_MEASURE
 		end)
 		local room = window.Size.X.Offset - TEXT_LEFT - cornerWidth - 16 - 12
 		label.Size = UDim2.new(1, -(TEXT_LEFT + cornerWidth + 16 + 12), 1, 0)
@@ -8862,11 +8981,19 @@ function build.keyFooter()
 		pcall(function()
 			fits = getfontbounds(chevron..' '..(word and word..'  ' or '')..lead..value, 14, INTER).X * INTER_MEASURE <= room
 		end)
-		local body = fits and lead..(value ~= '' and '<font color="#EDEDED">'..value..'</font>' or '')
+		drawn.body = fits and lead..(value ~= '' and '<font color="#EDEDED">'..value..'</font>' or '')
 			or (value ~= '' and '<font color="#EDEDED">'..short..'</font>' or short)
-		label.Text = '<font color="#9E9E9E">'..(chevron == '<' and '&lt;' or '&gt;')..'</font> '
-			..(word and '<font color="'..hex..'">'..word..'</font>  ' or '')..body
+		drawn.word, drawn.hex = word, hex
+		drawn.chevron = chevron == '<' and '&lt;' or '&gt;'
+		draw(theme.Accent())
 	end
+
+	slinky:followAccent(function(accent)
+		badge.TextColor3 = accent
+		if drawn.word and not drawn.hex and slinky.menuOpen then
+			draw(accent)
+		end
+	end)
 
 	local busy = false
 	discord.MouseButton1Click:Connect(function()
@@ -11082,11 +11209,14 @@ overlay is then switched off, open dropdowns are closed (each watches every pres
 of its own) and the connections are cleaned. The mobile blur is cleared unconditionally: blurCheck
 runs only with threadFix, and the executors without it are the mobile ones that use the BlurEffect.
 The holder folder in CoreGui is destroyed too, or a queued teleport that re-injects on each server
-would leave one per hop. ]]
+would leave one per hop. The accent's paints (slinky:followAccent) are dropped before anything is
+taken down, and a rainbow pass still waiting stands down. ]]
 function slinky:unload()
 	if self:canSave() then self:save() end
 	self:blockSaving()
 	self.loaded = nil
+	accentPaints = {}
+	accentQueue.serial += 1
 
 	for _, module in orderedModules(self.moduleOrder) do
 		if module.bind and module.bind.mobile then
@@ -15181,9 +15311,6 @@ components.gui = function(props, children, api)
 	component.notificationsCard = staticCard('Notifications', 'Informs you when certain actions are performed.')
 	settingsHosts.Default = component.guiCard.Body
 	settingsHosts.Notifications = component.notificationsCard.Body
-	ui.text(component.guiCard.Body, {Text = 'Pistonware '..slinky.version, Size = 12, Color = theme.Muted, AlignX = Enum.TextXAlignment.Right, Props = {
-		LayoutOrder = 100000, Name = 'Version', Size = UDim2.new(1, -theme.Inset * 2, 0, 22)
-	}})
 
 	local settingspane = components.settingsPane({
 		name = 'Settings',
@@ -16904,7 +17031,8 @@ the menu is open. A moveable overlay starts below Roblox's top bar, a step on fr
 before it, takes the phone zoom, and with the menu open its own content drags it as well; unpinned,
 it shows only while the menu is open. A hold-mode overlay is on only while its key is down, so it
 loads off. It is shown and hidden with the menu after its change (ui.whenMenu), never inside the
-write to Visible. Where it starts and whether it starts pinned are its own, not a profile's. ]]
+write to Visible. Where it starts and whether it starts pinned are its own, not a profile's. A pin
+that is on is drawn in the accent and follows it until the overlay is destroyed. ]]
 components.overlay = function(props, children, api)
 	local display = props.label or (props.name == 'Text GUI' and 'Mod Overlay' or props.name)
 	local view = ui.card({
@@ -16962,7 +17090,7 @@ components.overlay = function(props, children, api)
 		ui.hudScale(window)
 	end
 	ui.corner(window, 10)
-	local PIN_ON, PIN_OFF = Color3.fromRGB(240, 122, 31), Color3.fromRGB(150, 150, 150)
+	local PIN_OFF = Color3.fromRGB(150, 150, 150)
 	local stroke = ui.stroke(window, Color3.new(1, 1, 1), 1, 0.9)
 	stroke.Enabled = not fixed
 	if not fixed then
@@ -16979,8 +17107,8 @@ components.overlay = function(props, children, api)
 	}})
 	addTooltip(pin, 'Pin: keep it on screen with the menu closed')
 	local pinHovered = false
-	local function paintPin()
-		ui.paintIcon(pin, component.pinned and PIN_ON or (pinHovered and theme.SubTextLit or PIN_OFF))
+	local function paintPin(accent)
+		ui.paintIcon(pin, component.pinned and (accent or theme.Accent()) or (pinHovered and theme.SubTextLit or PIN_OFF))
 	end
 	ui.hover(pin, function()
 		pinHovered = true
@@ -16989,6 +17117,14 @@ components.overlay = function(props, children, api)
 		pinHovered = false
 		paintPin()
 	end)
+	local stopPin
+	if not fixed then
+		stopPin = slinky:followAccent(function(accent)
+			if component.pinned then
+				paintPin(accent)
+			end
+		end)
+	end
 	local customchildren = ui.new('Frame', {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromScale(0, 1),
@@ -17086,6 +17222,9 @@ components.overlay = function(props, children, api)
 	end
 
 	function component:Destroy()
+		if stopPin then
+			stopPin()
+		end
 		layout.remove(view.Card)
 		view.Card:Destroy()
 	end
@@ -17671,6 +17810,102 @@ components.targetsButton = function(props, children, api)
 	end)
 
 	return object(component, props.text)
+end
+
+--[[ A row of Targets-style chips any of which can be on (Nuker's Aim Mode: Head | Torso). choices name
+the chips in order; default lists those on at the start, all of them when it is left out. value maps
+each choice to whether it is on, and saves as that table. With none on the title turns red, as
+Targets does; what that means is the caller's to decide. ]]
+components.chips = function(props, children, api)
+	local component = {
+		kind = 'chips',
+		index = getTableSize(api.options),
+		value = {},
+		pills = {}
+	}
+
+	local row = ui.new('Frame', {
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = props.order or 0,
+		Size = UDim2.new(1, 0, 0, 0),
+		Visible = props.visible == nil or props.visible
+	}, children)
+	component.row = row
+	ui.list(row, 0)
+	local line = ui.row(row, {order = 1})
+	local title = ui.rowLabel(line, props)
+	addTooltip(line, props.about)
+	local holder = ui.new('Frame', {
+		Name = 'Chips',
+		AnchorPoint = Vector2.new(1, 0.5),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(1, -theme.Inset, 0.5, 0),
+		Size = UDim2.fromOffset(0, 24)
+	}, line)
+	ui.list(holder, 6, true, Enum.HorizontalAlignment.Right)
+	props.changed = props.changed or function() end
+
+	function component:recolor(hue, sat, val, isRainbow)
+		local accent = accentFor(self.index, 0.075, hue, sat, val, isRainbow)
+		for _, pill in self.pills do
+			if pill.enabled then
+				pill:paint(accent)
+			end
+		end
+	end
+
+	function component:updateText()
+		local any = false
+		for _, choice in props.choices do
+			local on = self.pills[choice] ~= nil and self.pills[choice].enabled
+			self.value[choice] = on
+			any = any or on
+		end
+		if title then
+			title.TextColor3 = any and (props.sub and theme.SubText or theme.Label) or theme.Red
+		end
+	end
+
+	function component:load(value)
+		if type(value) ~= 'table' then return end
+		for _, choice in props.choices do
+			local pill = self.pills[choice]
+			if pill and type(value[choice]) == 'boolean' and pill.enabled ~= value[choice] then
+				pill:flip()
+			end
+		end
+	end
+
+	function component:save()
+		local saved = {}
+		for _, choice in props.choices do
+			saved[choice] = self.value[choice] == true
+		end
+		return saved
+	end
+
+	for order, choice in props.choices do
+		component.pills[choice] = components.targetsButton({
+			text = choice,
+			order = order,
+			targets = component,
+			changed = function()
+				props.changed(component.value)
+			end
+		}, holder, holder)
+	end
+	for _, choice in props.choices do
+		if props.default == nil or table.find(props.default, choice) then
+			component.pills[choice]:flip()
+		end
+	end
+	component:updateText()
+
+	api.options[props.name] = component
+
+	return object(component, props.name)
 end
 
 --[[ A text option in a pill. The pill clips, so a pasted blob (a 20,000-character FFlag list) stays

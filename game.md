@@ -117,9 +117,9 @@ helper:
 | Block interaction | `getBlockHealth`, `getBlockHits`, `calculatePath`, `boundary`, `frontOf`, `bedwars.placeBlock`, `bedwars.breakBlock` | Check breakability, choose a reachable dig position, place blocks, and send block damage. |
 | State and queues | `flushInventoryEvents`, `updateStore`, `isEveryoneDead`, `joinQueue`, `sendChat` | Keep inventory state current and drive local queue/chat utilities. |
 | Staff response | `getRole`, `staffFunction`, `checkFriends`, `matchRunningFor`, `isSpectating`, `checkJoin`, `playerAdded` | Detect configured staff/operator conditions and apply the selected local response. |
-| World automation | `fixPosition`, `switchHotbarItem`, `getBedNear`, `getBlocks`, `getPyramid`, `lootChest`, `getPlacedBlocksInPoints` | Support AutoSuffocate, AutoTool, BedProtector, ChestSteal, Schematica, and related modules. |
+| World automation | `fixPosition`, `switchHotbarItem`, `getBedNear`, `getBlocks`, `getPyramid`, `lootChest` | Support AutoSuffocate, AutoTool, BedProtector, ChestSteal, and related modules. |
 | Shop/inventory | `getShopNPC`, `canBuy`, `buyItem`, `buyUpgrade`, `buyTool`, `consumeCheck` | Resolve shop purchases and local consumption checks. |
-| UI and integration boundary | `CreateWindow`, `HotbarList`, `removeGameNametags`, `restoreGameNametags`, `modifyconstant`, `choosesong`, `updateVolumes`, `sendInputType`, `resolveInputType`, `downloadBedwars`, `republishKey` | Build local UI, patch reversible presentation hooks, resolve device state, and publish integration state. |
+| UI and integration boundary | `CreateWindow`, `HotbarList`, `removeGameNametags`, `restoreGameNametags`, `modifyconstant`, `updateVolumes`, `sendInputType`, `resolveInputType`, `downloadBedwars`, `republishKey` | Build local UI, patch reversible presentation hooks, resolve device state, and publish integration state. |
 
 The most important control-flow fact is the `run` function at the top of the adapter: each module
 registration is protected by `pcall`, so a failure should be isolated to that module. The
@@ -150,18 +150,18 @@ in a saved profile as proof of an implementation here.
 
 ### Complete checked-in module inventory
 
-These are the 59 modules declared by `games/6872274481.lua`, grouped by the source category
+These are the 57 modules declared by `games/6872274481.lua`, grouped by the source category
 the module is declared in:
 
 | Source category | Modules |
 | --- | --- |
 | Combat | `AimAssist`, `NoClickDelay`, `Reach`, `Sprint`, `TriggerBot`, `Velocity` |
 | Blatant | `AntiFall`, `FastBreak`, `Fly`, `HitBoxes`, `KeepSprint`, `NoSlowdown`, `Speed` |
-| World | `SafeWalk`, `Anti-AFK`, `AutoSuffocate`, `AutoTool`, `BedProtector`, `ChestSteal`, `Schematica` |
+| World | `SafeWalk`, `Anti-AFK`, `AutoSuffocate`, `AutoTool`, `BedProtector`, `ChestSteal` |
 | Render | `BedESP`, `Health`, `KitESP`, `NameTags`, `StorageESP` |
 | Utility | `AutoBalloon`, `AutoCobalt`, `AutoPlay`, `AutoToxic`, `MissileTP`, `PickupRange`, `RavenTP`, `StaffDetector`, `TrapDisabler`, `DeviceSpoofer`, `HideNametag` |
 | Inventory | `AutoVoidDrop`, `ArmorSwitch`, `AutoBuy`, `AutoConsume`, `AutoHotbar`, `FastDrop` |
-| Legit | `Bed Break Effect`, `Clean Kit`, `Crosshair`, `Damage Indicator`, `FOV`, `FPS Boost`, `Hit Color`, `HitFix`, `Interface`, `Kill Effect`, `Reach Display`, `Song Beats`, `SoundChanger`, `UI Cleanup`, `Viewmodel`, `WinEffect` |
+| Legit | `Bed Break Effect`, `Clean Kit`, `Crosshair`, `Damage Indicator`, `FOV`, `FPS Boost`, `Hit Color`, `HitFix`, `Interface`, `Kill Effect`, `Reach Display`, `SoundChanger`, `UI Cleanup`, `Viewmodel`, `WinEffect` |
 
 Profile entries that do not have a corresponding checked-in implementation belong in the
 “external/unknown” bucket until an authorized implementation is available for review.
@@ -323,6 +323,8 @@ Observed validation-related values and behavior:
 - The `Reach` slider is `0..18` and writes `value + 2` into the local combat constant. The
   `AttackEntity` wrapper also records the requested reach and, when Reach or HitBoxes is enabled,
   rewrites the submitted self-position along the target direction using a `14.399`-stud baseline.
+  A hit sent without a ray then also gets one from the camera to the target (`cameraPosition`,
+  unit `cursorDirection`), since the server refuses an empty `raycast` table.
   This is client request manipulation, not a guarantee that the server accepts the attack.
 - `TriggerBot` uses the live sword attack range and raycasts/target checks before swinging. Its
   configured CPS range is `1..9` with a default of `7..7` in this adapter.
