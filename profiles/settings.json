@@ -21,6 +21,6 @@
 		"layout": {"compact": false, "wide": false},
 		"modules": {"teams_by_server": true, "use_team_color": true},
 		"notifications": {"notifications": true, "position": "Top left", "setting_toggle_alert": true, "toggle_alert": true},
-		"settings": {"allow_input_while_open": true, "gui_theme": {"preset": 2}, "rebind_gui": {"keys": ["RightShift"]}, "scale_preset": "Auto"}
+		"settings": {"allow_input_while_open": true, "gui_theme": {"r": 1, "g": 1, "b": 1}, "rebind_gui": {"keys": ["RightShift"]}, "scale_preset": "Auto"}
 	}
 }

@@ -6416,8 +6416,9 @@ function build.lists()
 		settings.json is the menu's state file, not a config: besides the theme and the windows it
 		holds the profile in use and the profile LIST shown in the Profiles tab, custom ones
 		included. Writing the repo's copy over it would wipe every custom profile from that list and
-		force the profile in use back to whatever shipped. Both are carried across, so the theme
-		still syncs, the user's own profiles stay local, and only shipped configs get replaced.
+		force the profile in use back to whatever shipped. Both are carried across, and so is the
+		GUI colour (settings.gui_theme): a sync used to put everyone back on the shipped colour.
+		The user's own profiles and colour stay local, and only shipped configs get replaced.
 	]]
 	local function keepOwnProfiles(path, content)
 		local ok, merged = pcall(function()
@@ -6428,6 +6429,13 @@ function build.lists()
 			if old then
 				if old.profile ~= nil then new.profile = old.profile end
 				if old.profiles ~= nil then new.profiles = old.profiles end
+				local oldSettings = type(old.settings) == 'table' and old.settings.settings
+				local theme = type(oldSettings) == 'table' and oldSettings.gui_theme
+				if theme ~= nil and theme ~= false then
+					new.settings = type(new.settings) == 'table' and new.settings or {}
+					new.settings.settings = type(new.settings.settings) == 'table' and new.settings.settings or {}
+					new.settings.settings.gui_theme = theme
+				end
 			end
 
 			return store.settingsText(new)
